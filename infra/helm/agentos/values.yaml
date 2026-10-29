@@ -1,0 +1,74 @@
+replicaCount: 1
+
+image:
+  repository: agentos/box-host
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8787
+
+agent:
+  stepBudget: 50
+  contextTokens: 128000
+  memorySynthesisEnabled: false
+  mcpStrictMode: false
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: agentos.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+secrets:
+  jwtSecret: ""
+  jwtSecretPrevious: ""
+  connectorEncryptionKey: ""
+  connectorEncryptionKeyPrevious: ""
+
+inference:
+  providers: "openai"
+  openaiApiKey: ""
+  anthropicApiKey: ""
+  ollamaBaseUrl: "http://ollama:11434"
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+postgres:
+  image: postgres:16-alpine
+  database: agentos
+  username: agentos
+  password: ""
+  storage: 20Gi
+  storageClassName: ""
+
+redis:
+  image: redis:7-alpine
+  storage: 2Gi
+  storageClassName: ""
+
+minio:
+  image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+  rootUser: agentos-minio
+  rootPassword: ""
+  storage: 50Gi
+  storageClassName: ""
+
+webhooks:
+  maxAttempts: 6
+  retentionDays: 30

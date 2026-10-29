@@ -1,0 +1,35 @@
+{
+  "title": "AgentOS VM and Tool Activity",
+  "uid": "agentos-vm-health",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Browser / VM tool calls per minute",
+      "type": "timeseries",
+      "description": "Proxy measure of browser and VM-related tool activity; container CPU, memory, and lifecycle gauges are not exported yet.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (tool, outcome) (rate(agentos_tool_calls_total{tool=~\"Browser.*|RunShell|ReadFile|WriteFile|AppendFile|ListDirectory|DeleteFile\"}[5m])) * 60",
+          "legendFormat": "{{tool}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Tool execution p95 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(agentos_tool_execution_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{tool}} p95"
+        }
+      ]
+    }
+  ]
+}

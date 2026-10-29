@@ -1,0 +1,23 @@
+{
+  "name": "@agentOS/tools",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@agentOS/shared": "workspace:*",
+    "@agentOS/vm-manager": "workspace:*",
+    "playwright": "1.55.1",
+    "zod": "4.6.6"
+  },
+  "devDependencies": {
+    "@types/bun": "1.1.14",
+    "typescript": "5.7.2"
+  }
+}

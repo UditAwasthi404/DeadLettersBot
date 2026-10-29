@@ -1,0 +1,28 @@
+{
+  "name": "@agentOS/shared",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./db": "./src/db/index.ts",
+    "./blob": "./src/blob/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1159.0",
+    "drizzle-orm": "0.45.2",
+    "ioredis": "5.4.2",
+    "postgres": "3.4.5"
+  },
+  "devDependencies": {
+    "@types/bun": "1.1.14",
+    "drizzle-kit": "0.31.11",
+    "typescript": "5.7.2"
+  }
+}

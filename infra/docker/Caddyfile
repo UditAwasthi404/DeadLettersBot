@@ -1,0 +1,3 @@
+{$AGENTOS_DOMAIN:localhost} {
+	reverse_proxy box-host:8787
+}

@@ -1,0 +1,10 @@
+apiVersion: v2
+name: agentos
+description: Self-hosted AgentOS gateway with PostgreSQL, Redis, and S3-compatible blob storage
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - agents
+  - automation
+  - self-hosted

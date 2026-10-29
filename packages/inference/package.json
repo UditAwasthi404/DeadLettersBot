@@ -1,0 +1,24 @@
+{
+  "name": "@agentOS/inference",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@agentOS/shared": "workspace:*",
+    "@ai-sdk/anthropic": "4.0.91",
+    "@ai-sdk/openai": "4.0.104",
+    "ai": "7.0.156",
+    "zod": "4.6.6"
+  },
+  "devDependencies": {
+    "@types/bun": "1.1.14",
+    "typescript": "5.7.2"
+  }
+}

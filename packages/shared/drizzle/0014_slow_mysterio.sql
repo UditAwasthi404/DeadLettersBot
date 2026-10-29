@@ -1,0 +1,1 @@
+ALTER TABLE "bots" ADD COLUMN "inference_settings" jsonb DEFAULT '{}'::jsonb NOT NULL;

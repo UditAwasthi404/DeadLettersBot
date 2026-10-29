@@ -1,0 +1,26 @@
+{
+  "name": "agentOS",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "pnpm": {
+    "overrides": {
+      "@esbuild-kit/core-utils>esbuild": "0.25.12",
+      "uuid": "11.1.1"
+    }
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "db:generate": "pnpm --filter @agentOS/shared db:generate",
+    "db:migrate": "pnpm --filter @agentOS/shared db:migrate"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "turbo": "2.9.14",
+    "typescript": "5.7.2"
+  }
+}

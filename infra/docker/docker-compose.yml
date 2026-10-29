@@ -1,0 +1,160 @@
+# Self-hosted local AgentOS stack.
+services:
+  box-host:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.host
+    environment:
+      PORT: 8787
+      METRICS_ENABLED: ${METRICS_ENABLED:-0}
+      API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-120}
+      BOT_STEP_BUDGET: ${BOT_STEP_BUDGET:-50}
+      MODEL_CONTEXT_TOKENS: ${MODEL_CONTEXT_TOKENS:-128000}
+      MEMORY_SYNTHESIS_ENABLED: ${MEMORY_SYNTHESIS_ENABLED:-0}
+      MCP_STRICT_MODE: ${MCP_STRICT_MODE:-0}
+      WEBHOOK_MAX_ATTEMPTS: ${WEBHOOK_MAX_ATTEMPTS:-6}
+      WEBHOOK_DELIVERY_RETENTION_DAYS: ${WEBHOOK_DELIVERY_RETENTION_DAYS:-30}
+      VM_MEMORY_BYTES: ${VM_MEMORY_BYTES:-2147483648}
+      VM_CPU_NANOS: ${VM_CPU_NANOS:-2000000000}
+      VM_PIDS_LIMIT: ${VM_PIDS_LIMIT:-512}
+      VM_HOST_IN_DOCKER: "1"
+      DATABASE_URL: postgresql://agentos:agentos@postgres:5432/agentos
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: minio
+      S3_SECRET_KEY: minio12345
+      S3_FORCE_PATH_STYLE: "true"
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      JWT_SECRET_PREVIOUS: ${JWT_SECRET_PREVIOUS:-}
+      CONNECTOR_ENCRYPTION_KEY: ${CONNECTOR_ENCRYPTION_KEY:-}
+      CONNECTOR_ENCRYPTION_KEY_PREVIOUS: ${CONNECTOR_ENCRYPTION_KEY_PREVIOUS:-}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-http://localhost:8787/v1/connectors/oauth/callback}
+      INFERENCE_MOCK: ${INFERENCE_MOCK:-1}
+      INFERENCE_PROVIDERS: ${INFERENCE_PROVIDERS:-openai,anthropic,ollama}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      vm-template: { condition: service_completed_successfully }
+
+  # Optional HTTPS entry point. Set AGENTOS_DOMAIN to a public DNS name to use
+  # Caddy's automatic certificate provisioning, or localhost for local testing.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    environment:
+      AGENTOS_DOMAIN: ${AGENTOS_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - box-host
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheusdata:/prometheus
+    depends_on:
+      - box-host
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me-before-use}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agentos
+      POSTGRES_PASSWORD: agentos
+      POSTGRES_DB: agentos
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentos -d agentos"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Build the VM image before the host starts; runtime instances are launched on demand.
+  vm-template:
+    build:
+      context: .
+      dockerfile: Dockerfile.vm
+    image: agentOS-vm
+    command: ["true"]
+    restart: "no"
+
+volumes:
+  pgdata:
+  miniodata:
+  caddydata:
+  caddyconfig:
+  prometheusdata:
+  grafanadata:
+
+networks:
+  default:
+    name: agentos

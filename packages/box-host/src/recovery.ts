@@ -1,0 +1,41 @@
+/** Crash recovery: re-enqueue turns left in 'running' (REQ-H04). */
+
+import { type Database, type RedisClient, bots, turns } from "@agentOS/shared";
+import { eq, or } from "drizzle-orm";
+import { enqueue } from "./scheduler.ts";
+
+export async function recoverInProgressTurns(
+  db: Database,
+  redis: RedisClient,
+): Promise<{ count: number; agentIds: string[] }> {
+  const pending = await db
+    .select()
+    .from(turns)
+    .where(or(eq(turns.state, "running"), eq(turns.state, "pending")));
+  const agentIds = new Set<string>();
+  for (const turn of pending) {
+    if (turn.state === "running")
+      await db.update(turns).set({ state: "pending" }).where(eq(turns.id, turn.id));
+    const [bot] = await db.select().from(bots).where(eq(bots.id, turn.botId)).limit(1);
+    if (!bot) {
+      console.warn(`[recovery] bot missing for turn ${turn.id}; skipped`);
+      continue;
+    }
+    const lane =
+      turn.type === "user"
+        ? "user"
+        : turn.type === "routine" || turn.type === "subagent"
+          ? "background"
+          : "agent";
+    await enqueue(redis, turn.botId, lane, {
+      turnId: turn.id,
+      runId: turn.runId,
+      botId: turn.botId,
+      accountId: bot.accountId,
+      priority: turn.input.priority,
+    });
+    agentIds.add(turn.botId);
+  }
+  console.info(`[recovery] re-enqueued ${pending.length} pending/in-progress turn(s)`);
+  return { count: pending.length, agentIds: [...agentIds] };
+}

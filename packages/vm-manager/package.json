@@ -1,0 +1,21 @@
+{
+  "name": "@agentOS/vm-manager",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "dockerode": "4.0.12"
+  },
+  "devDependencies": {
+    "@types/bun": "1.1.14",
+    "@types/dockerode": "3.3.32",
+    "typescript": "5.7.2"
+  }
+}

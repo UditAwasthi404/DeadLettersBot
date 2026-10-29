@@ -1,0 +1,51 @@
+{
+  "name": "@agentOS/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "electron": "electron .",
+    "build": "vite build && tsc -p tsconfig.electron.json",
+    "typecheck": "tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "start": "electron .",
+    "pack:dir": "pnpm build && electron-builder --dir",
+    "dist": "pnpm build && electron-builder"
+  },
+  "dependencies": {
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/react": "19.0.3",
+    "@types/react-dom": "19.0.2",
+    "@types/ws": "8.5.13",
+    "dmg-builder": "26.15.0",
+    "electron": "42.11.16",
+    "electron-builder": "26.15.0",
+    "electron-builder-squirrel-windows": "26.15.0",
+    "typescript": "5.7.2",
+    "vite": "6.4.4"
+  },
+  "build": {
+    "appId": "dev.agentos.desktop",
+    "productName": "AgentOS",
+    "directories": {
+      "output": "release"
+    },
+    "files": ["dist/**", "dist-electron/**", "package.json"],
+    "mac": {
+      "target": ["dmg"]
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

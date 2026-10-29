@@ -1,0 +1,29 @@
+{
+  "name": "@agentOS/box-host",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@agentOS/agent-core": "workspace:*",
+    "@agentOS/connectors": "workspace:*",
+    "@agentOS/inference": "workspace:*",
+    "@agentOS/routines": "workspace:*",
+    "@agentOS/shared": "workspace:*",
+    "@agentOS/tools": "workspace:*",
+    "@agentOS/vm-manager": "workspace:*",
+    "drizzle-orm": "0.45.2",
+    "hono": "4.13.11",
+    "ws": "8.21.0",
+    "zod": "4.6.6"
+  },
+  "devDependencies": {
+    "@types/bun": "1.1.14",
+    "@types/ws": "8.5.13",
+    "typescript": "5.7.2"
+  }
+}

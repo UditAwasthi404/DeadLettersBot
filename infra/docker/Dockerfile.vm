@@ -1,0 +1,14 @@
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb bash coreutils findutils util-linux ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 agent
+
+COPY ensure-bot-browser.sh /usr/local/bin/agentos-ensure-browser
+COPY controlled-exec.sh /usr/local/bin/agentos-controlled-exec
+RUN chmod 0755 /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-controlled-exec
+
+USER agent
+WORKDIR /home/agent
+CMD ["sleep", "infinity"]
