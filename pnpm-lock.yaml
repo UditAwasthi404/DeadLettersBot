@@ -252,9 +252,15 @@ importers:
 
   packages/vm-manager:
     dependencies:
+      '@agentOS/shared':
+        specifier: workspace:*
+        version: link:../shared
       dockerode:
         specifier: 4.0.12
         version: 4.0.12
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.0)(bun-types@1.1.37)(postgres@3.4.5)
     devDependencies:
       '@types/bun':
         specifier: 1.1.14
