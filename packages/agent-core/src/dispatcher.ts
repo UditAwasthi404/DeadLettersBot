@@ -23,6 +23,10 @@ export interface DispatcherDeps {
   vmId: string | null;
   browser: BrowserSession | null;
   signal?: AbortSignal;
+  localExec?: (
+    command: string,
+    cwd?: string,
+  ) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 }
 
 function withErrorFlag(result: unknown): { result: unknown; isError: boolean } {
@@ -39,6 +43,7 @@ const UNTRUSTED_TOOL_SOURCES: Record<string, string> = {
   ReadFile: "file_contents",
   ListDirectory: "filesystem_listing",
   RunShell: "shell_output",
+  RequestLocalExec: "local_shell_output",
   BrowserExtractContent: "browser_page",
   BrowserEvaluate: "browser_evaluation",
   BrowserScreenshot: "browser_screenshot",
@@ -46,18 +51,19 @@ const UNTRUSTED_TOOL_SOURCES: Record<string, string> = {
   FetchURL: "fetched_web_document",
 };
 
-function markUntrusted(source: string, payload: unknown): unknown {
-  if (
-    ["browser_page", "web_search", "fetched_web_document"].includes(source) &&
-    typeof payload === "object" &&
-    payload !== null &&
-    "trust" in payload &&
-    (payload as { trust?: unknown }).trust === "untrusted_external_data"
-  )
-    return payload;
-  return { trust: "untrusted_external_data", source, payload };
+export function wrapUntrusted(
+  source: string,
+  payload: unknown,
+): { trust: "untrusted_external_data"; source: string; content: string } {
+  const body = typeof payload === "string" ? payload : JSON.stringify(payload);
+  return {
+    trust: "untrusted_external_data",
+    source,
+    content: `[UNTRUSTED_EXTERNAL_DATA]\n${body}\n[/UNTRUSTED_EXTERNAL_DATA]`,
+  };
 }
 
+// tool_duration_ms is recorded by the turn runner around this call so MCP and connector tools share it.
 export async function dispatchTool(
   tc: ToolCall,
   catalog: CatalogTool[],
@@ -162,6 +168,18 @@ export async function dispatchTool(
         break;
       }
 
+      case "RequestLocalExec": {
+        if (!deps.localExec) {
+          raw = { error: "local execution is not available" };
+          break;
+        }
+        raw = await deps.localExec(
+          String(tc.args.command ?? ""),
+          tc.args.cwd !== undefined ? String(tc.args.cwd) : undefined,
+        );
+        break;
+      }
+
       case "SearchWeb":
         raw = await searchWeb(String(tc.args.query ?? ""));
         break;
@@ -181,8 +199,7 @@ export async function dispatchTool(
 
     const flagged = withErrorFlag(raw);
     const source = UNTRUSTED_TOOL_SOURCES[tc.name];
-    const result =
-      !flagged.isError && source ? markUntrusted(source, flagged.result) : flagged.result;
+    const result = !flagged.isError && source ? wrapUntrusted(source, flagged.result) : flagged.result;
     const { isError } = flagged;
     return { toolCallId: tc.id, name: tc.name, result, isError };
   } catch (err) {

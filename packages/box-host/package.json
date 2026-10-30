@@ -16,8 +16,11 @@
     "@agentOS/shared": "workspace:*",
     "@agentOS/tools": "workspace:*",
     "@agentOS/vm-manager": "workspace:*",
+    "@hono/zod-openapi": "^1.6.3",
+    "@scalar/hono-api-reference": "^0.12.16",
     "drizzle-orm": "0.45.2",
     "hono": "4.13.11",
+    "pino": "^10.4.0",
     "ws": "8.21.0",
     "zod": "4.6.6"
   },

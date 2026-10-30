@@ -4,10 +4,12 @@
  */
 import { inferenceReady } from "@agentOS/inference";
 import { BlobStore, createDb, createRedis } from "@agentOS/shared";
-import { createVMManager } from "@agentOS/vm-manager";
+import { createVMManager, gcIdleVMs } from "@agentOS/vm-manager";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { validateRuntimeConfig } from "./config.ts";
+import { loggedError, logger } from "./logger.ts";
+import { startFileChangeWatcher } from "./file-watch.ts";
 import { createGateway, runScheduledRoutines } from "./gateway.ts";
 import { acquireProcessLock } from "./lock.ts";
 import { processMcpHealthChecks } from "./mcp-health.ts";
@@ -25,11 +27,11 @@ const PORT = Number(process.env.PORT ?? 8787);
 
 function installCrashHandlers(): void {
   process.on("uncaughtException", (err) => {
-    console.error("[crash] uncaughtException", err);
+    logger.fatal(loggedError(err), "uncaughtException");
     process.exit(1);
   });
   process.on("unhandledRejection", (reason) => {
-    console.error("[crash] unhandledRejection", reason);
+    logger.fatal(loggedError(reason), "unhandledRejection");
     process.exit(1);
   });
 }
@@ -86,45 +88,46 @@ export async function runHostMain(): Promise<void> {
   const { websocket } = createGateway(app, gatewayDeps);
 
   void processMcpHealthChecks(gatewayDeps).catch((err) =>
-    console.error("[mcp] health worker failed", err),
+    logger.error(loggedError(err), "mcp health worker failed"),
   );
   const mcpHealthTimer = setInterval(() => {
     void processMcpHealthChecks(gatewayDeps).catch((err) =>
-      console.error("[mcp] health worker failed", err),
+      logger.error(loggedError(err), "mcp health worker failed"),
     );
   }, 60_000);
   mcpHealthTimer.unref();
 
+  startFileChangeWatcher(gatewayDeps);
   void runScheduledRoutines(gatewayDeps);
   const routineTimer = setInterval(() => void runScheduledRoutines(gatewayDeps), 15_000);
   routineTimer.unref();
 
   void processWebhookDeliveries(db).catch((err) =>
-    console.error("[webhooks] delivery worker failed", err),
+    logger.error(loggedError(err), "webhook delivery worker failed"),
   );
   const webhookTimer = setInterval(() => {
     void processWebhookDeliveries(db).catch((err) =>
-      console.error("[webhooks] delivery worker failed", err),
+      logger.error(loggedError(err), "webhook delivery worker failed"),
     );
   }, 5_000);
   webhookTimer.unref();
 
   void processMemoryExtractionJobs(gatewayDeps).catch((err) =>
-    console.error("[memory] extraction worker failed", err),
+    logger.error(loggedError(err), "memory extraction worker failed"),
   );
   const memoryExtractionTimer = setInterval(() => {
     void processMemoryExtractionJobs(gatewayDeps).catch((err) =>
-      console.error("[memory] extraction worker failed", err),
+      logger.error(loggedError(err), "memory extraction worker failed"),
     );
   }, 10_000);
   memoryExtractionTimer.unref();
 
   void processMemorySynthesisJobs(gatewayDeps).catch((err) =>
-    console.error("[memory] synthesis worker failed", err),
+    logger.error(loggedError(err), "memory synthesis worker failed"),
   );
   const memorySynthesisTimer = setInterval(() => {
     void processMemorySynthesisJobs(gatewayDeps).catch((err) =>
-      console.error("[memory] synthesis worker failed", err),
+      logger.error(loggedError(err), "memory synthesis worker failed"),
     );
   }, 15_000);
   memorySynthesisTimer.unref();
@@ -133,18 +136,28 @@ export async function runHostMain(): Promise<void> {
     void drainAgent(agentId, gatewayDeps);
   }
 
+  // shortcut: no 7-day warning before an idle VM is removed; add that when a notification channel exists.
+  const gcTimer = setInterval(() => {
+    void gcIdleVMs(vm, db)
+      .then((count) => {
+        if (count > 0) logger.info({ count }, "terminated idle account VMs");
+      })
+      .catch((err) => logger.error(loggedError(err), "gc error"));
+  }, 86_400_000);
+  gcTimer.unref();
+
   // 7. Listen
   Bun.serve({
     port: PORT,
     fetch: app.fetch,
     websocket,
   });
-  console.info(`box-host ready on :${PORT}`);
+  logger.info({ port: PORT }, "box-host ready");
 }
 
 if (import.meta.main) {
   runHostMain().catch((err) => {
-    console.error("[startup] failed", err);
+    logger.fatal(loggedError(err), "startup failed");
     process.exit(1);
   });
 }

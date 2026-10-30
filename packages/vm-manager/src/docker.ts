@@ -57,6 +57,9 @@ export class NoopVMManager implements VMManager {
   async getVMStatus(vmId: string): Promise<VMInfo> {
     return { vmId, accountId: "", status: "terminated" };
   }
+  async listVMs(): Promise<VMInfo[]> {
+    return [];
+  }
   async execInContainer(
     _vmId: string,
     _cmd: string[],
@@ -67,6 +70,13 @@ export class NoopVMManager implements VMManager {
   }
   async ensureBotBrowser(_vmId: string, _botId: string): Promise<number> {
     throw new Error("browser VM not available");
+  }
+  async ensureBotVnc(_vmId: string, _botId: string): Promise<number> {
+    throw new Error("vnc not available");
+  }
+  async watchFiles(): Promise<{ stop: () => Promise<void>; done: Promise<void> }> {
+    // shortcut: no inotify without a Docker VM; file-change routines stay idle until the VM is running.
+    return { stop: async () => {}, done: new Promise(() => {}) };
   }
 }
 
@@ -177,6 +187,12 @@ export class DockerVMManager implements VMManager {
 
   async suspendVM(vmId: string): Promise<void> {
     await this.docker.getContainer(vmId).pause();
+  }
+
+  async listVMs(): Promise<VMInfo[]> {
+    const infos: VMInfo[] = [];
+    for (const entry of Object.values(loadState())) infos.push(await this.getVMStatus(entry.vmId));
+    return infos;
   }
 
   async terminateVM(vmId: string): Promise<void> {
@@ -306,6 +322,69 @@ export class DockerVMManager implements VMManager {
     if (result.exitCode !== 0 || !Number.isInteger(port) || port < 1024 || port > 65535)
       throw new Error(`failed to start isolated browser: ${result.stderr || result.stdout}`);
     return port;
+  }
+
+  async ensureBotVnc(vmId: string, botId: string): Promise<number> {
+    if (!/^[0-9a-f-]{36}$/i.test(botId)) throw new Error("invalid bot id for vnc");
+    const result = await this.execInContainer(vmId, [
+      "bash",
+      "/usr/local/bin/agentos-ensure-vnc",
+      botId,
+    ]);
+    const port = Number(result.stdout.trim());
+    if (result.exitCode !== 0 || !Number.isInteger(port) || port < 1024 || port > 65535)
+      throw new Error(`failed to start vnc: ${result.stderr || result.stdout}`);
+    return port;
+  }
+
+  async watchFiles(
+    vmId: string,
+    path: string,
+    onEvent: (file: string) => void,
+  ): Promise<{ stop: () => Promise<void>; done: Promise<void> }> {
+    const container = this.docker.getContainer(vmId);
+    const exec = await container.exec({
+      Cmd: ["inotifywait", "-m", "-e", "modify,create,delete,move", "--format", "%w%f", path],
+      AttachStdout: true,
+      AttachStderr: true,
+      User: "agent",
+    });
+    const stream = await exec.start({ hijack: true, stdin: false });
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    this.docker.modem.demuxStream(stream, stdout, stderr);
+    let buffer = "";
+    stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) if (line.trim()) onEvent(line.trim());
+    });
+    stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString().trim();
+      if (text) console.warn("[vm-manager] inotify", text.slice(0, 300));
+    });
+    let stopped = false;
+    const done = new Promise<void>((resolve) => {
+      stream.on("end", () => resolve());
+      stream.on("error", () => resolve());
+    });
+    const stop = async () => {
+      if (stopped) return;
+      stopped = true;
+      stream.destroy();
+      const details = await exec.inspect().catch(() => null);
+      const pid = details?.Pid;
+      if (details?.Running && typeof pid === "number" && pid > 1)
+        await this.execInContainer(vmId, [
+          "bash",
+          "-c",
+          'kill -TERM "$1"',
+          "agentos-kill",
+          String(pid),
+        ]).catch(() => {});
+    };
+    return { stop, done };
   }
 }
 

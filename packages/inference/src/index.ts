@@ -15,3 +15,4 @@ export type {
   InferenceTool,
   ProviderFactory,
 } from "./session.ts";
+export { observeInferenceStream } from "./session.ts";

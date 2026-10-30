@@ -12,8 +12,9 @@ import {
   dispatchTool,
   renderSystemPrompt,
   toInferenceTool,
+  wrapUntrusted,
 } from "@agentOS/agent-core";
-import type { InferenceSession } from "@agentOS/inference";
+import { type InferenceSession, observeInferenceStream } from "@agentOS/inference";
 import {
   type Attachment,
   BUCKETS,
@@ -28,11 +29,13 @@ import {
   type ToolResult,
   auditLog,
   bots,
+  adjustGauge,
   incrementCounter,
   mcpServers,
   memories,
   memoryExtractionJobs,
   observeHistogram,
+  observeMillis,
   routineRuns,
   skills,
   steps,
@@ -42,6 +45,7 @@ import { BrowserSession } from "@agentOS/tools";
 import type { VMManager } from "@agentOS/vm-manager";
 import { and, desc, eq, notInArray } from "drizzle-orm";
 import { TranscriptAppendAfterCheckpointError } from "./errors.ts";
+import { loggedError, logger } from "./logger.ts";
 import { deliverWebhookEvent } from "./webhooks.ts";
 
 const BOT_STEP_BUDGET = Number(process.env.BOT_STEP_BUDGET ?? 50);
@@ -84,7 +88,7 @@ export interface RunContext {
     hopCount: number,
   ) => Promise<void>;
   connectorCall?: (
-    service: "gmail" | "google-calendar" | "google-drive",
+    service: string,
     action: string,
     params: Record<string, unknown>,
   ) => Promise<unknown>;
@@ -236,7 +240,7 @@ async function requestSummary(session: InferenceSession, source: string): Promis
     },
   ];
   let output = "";
-  for await (const event of session.streamComplete(prompt)) {
+  for await (const event of observeInferenceStream(session, prompt)) {
     if (event.type === "token") output += event.delta;
   }
   const summary = output.trim();
@@ -366,6 +370,98 @@ async function ensureBrowser(ctx: RunContext): Promise<void> {
   await ctx.browser.connect(vmInfo.ipAddress, port);
 }
 
+async function attachmentsForModel(
+  ctx: RunContext,
+  attachments: Attachment[],
+): Promise<Array<Attachment & { text?: string }>> {
+  const rendered: Array<Attachment & { text?: string }> = [];
+  for (const attachment of attachments) {
+    const textual =
+      attachment.mimeType.startsWith("text/") || attachment.mimeType === "application/json";
+    if (!textual) {
+      rendered.push(attachment);
+      continue;
+    }
+    const bytes = await ctx.blob.get(BUCKETS.conversationBlobs, attachment.uri);
+    rendered.push({ ...attachment, text: new TextDecoder().decode(bytes ?? new Uint8Array()) });
+  }
+  return rendered;
+}
+
+async function requestHandoff(ctx: RunContext, reason: string): Promise<boolean> {
+  const key = `handoff:${ctx.runId}`;
+  await ctx.redis.del(key);
+  await ctx.redis.hset(
+    `handoffs:${ctx.accountId}`,
+    ctx.runId,
+    JSON.stringify({ agentId: ctx.agentId, runId: ctx.runId, reason }),
+  );
+  await ctx.blob.put(
+    BUCKETS.conversationBlobs,
+    ctx.blob.conversationKey(ctx.accountId, ctx.botId, ctx.turnId, `handoff-${ctx.runId}.json`),
+    JSON.stringify({ agentId: ctx.agentId, runId: ctx.runId, reason, waiting: true }),
+    "application/json",
+  );
+  ctx.send({ type: "secureHandoff", agentId: ctx.agentId, runId: ctx.runId, reason });
+  // shortcut: this wait lives in the worker. A host restart resumes the last completed step.
+  while (true) {
+    if (await isCancelled(ctx.redis, ctx.runId)) {
+      await ctx.redis.del(key);
+      await ctx.redis.hdel(`handoffs:${ctx.accountId}`, ctx.runId);
+      return false;
+    }
+    if ((await ctx.redis.get(key)) === "returned") {
+      await ctx.redis.del(key);
+      await ctx.redis.hdel(`handoffs:${ctx.accountId}`, ctx.runId);
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+}
+
+async function sendLocalExecRequest(
+  ctx: RunContext,
+  command: string,
+  cwd?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const actionId = crypto.randomUUID();
+  const key = `local-exec-result:${ctx.runId}:${actionId}`;
+  await ctx.redis.del(key);
+  ctx.send({
+    type: "localExecRequest",
+    agentId: ctx.agentId,
+    runId: ctx.runId,
+    actionId,
+    command,
+    cwd,
+  });
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    if (await isCancelled(ctx.redis, ctx.runId))
+      return { stdout: "", stderr: "local execution cancelled", exitCode: 1 };
+    const raw = await ctx.redis.get(key);
+    if (raw) {
+      await ctx.redis.del(key);
+      try {
+        const parsed = JSON.parse(raw) as {
+          stdout?: unknown;
+          stderr?: unknown;
+          exitCode?: unknown;
+        };
+        return {
+          stdout: String(parsed.stdout ?? "").slice(0, 8000),
+          stderr: String(parsed.stderr ?? "").slice(0, 8000),
+          exitCode: Number.isInteger(parsed.exitCode) ? Number(parsed.exitCode) : 1,
+        };
+      } catch {
+        return { stdout: "", stderr: "local execution result was unreadable", exitCode: 1 };
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return { stdout: "", stderr: "local execution timed out", exitCode: 1 };
+}
+
 async function requestApproval(
   ctx: RunContext,
   actionId: string,
@@ -388,7 +484,7 @@ async function requestApproval(
     runId: ctx.runId,
     actionId,
     description,
-  }).catch((err) => console.warn("approval webhook dispatch failed", err));
+  }).catch((err) => logger.warn(loggedError(err), "approval webhook dispatch failed"));
   const deadline = Date.now() + 5 * 60_000;
   while (Date.now() < deadline) {
     if (await isCancelled(ctx.redis, ctx.runId)) return null;
@@ -404,6 +500,16 @@ async function requestApproval(
 }
 
 export async function createTurnRunShell(ctx: RunContext): Promise<void> {
+  adjustGauge("active_turns", 1);
+  try {
+    await runTurnBody(ctx);
+  } finally {
+    adjustGauge("active_turns", -1);
+  }
+}
+
+async function runTurnBody(ctx: RunContext): Promise<void> {
+  const log = logger.child({ botId: ctx.botId, turnId: ctx.turnId, runId: ctx.runId });
   const startedAt = Date.now();
   const checkpointChain: Promise<void>[] = [];
   const generation = ctx.runGeneration;
@@ -526,7 +632,7 @@ ${server.cachedTools
   let userInfoMessage = buildUserInfoMessage(inferenceTools);
   const userTurnMessage = assembleTurnAction(
     turnRow?.input?.prompt ?? "",
-    (turnRow?.input?.attachments as Attachment[] | undefined) ?? [],
+    await attachmentsForModel(ctx, (turnRow?.input?.attachments as Attachment[] | undefined) ?? []),
   );
 
   let exchangeMessages: ModelMessage[] = [...previousMessages, userTurnMessage];
@@ -562,10 +668,10 @@ ${server.cachedTools
         const browser = ctx.browser;
         ctx.browser = null;
         await browser?.disconnect().catch((err) => {
-          console.warn("[runner] failed to close browser after cancellation", err);
+          logger.warn(loggedError(err), "failed to close browser after cancellation");
         });
       })
-      .catch((err) => console.warn("[runner] execution cancellation poll failed", err))
+      .catch((err) => logger.warn(loggedError(err), "execution cancellation poll failed"))
       .finally(() => {
         cancelCheckInFlight = false;
       });
@@ -609,7 +715,7 @@ ${server.cachedTools
       skillProgressIndex = latestCheckpoint.skillProgressIndex;
       for (const [index, count] of Object.entries(latestCheckpoint.skillStepFailures ?? {}))
         skillStepFailures.set(Number(index), count);
-      console.info(`[runner] resuming turn ${ctx.turnId} from checkpoint ${stepIndex}`);
+      logger.info({ turnId: ctx.turnId, stepIndex }, "resuming turn from checkpoint");
       usage.promptTokens = latestCheckpoint.usage.promptTokens;
       usage.completionTokens = latestCheckpoint.usage.completionTokens;
       usage.totalTokens = latestCheckpoint.usage.totalTokens;
@@ -640,6 +746,7 @@ ${server.cachedTools
         observeHistogram("agentos_turn_duration_seconds", (Date.now() - startedAt) / 1000, {
           status: "cancelled",
         });
+        observeMillis("turn_duration_ms", Date.now() - startedAt, { status: "cancelled" });
         ctx.send({
           type: "error",
           agentId: ctx.agentId,
@@ -680,6 +787,9 @@ ${server.cachedTools
           observeHistogram("agentos_turn_duration_seconds", (Date.now() - startedAt) / 1000, {
             status: cancelled ? "cancelled" : "error",
           });
+          observeMillis("turn_duration_ms", Date.now() - startedAt, {
+            status: cancelled ? "cancelled" : "error",
+          });
           if (routineRunId) {
             await ctx.db
               .update(routineRuns)
@@ -695,7 +805,9 @@ ${server.cachedTools
               routineRunId,
               status: "error",
               error: `Skill checkpoint denied: ${reason}`,
-            }).catch((hookError) => console.warn("routine webhook dispatch failed", hookError));
+            }).catch((hookError) =>
+              logger.warn(loggedError(hookError), "routine webhook dispatch failed"),
+            );
           }
           ctx.send({
             type: "error",
@@ -714,7 +826,8 @@ ${server.cachedTools
 
       const inferenceStartedAt = performance.now();
       try {
-        for await (const ev of ctx.session.streamComplete(
+        for await (const ev of observeInferenceStream(
+          ctx.session,
           modelHistory(systemPrompt, userInfoMessage, exchangeMessages),
           inferenceTools,
         )) {
@@ -765,6 +878,7 @@ ${server.cachedTools
           observeHistogram("agentos_turn_duration_seconds", (Date.now() - startedAt) / 1000, {
             status: "cancelled",
           });
+          observeMillis("turn_duration_ms", Date.now() - startedAt, { status: "cancelled" });
           ctx.send({
             type: "error",
             agentId: ctx.agentId,
@@ -786,7 +900,7 @@ ${server.cachedTools
           try {
             await ensureBrowser(ctx);
           } catch (err) {
-            console.error("[runner] browser connect failed", err);
+            logger.error(loggedError(err), "browser connect failed");
           }
         }
 
@@ -807,17 +921,16 @@ ${server.cachedTools
           permissionLevel >= 2 || (permissionLevel === 1 && !(await ctx.redis.get(firstUseKey)));
         if (permissionLevel === 3) {
           approvalStatus = "pending";
-          const actionId = crypto.randomUUID();
-          const decision = await requestApproval(
-            ctx,
-            actionId,
-            `Secure handoff required for ${tc.name}`,
-            permissionLevel,
-          );
-          // Secure handoff is not executable until the desktop control channel exists.
-          approvalStatus =
-            decision === "always_allow" || decision === "allow_once" ? decision : "deny";
-          approvalDenied = true;
+          const reason =
+            tc.name === "SecureHandoff"
+              ? String(tc.args.reason ?? "Secure handoff").slice(0, 240)
+              : `Secure handoff required before ${tc.name}`;
+          const returned = await requestHandoff(ctx, reason);
+          if (returned) approvalStatus = "allow_once";
+          else {
+            approvalStatus = "deny";
+            approvalDenied = true;
+          }
         } else if (requiresApproval) {
           approvalStatus = "pending";
           const actionId = crypto.randomUUID();
@@ -863,83 +976,57 @@ ${server.cachedTools
             ? {
                 toolCallId: tc.id,
                 name: tc.name,
-                result: { error: "approval denied, timed out, or unsupported secure handoff" },
+                result: { error: "approval denied, timed out, or handoff cancelled" },
                 isError: true,
               }
-            : tc.name === "CompleteSkillStep"
-              ? (() => {
-                  const requestedStep = Number(tc.args.stepIndex);
-                  const expectedStep = skillProgressIndex + 1;
-                  if (!activeSkill || requestedStep !== expectedStep) {
+            : tc.name === "SecureHandoff"
+              ? {
+                  toolCallId: tc.id,
+                  name: tc.name,
+                  result: { returned: true },
+                  isError: false,
+                }
+              : tc.name === "CompleteSkillStep"
+                ? (() => {
+                    const requestedStep = Number(tc.args.stepIndex);
+                    const expectedStep = skillProgressIndex + 1;
+                    if (!activeSkill || requestedStep !== expectedStep) {
+                      return {
+                        toolCallId: tc.id,
+                        name: tc.name,
+                        result: {
+                          error: activeSkill
+                            ? `expected active skill step ${expectedStep}`
+                            : "there is no active skill",
+                        },
+                        isError: true,
+                      };
+                    }
+                    skillProgressIndex += 1;
                     return {
                       toolCallId: tc.id,
                       name: tc.name,
                       result: {
-                        error: activeSkill
-                          ? `expected active skill step ${expectedStep}`
-                          : "there is no active skill",
+                        completedStep: requestedStep,
+                        nextInstruction: activeSkill.steps[skillProgressIndex]?.instruction ?? null,
                       },
-                      isError: true,
+                      isError: false,
                     };
-                  }
-                  skillProgressIndex += 1;
-                  return {
-                    toolCallId: tc.id,
-                    name: tc.name,
-                    result: {
-                      completedStep: requestedStep,
-                      nextInstruction: activeSkill.steps[skillProgressIndex]?.instruction ?? null,
-                    },
-                    isError: false,
-                  };
-                })()
-              : tc.name === "SendToAgent"
-                ? await (async () => {
-                    try {
-                      if (!ctx.sendToAgent) throw new Error("peer messaging unavailable");
-                      await ctx.sendToAgent(
-                        String(tc.args.botId ?? ""),
-                        String(tc.args.message ?? ""),
-                        Boolean(tc.args.priority),
-                        (ctx.hopCount ?? 0) + 1,
-                      );
-                      return {
-                        toolCallId: tc.id,
-                        name: tc.name,
-                        result: { ok: true },
-                        isError: false,
-                      };
-                    } catch (err) {
-                      return {
-                        toolCallId: tc.id,
-                        name: tc.name,
-                        result: { error: err instanceof Error ? err.message : String(err) },
-                        isError: true,
-                      };
-                    }
                   })()
-                : tc.name === "ConnectorCall"
+                : tc.name === "SendToAgent"
                   ? await (async () => {
                       try {
-                        if (!ctx.connectorCall) throw new Error("connector service unavailable");
-                        const result = await ctx.connectorCall(
-                          tc.args.service === "google-calendar" ||
-                            tc.args.service === "google-drive"
-                            ? tc.args.service
-                            : "gmail",
-                          String(tc.args.action ?? ""),
-                          typeof tc.args.params === "object" && tc.args.params !== null
-                            ? (tc.args.params as Record<string, unknown>)
-                            : {},
+                        if (!ctx.sendToAgent) throw new Error("peer messaging unavailable");
+                        await ctx.sendToAgent(
+                          String(tc.args.botId ?? ""),
+                          String(tc.args.message ?? ""),
+                          Boolean(tc.args.priority),
+                          (ctx.hopCount ?? 0) + 1,
                         );
                         return {
                           toolCallId: tc.id,
                           name: tc.name,
-                          result: {
-                            trust: "untrusted_external_data",
-                            source: "connected_service",
-                            payload: result,
-                          },
+                          result: { ok: true },
                           isError: false,
                         };
                       } catch (err) {
@@ -951,19 +1038,21 @@ ${server.cachedTools
                         };
                       }
                     })()
-                  : tc.name === "ReadMemory" ||
-                      tc.name === "WriteMemory" ||
-                      tc.name === "DeleteMemory"
+                  : tc.name === "ConnectorCall"
                     ? await (async () => {
                         try {
-                          if (!ctx.memoryCall) throw new Error("memory service unavailable");
+                          if (!ctx.connectorCall) throw new Error("connector service unavailable");
+                          const result = await ctx.connectorCall(
+                            String(tc.args.service ?? ""),
+                            String(tc.args.action ?? ""),
+                            typeof tc.args.params === "object" && tc.args.params !== null
+                              ? (tc.args.params as Record<string, unknown>)
+                              : {},
+                          );
                           return {
                             toolCallId: tc.id,
                             name: tc.name,
-                            result: await ctx.memoryCall(
-                              tc.name as "ReadMemory" | "WriteMemory" | "DeleteMemory",
-                              tc.args as Record<string, unknown>,
-                            ),
+                            result: wrapUntrusted("connected_service", result),
                             isError: false,
                           };
                         } catch (err) {
@@ -975,26 +1064,19 @@ ${server.cachedTools
                           };
                         }
                       })()
-                    : tc.name === "MCPCall"
+                    : tc.name === "ReadMemory" ||
+                        tc.name === "WriteMemory" ||
+                        tc.name === "DeleteMemory"
                       ? await (async () => {
                           try {
-                            if (!ctx.mcpCall) throw new Error("MCP service unavailable");
-                            const args =
-                              typeof tc.args.arguments === "object" && tc.args.arguments !== null
-                                ? (tc.args.arguments as Record<string, unknown>)
-                                : {};
+                            if (!ctx.memoryCall) throw new Error("memory service unavailable");
                             return {
                               toolCallId: tc.id,
                               name: tc.name,
-                              result: {
-                                trust: "untrusted_external_data",
-                                source: "mcp_server",
-                                payload: await ctx.mcpCall(
-                                  String(tc.args.serverId ?? ""),
-                                  String(tc.args.toolName ?? ""),
-                                  args,
-                                ),
-                              },
+                              result: await ctx.memoryCall(
+                                tc.name as "ReadMemory" | "WriteMemory" | "DeleteMemory",
+                                tc.args as Record<string, unknown>,
+                              ),
                               isError: false,
                             };
                           } catch (err) {
@@ -1006,22 +1088,24 @@ ${server.cachedTools
                             };
                           }
                         })()
-                      : tc.name === "CreateSubagent" ||
-                          tc.name === "GetSubagentStatus" ||
-                          tc.name === "CancelSubagent"
+                      : tc.name === "MCPCall"
                         ? await (async () => {
                             try {
-                              if (!ctx.subagentCall)
-                                throw new Error("subagent service unavailable");
+                              if (!ctx.mcpCall) throw new Error("MCP service unavailable");
+                              const args =
+                                typeof tc.args.arguments === "object" && tc.args.arguments !== null
+                                  ? (tc.args.arguments as Record<string, unknown>)
+                                  : {};
                               return {
                                 toolCallId: tc.id,
                                 name: tc.name,
-                                result: await ctx.subagentCall(
-                                  tc.name as
-                                    | "CreateSubagent"
-                                    | "GetSubagentStatus"
-                                    | "CancelSubagent",
-                                  tc.args as Record<string, unknown>,
+                                result: wrapUntrusted(
+                                  "mcp_server",
+                                  await ctx.mcpCall(
+                                    String(tc.args.serverId ?? ""),
+                                    String(tc.args.toolName ?? ""),
+                                    args,
+                                  ),
                                 ),
                                 isError: false,
                               };
@@ -1034,12 +1118,43 @@ ${server.cachedTools
                               };
                             }
                           })()
-                        : await dispatchTool(tc, activeToolCatalog, ctx.bot.approvalSettings, {
-                            vm: ctx.vm,
-                            vmId: ctx.vmId,
-                            browser: ctx.browser,
-                            signal: executionAbortController.signal,
-                          });
+                        : tc.name === "CreateSubagent" ||
+                            tc.name === "GetSubagentStatus" ||
+                            tc.name === "CancelSubagent"
+                          ? await (async () => {
+                              try {
+                                if (!ctx.subagentCall)
+                                  throw new Error("subagent service unavailable");
+                                return {
+                                  toolCallId: tc.id,
+                                  name: tc.name,
+                                  result: await ctx.subagentCall(
+                                    tc.name as
+                                      | "CreateSubagent"
+                                      | "GetSubagentStatus"
+                                      | "CancelSubagent",
+                                    tc.args as Record<string, unknown>,
+                                  ),
+                                  isError: false,
+                                };
+                              } catch (err) {
+                                return {
+                                  toolCallId: tc.id,
+                                  name: tc.name,
+                                  result: {
+                                    error: err instanceof Error ? err.message : String(err),
+                                  },
+                                  isError: true,
+                                };
+                              }
+                            })()
+                          : await dispatchTool(tc, activeToolCatalog, ctx.bot.approvalSettings, {
+                              vm: ctx.vm,
+                              vmId: ctx.vmId,
+                              browser: ctx.browser,
+                              signal: executionAbortController.signal,
+                              localExec: (command, cwd) => sendLocalExecRequest(ctx, command, cwd),
+                            });
         observeHistogram(
           "agentos_tool_execution_duration_seconds",
           (performance.now() - toolStartedAt) / 1000,
@@ -1047,13 +1162,14 @@ ${server.cachedTools
             tool: tc.name,
           },
         );
+        observeMillis("tool_duration_ms", performance.now() - toolStartedAt, { tool: tc.name });
         await ctx.db.insert(auditLog).values({
           accountId: ctx.accountId,
           botId: ctx.botId,
           turnId: ctx.turnId,
           toolName: tc.name,
           paramsHash: createHash("sha256").update(JSON.stringify(tc.args)).digest("hex"),
-          machineId: ctx.vmId,
+          machineId: tc.name === "RequestLocalExec" ? "local" : ctx.vmId,
           approvalStatus,
           outcome: approvalDenied ? "denied" : tr.isError ? "error" : "success",
           errorMessage: tr.isError
@@ -1181,6 +1297,7 @@ ${server.cachedTools
           "agentos_checkpoint_write_duration_seconds",
           (performance.now() - checkpointStartedAt) / 1000,
         );
+        observeMillis("checkpoint_write_duration_ms", performance.now() - checkpointStartedAt);
       }
 
       takenSteps.push({
@@ -1191,6 +1308,7 @@ ${server.cachedTools
         checkpointBlobId,
       });
       observeHistogram("agentos_step_duration_seconds", (performance.now() - stepStartedAt) / 1000);
+      observeMillis("step_duration_ms", performance.now() - stepStartedAt);
 
       stepIndex += 1;
       if (stopAfterCheckpoint) throw new Error(stopAfterCheckpoint);
@@ -1217,7 +1335,7 @@ ${server.cachedTools
       summaryArchiveId,
     );
   } catch (err) {
-    console.error(`[runner] turn ${ctx.turnId} failed`, err);
+    log.error(loggedError(err), "turn failed");
     if (summaryArchiveId) {
       try {
         await ctx.blob.put(
@@ -1227,13 +1345,14 @@ ${server.cachedTools
           "application/json",
         );
       } catch (restoreError) {
-        console.error("[runner] failed to restore transcript after compaction error", restoreError);
+        logger.error(loggedError(restoreError), "failed to restore transcript after compaction error");
       }
     }
     incrementCounter("agentos_turns_total", { status: "error" });
     observeHistogram("agentos_turn_duration_seconds", (Date.now() - startedAt) / 1000, {
       status: "error",
     });
+    observeMillis("turn_duration_ms", Date.now() - startedAt, { status: "error" });
     await ctx.db.update(turns).set({ state: "error" }).where(eq(turns.id, ctx.turnId));
     if (routineRunId)
       await ctx.db
@@ -1251,7 +1370,7 @@ ${server.cachedTools
         routineRunId,
         status: "error",
         error: err instanceof Error ? err.message : String(err),
-      }).catch((hookError) => console.warn("routine webhook dispatch failed", hookError));
+      }).catch((hookError) => logger.warn(loggedError(hookError), "routine webhook dispatch failed"));
     if (routineRunId && ctx.onRoutineError) {
       try {
         await ctx.onRoutineError(
@@ -1260,7 +1379,7 @@ ${server.cachedTools
           turnRow?.input.retryAttempt ?? 0,
         );
       } catch (notifyError) {
-        console.error("[routines] error policy failed", notifyError);
+        logger.error(loggedError(notifyError), "routine error policy failed");
       }
     }
     ctx.send({
@@ -1354,6 +1473,7 @@ async function settleTurn(
   observeHistogram("agentos_turn_duration_seconds", (Date.now() - startedAt) / 1000, {
     status: "settled",
   });
+  observeMillis("turn_duration_ms", Date.now() - startedAt, { status: "settled" });
 
   ctx.send({
     type: "settled",
@@ -1366,7 +1486,7 @@ async function settleTurn(
     turnId: ctx.turnId,
     runId: ctx.runId,
     usage,
-  }).catch((err) => console.warn("turn webhook dispatch failed", err));
+  }).catch((err) => logger.warn(loggedError(err), "turn webhook dispatch failed"));
   if (routineRunId) {
     const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
     await ctx.db
@@ -1383,7 +1503,7 @@ async function settleTurn(
       routineRunId,
       status: "settled",
       result: (lastAssistant?.content ?? "").slice(0, 2_000),
-    }).catch((err) => console.warn("routine webhook dispatch failed", err));
+    }).catch((err) => logger.warn(loggedError(err), "routine webhook dispatch failed"));
     const [runRow] = await ctx.db
       .select({ routineId: routineRuns.routineId })
       .from(routineRuns)

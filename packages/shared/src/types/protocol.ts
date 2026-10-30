@@ -32,7 +32,27 @@ export interface ApproveFrame {
   decision: ApprovalDecision;
 }
 
-export type ClientFrame = SendPromptFrame | InterruptFrame | ApproveFrame;
+export interface ReturnToBotFrame {
+  type: "returnToBot";
+  agentId: string;
+  runId: string;
+}
+
+export interface LocalExecResultFrame {
+  type: "localExecResult";
+  runId: string;
+  actionId: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export type ClientFrame =
+  | SendPromptFrame
+  | InterruptFrame
+  | ApproveFrame
+  | ReturnToBotFrame
+  | LocalExecResultFrame;
 
 /** Server → Client */
 
@@ -105,6 +125,22 @@ export interface ErrorFrame {
   message: string;
 }
 
+export interface SecureHandoffFrame {
+  type: "secureHandoff";
+  agentId: string;
+  runId: string;
+  reason: string;
+}
+
+export interface LocalExecRequestFrame {
+  type: "localExecRequest";
+  agentId: string;
+  runId: string;
+  actionId: string;
+  command: string;
+  cwd?: string;
+}
+
 export type ServerFrame =
   | AcceptedFrame
   | TokenFrame
@@ -114,6 +150,8 @@ export type ServerFrame =
   | NeedsApprovalFrame
   | MessageFrame
   | SettledFrame
-  | ErrorFrame;
+  | ErrorFrame
+  | SecureHandoffFrame
+  | LocalExecRequestFrame;
 
 export type WsFrame = ClientFrame | ServerFrame;

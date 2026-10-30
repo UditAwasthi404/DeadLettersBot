@@ -1,12 +1,25 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { UpdateBanner } from "./UpdateBanner.tsx";
+import { RawVncSession } from "./rfb.ts";
 import "./style.css";
+
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const MAX_PROMPT_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+type LocalPolicy = "never" | "always_confirm" | "always_allow";
 
 interface Bot {
   id: string;
   name: string;
   role: string;
   inferenceSettings?: { providerId?: string; model?: string };
+  localMachineAccess?: LocalPolicy;
+  retainData?: boolean;
+}
+
+function isLocalPolicy(value: string | null | undefined): value is LocalPolicy {
+  return value === "never" || value === "always_confirm" || value === "always_allow";
 }
 interface MemoryEntry {
   id: string;
@@ -27,6 +40,7 @@ interface SkillItem {
   ownerBotId: string | null;
   name: string;
   description: string;
+  version?: number;
   steps: Array<{
     instruction: string;
     approvalRequired?: boolean;
@@ -51,10 +65,12 @@ interface RoutineItem {
   trigger:
     | { type: "cron"; schedule?: string }
     | { type: "webhook" }
-    | { type: "inter_bot_message"; senderBotId?: string };
+    | { type: "inter_bot_message"; senderBotId?: string }
+    | { type: "file_change"; path?: string };
   lastTriggeredAt: string | null;
   nextRunAt?: string | null;
   cronTimezone?: string | null;
+  onError?: "notify_user" | "retry" | "pause";
 }
 interface RoutineRunItem {
   id: string;
@@ -69,11 +85,66 @@ interface RoutineRunItem {
 function routineTriggerLabel(trigger: RoutineItem["trigger"], bots: Bot[]): string {
   if (trigger.type === "cron") return trigger.schedule ?? "Cron";
   if (trigger.type === "webhook") return "Webhook";
+  if (trigger.type === "file_change") return `File change ${trigger.path ?? ""}`.trim();
   const senderName = trigger.senderBotId
     ? (bots.find((bot) => bot.id === trigger.senderBotId)?.name ?? "selected bot")
     : "any bot";
   return `Inter-bot message from ${senderName}`;
 }
+
+function cronFieldOk(field: string, min: number, max: number): boolean {
+  return field.split(",").every((part) => {
+    const [base, step] = part.split("/");
+    if (step !== undefined && (!/^\d+$/.test(step) || Number(step) < 1)) return false;
+    if (!base || base === "*") return true;
+    const pieces = base.split("-");
+    return (
+      (pieces.length === 1 || pieces.length === 2) &&
+      pieces.every((n) => /^\d+$/.test(n) && Number(n) >= min && Number(n) <= max)
+    );
+  });
+}
+
+function cronPreview(expression: string): string {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) return "Use five fields: minute hour day month weekday.";
+  const [minute, hour, day, month, weekday] = fields;
+  if (
+    !minute ||
+    !hour ||
+    !day ||
+    !month ||
+    !weekday ||
+    !cronFieldOk(minute, 0, 59) ||
+    !cronFieldOk(hour, 0, 23) ||
+    !cronFieldOk(day, 1, 31) ||
+    !cronFieldOk(month, 1, 12) ||
+    !cronFieldOk(weekday, 0, 7)
+  )
+    return "That expression is not a five-field cron schedule.";
+  if (
+    minute === "0" &&
+    hour &&
+    /^\d+$/.test(hour) &&
+    day === "*" &&
+    month === "*" &&
+    weekday === "*"
+  )
+    return `Daily at ${hour.padStart(2, "0")}:00.`;
+  return "Five-field cron schedule.";
+}
+
+const CONNECTOR_CARDS = [
+  { id: "gmail", label: "Gmail", oauth: "gmail" },
+  { id: "google-calendar", label: "Google Calendar", oauth: "google-calendar" },
+  { id: "google-drive", label: "Google Drive", oauth: "google-drive" },
+  { id: "onedrive", label: "OneDrive", oauth: "microsoft" },
+  { id: "outlook-mail", label: "Outlook Mail", oauth: "microsoft" },
+  { id: "outlook-calendar", label: "Outlook Calendar", oauth: "microsoft" },
+  { id: "teams", label: "Teams", oauth: "microsoft" },
+  { id: "sharepoint", label: "SharePoint", oauth: "microsoft" },
+  { id: "salesforce", label: "Salesforce", oauth: "salesforce" },
+] as const;
 interface ConnectorItem {
   service: string;
   scopes: string[];
@@ -114,10 +185,19 @@ interface ChatItem {
   toolName?: string;
   approval?: { actionId: string; permissionLevel: number };
 }
+interface PendingAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  uri: string;
+}
+
 interface Frame {
   type: string;
   agentId?: string;
   runId?: string;
+  reason?: string;
   delta?: string;
   content?: string;
   endTurn?: boolean;
@@ -158,6 +238,19 @@ function App() {
   const [routineDraftSkillId, setRoutineDraftSkillId] = useState("");
   const [routineDraftSchedule, setRoutineDraftSchedule] = useState("");
   const [routineDraftSenderBotId, setRoutineDraftSenderBotId] = useState("");
+  const [routineDraftPath, setRoutineDraftPath] = useState("/home/agent");
+  const [routineDraftOnError, setRoutineDraftOnError] = useState<"notify_user" | "retry" | "pause">(
+    "pause",
+  );
+  const [recording, setRecording] = useState(false);
+  const [taughtDraft, setTaughtDraft] = useState<{
+    name: string;
+    description: string;
+    steps: Array<SkillStepDraft & { id: string }>;
+  } | null>(null);
+  const [skillTests, setSkillTests] = useState<Record<string, { runId: string; status: string }>>(
+    {},
+  );
   const [routineWebhookSetup, setRoutineWebhookSetup] = useState<{
     url: string;
     secret: string;
@@ -172,12 +265,34 @@ function App() {
   const [inferenceProviders, setInferenceProviders] = useState<string[]>([]);
   const [inferenceProviderId, setInferenceProviderId] = useState("");
   const [inferenceModel, setInferenceModel] = useState("");
+  const [retainData, setRetainData] = useState(true);
+  const [updateReady, setUpdateReady] = useState(false);
+  const [skillDragIndex, setSkillDragIndex] = useState<number | null>(null);
   const [connectorItems, setConnectorItems] = useState<ConnectorItem[]>([]);
   const [mcpItems, setMcpItems] = useState<McpServerItem[]>([]);
   const [mcpName, setMcpName] = useState("");
   const [mcpUrl, setMcpUrl] = useState("");
   const [mcpApiKey, setMcpApiKey] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const screenRef = useRef<HTMLCanvasElement>(null);
+  const [pendingFiles, setPendingFiles] = useState<PendingAttachment[]>([]);
+  const [localOpen, setLocalOpen] = useState(false);
+  const [localAccess, setLocalAccess] = useState<LocalPolicy>("always_confirm");
+  const [pendingLocal, setPendingLocal] = useState<{
+    agentId: string;
+    runId: string;
+    actionId: string;
+    command: string;
+    cwd?: string;
+  } | null>(null);
+  const [allowLocalSession, setAllowLocalSession] = useState(false);
+  const [screenMode, setScreenMode] = useState<null | "view" | "handoff">(null);
+  const [handoff, setHandoff] = useState<{
+    agentId: string;
+    runId: string;
+    reason: string;
+  } | null>(null);
+  const screenBotId = screenMode === "handoff" ? handoff?.agentId : botId;
 
   useEffect(() => {
     const stopFrame = window.agentOS.onFrame((unknownFrame) => {
@@ -254,6 +369,13 @@ function App() {
             },
           },
         ]);
+      } else if (frame.type === "secureHandoff" && frame.agentId && frame.runId) {
+        setHandoff({
+          agentId: frame.agentId,
+          runId: frame.runId,
+          reason: frame.reason || "Take control of the agent screen",
+        });
+        setScreenMode("handoff");
       } else if (frame.type === "settled") {
         setActiveRun("");
       } else if (frame.type === "error") {
@@ -262,7 +384,28 @@ function App() {
       }
     });
     const stopStatus = window.agentOS.onStatus(setStatus);
+    let active = true;
+    void window.agentOS.restoreSession().then(async (saved) => {
+      if (!active || !saved?.baseUrl || !saved.token) return;
+      setBaseUrl(saved.baseUrl);
+      setToken(saved.token);
+      try {
+        await window.agentOS.connect(saved.baseUrl, saved.token);
+        if (!active) return;
+        const roster = (await window.agentOS.apiRequest({
+          baseUrl: saved.baseUrl,
+          token: saved.token,
+          path: "/v1/bots",
+        })) as Bot[];
+        if (!active) return;
+        setBots(roster);
+        setBotId(roster[0]?.id ?? "");
+      } catch (err) {
+        if (active) setError(err instanceof Error ? err.message : String(err));
+      }
+    });
     return () => {
+      active = false;
       stopFrame();
       stopStatus();
       void window.agentOS.disconnect();
@@ -273,6 +416,106 @@ function App() {
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [items]);
+
+  useEffect(() => window.agentOS.onUpdateReady(() => setUpdateReady(true)), []);
+
+  useEffect(
+    () =>
+      window.agentOS.onLocalExec((unknownFrame) => {
+        const frame = unknownFrame as {
+          agentId?: string;
+          runId?: string;
+          actionId?: string;
+          command?: string;
+          cwd?: string;
+        };
+        if (!frame.runId || !frame.actionId || !frame.command) return;
+        setAllowLocalSession(false);
+        setPendingLocal({
+          agentId: frame.agentId ?? "",
+          runId: frame.runId,
+          actionId: frame.actionId,
+          command: frame.command,
+          cwd: frame.cwd,
+        });
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    if (!botId) return;
+    const stored = localStorage.getItem(`localMachineAccess:${botId}`);
+    const fromBot = bots.find((bot) => bot.id === botId)?.localMachineAccess;
+    const policy = isLocalPolicy(stored)
+      ? stored
+      : fromBot && isLocalPolicy(fromBot)
+        ? fromBot
+        : "always_confirm";
+    void window.agentOS.setLocalPolicy(botId, policy);
+  }, [botId, bots]);
+
+  useEffect(() => {
+    if (!screenMode || !screenBotId) return;
+    const canvas = screenRef.current;
+    if (!canvas) return;
+    let closed = false;
+    const session = new RawVncSession(
+      canvas,
+      (bytes) => {
+        void window.agentOS.sendVnc(bytes);
+      },
+      (message) => {
+        if (!closed) setError(message);
+      },
+    );
+    const stopData = window.agentOS.onVncData((bytes) => {
+      if (!closed) session.push(asBytes(bytes));
+    });
+    const stopStatus = window.agentOS.onVncStatus((next) => {
+      if (!closed && next === "closed") setError("The VM screen connection closed.");
+    });
+    void window.agentOS.openVnc(screenBotId).catch((err) => {
+      if (!closed) setError(err instanceof Error ? err.message : String(err));
+    });
+    const point = (event: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return;
+      session.pointer(
+        ((event.clientX - rect.left) / rect.width) * canvas.width,
+        ((event.clientY - rect.top) / rect.height) * canvas.height,
+        event.buttons,
+      );
+    };
+    const downKey = (event: KeyboardEvent) => {
+      const symbol = keysym(event.key);
+      if (symbol === null) return;
+      event.preventDefault();
+      session.key(symbol, true);
+    };
+    const upKey = (event: KeyboardEvent) => {
+      const symbol = keysym(event.key);
+      if (symbol === null) return;
+      session.key(symbol, false);
+    };
+    if (screenMode === "handoff") {
+      canvas.addEventListener("pointerdown", point);
+      canvas.addEventListener("pointermove", point);
+      canvas.addEventListener("pointerup", point);
+      window.addEventListener("keydown", downKey);
+      window.addEventListener("keyup", upKey);
+    }
+    return () => {
+      closed = true;
+      stopData();
+      stopStatus();
+      canvas.removeEventListener("pointerdown", point);
+      canvas.removeEventListener("pointermove", point);
+      canvas.removeEventListener("pointerup", point);
+      window.removeEventListener("keydown", downKey);
+      window.removeEventListener("keyup", upKey);
+      void window.agentOS.closeVnc();
+    };
+  }, [screenMode, screenBotId]);
 
   async function connect() {
     setError("");
@@ -339,8 +582,9 @@ function App() {
       ])) as [Bot, { providers: Array<{ id: string }> }];
       const providers = providerResponse.providers.map((provider) => provider.id);
       setInferenceProviders(providers);
-      setInferenceProviderId(bot.inferenceSettings?.providerId ?? providers[0] ?? "");
+      setInferenceProviderId(bot.inferenceSettings?.providerId ?? "");
       setInferenceModel(bot.inferenceSettings?.model ?? "");
+      setRetainData(bot.retainData !== false);
       setAutomationOpen(false);
       setMemoryOpen(false);
       setConnectorOpen(false);
@@ -503,7 +747,9 @@ function App() {
     }
   }
 
-  async function createRoutine(triggerType: "cron" | "webhook" | "inter_bot_message" = "cron") {
+  async function createRoutine(
+    triggerType: "cron" | "webhook" | "inter_bot_message" | "file_change" = "cron",
+  ) {
     const skill = skillItems.find((item) => !item.ownerBotId || item.ownerBotId === botId);
     if (!skill) {
       setError("Create or copy a skill to the selected bot before scheduling a routine.");
@@ -516,6 +762,15 @@ function App() {
         ? window.prompt("Five-field cron schedule (minute hour day month weekday)", "0 9 * * *")
         : undefined;
     if (triggerType === "cron" && !schedule?.trim()) return;
+    let filePath: string | undefined;
+    if (triggerType === "file_change") {
+      const entered = window.prompt(
+        "Workspace path to watch. It must stay inside /home/agent.",
+        "/home/agent",
+      );
+      if (!entered?.trim()) return;
+      filePath = entered.trim();
+    }
     let senderBotId: string | undefined;
     if (triggerType === "inter_bot_message") {
       const senders = bots.filter((bot) => bot.id !== botId && bot.role !== "subagent");
@@ -545,7 +800,9 @@ function App() {
               ? { type: "cron", schedule }
               : triggerType === "webhook"
                 ? { type: "webhook" }
-                : { type: "inter_bot_message", ...(senderBotId ? { senderBotId } : {}) },
+                : triggerType === "file_change"
+                  ? { type: "file_change", path: filePath }
+                  : { type: "inter_bot_message", ...(senderBotId ? { senderBotId } : {}) },
         },
       })) as { routine: RoutineItem; webhookSecret?: string };
       if (triggerType === "webhook" && created.webhookSecret)
@@ -570,6 +827,8 @@ function App() {
     setRoutineDraftSenderBotId(
       routine.trigger.type === "inter_bot_message" ? (routine.trigger.senderBotId ?? "") : "",
     );
+    setRoutineDraftPath(routine.trigger.type === "file_change" ? (routine.trigger.path ?? "") : "");
+    setRoutineDraftOnError(routine.onError ?? "pause");
   }
 
   async function saveRoutineEdit(routine: RoutineItem) {
@@ -588,6 +847,10 @@ function App() {
     }
     if (routine.trigger.type === "cron" && !routineDraftSchedule.trim()) {
       setError("A cron routine needs a five-field schedule.");
+      return;
+    }
+    if (routine.trigger.type === "file_change" && !routineDraftPath.trim()) {
+      setError("A file-change routine needs a path inside /home/agent.");
       return;
     }
     try {
@@ -609,7 +872,10 @@ function App() {
                     ...(routineDraftSenderBotId ? { senderBotId: routineDraftSenderBotId } : {}),
                   },
                 }
-              : {}),
+              : routine.trigger.type === "file_change"
+                ? { trigger: { type: "file_change", path: routineDraftPath.trim() } }
+                : {}),
+          onError: routineDraftOnError,
         },
       });
       setEditingRoutineId("");
@@ -793,9 +1059,162 @@ function App() {
     }
   }
 
-  async function connectService(service: "gmail" | "google-calendar" | "google-drive") {
+  async function connectService(
+    service: "gmail" | "google-calendar" | "google-drive" | "microsoft" | "salesforce",
+  ) {
     try {
       await window.agentOS.connectService(baseUrl, token, service);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        const rows = (await window.agentOS.apiRequest({
+          baseUrl,
+          token,
+          path: "/v1/connectors",
+        })) as ConnectorItem[];
+        setConnectorItems(rows);
+        const connected =
+          service === "microsoft"
+            ? rows.some((row) => row.service === "microsoft")
+            : rows.some((row) => row.service === service);
+        if (connected) return;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function saveRetainData(next: boolean) {
+    if (!botId) return;
+    setRetainData(next);
+    try {
+      await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${botId}`,
+        method: "PATCH",
+        body: { retainData: next },
+      });
+    } catch (err) {
+      setRetainData(!next);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function toggleRecording() {
+    if (!botId) {
+      setError("Select a bot before recording a browser task.");
+      return;
+    }
+    try {
+      if (!recording) {
+        await window.agentOS.apiRequest({
+          baseUrl,
+          token,
+          path: `/v1/bots/${encodeURIComponent(botId)}/browser-recording/start`,
+          method: "POST",
+        });
+        setRecording(true);
+        return;
+      }
+      const stopped = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${encodeURIComponent(botId)}/browser-recording/stop`,
+        method: "POST",
+      })) as { events: unknown[] };
+      setRecording(false);
+      const draft = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: "/v1/skills/draft",
+        method: "POST",
+        body: { events: stopped.events },
+      })) as { name: string; description: string; steps: Array<{ instruction: string }> };
+      setTaughtDraft({
+        name: draft.name,
+        description: draft.description,
+        steps: draft.steps.map((step) => ({
+          id: crypto.randomUUID(),
+          instruction: step.instruction,
+          approvalRequired: false,
+          onError: "stop" as const,
+          maxAttempts: 3,
+          customPrompt: "",
+        })),
+      });
+      setAutomationOpen(true);
+    } catch (err) {
+      setRecording(false);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function saveTaughtDraft() {
+    if (!taughtDraft?.name.trim() || taughtDraft.steps.some((step) => !step.instruction.trim())) {
+      setError("The draft skill needs a name and an instruction on every step.");
+      return;
+    }
+    try {
+      await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: "/v1/skills",
+        method: "POST",
+        body: {
+          name: taughtDraft.name.trim(),
+          description: taughtDraft.description.trim(),
+          steps: taughtDraft.steps.map((step) => ({ instruction: step.instruction.trim() })),
+        },
+      });
+      setTaughtDraft(null);
+      await loadAutomations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function testSkill(skill: SkillItem) {
+    const targetBotId = skill.ownerBotId || botId;
+    if (!targetBotId) {
+      setError("Select a bot before testing this skill.");
+      return;
+    }
+    if (
+      !window.confirm(
+        `Test “${skill.name}” on this bot now? The run uses real tools and can change files, sites, and connected services.`,
+      )
+    )
+      return;
+    try {
+      const started = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/skills/${encodeURIComponent(skill.id)}/test`,
+        method: "POST",
+        body: { botId: targetBotId },
+      })) as { runId: string; status: string };
+      setSkillTests((current) => ({
+        ...current,
+        [skill.id]: { runId: started.runId, status: started.status },
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function refreshSkillTest(skill: SkillItem) {
+    const current = skillTests[skill.id];
+    if (!current) return;
+    try {
+      const status = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/skills/${encodeURIComponent(skill.id)}/test/${encodeURIComponent(current.runId)}`,
+      })) as { runId: string; status: string };
+      setSkillTests((previous) => ({
+        ...previous,
+        [skill.id]: { runId: status.runId, status: status.status },
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -893,24 +1312,129 @@ function App() {
     }
   }
 
+  async function addDroppedFiles(files: FileList | File[]) {
+    if (!botId || !token) return;
+    const next = [...pendingFiles];
+    let total = next.reduce((sum, file) => sum + file.sizeBytes, 0);
+    for (const file of Array.from(files)) {
+      if (file.size < 1 || file.size > MAX_ATTACHMENT_BYTES) {
+        setError(`${file.name} exceeds 10 MB`);
+        continue;
+      }
+      if (total + file.size > MAX_PROMPT_ATTACHMENT_BYTES) {
+        setError("attachments exceed 25 MB");
+        break;
+      }
+      const stored = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${botId}/attachments`,
+        method: "POST",
+        body: {
+          name: file.name,
+          mimeType: file.type || "application/octet-stream",
+          dataBase64: await fileToBase64(file),
+        },
+      })) as PendingAttachment;
+      next.push(stored);
+      total += stored.sizeBytes;
+    }
+    setPendingFiles(next);
+  }
+
   async function sendPrompt(event: React.FormEvent) {
     event.preventDefault();
     const prompt = draft.trim();
-    if (!prompt || !botId) return;
+    const attachments = pendingFiles;
+    if ((!prompt && attachments.length === 0) || !botId) return;
+    const names = attachments.map((file) => file.name).join("\n");
     setItems((old) => [
       ...old,
-      { id: crypto.randomUUID(), role: "user", content: prompt, agentId: botId },
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: [prompt, names].filter(Boolean).join("\n"),
+        agentId: botId,
+      },
     ]);
     setDraft("");
+    setPendingFiles([]);
     setError("");
     try {
       await window.agentOS.send({
         type: "sendPrompt",
         agentId: botId,
         prompt,
-        attachments: [],
+        attachments,
         nonce: crypto.randomUUID(),
       });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function openLocalSettings() {
+    if (!botId) return;
+    try {
+      const bot = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${botId}`,
+      })) as Bot;
+      const policy = isLocalPolicy(bot.localMachineAccess)
+        ? bot.localMachineAccess
+        : "always_confirm";
+      setLocalAccess(policy);
+      localStorage.setItem(`localMachineAccess:${botId}`, policy);
+      await window.agentOS.setLocalPolicy(botId, policy);
+      setLocalOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function saveLocalAccess(policy: LocalPolicy) {
+    if (!botId) return;
+    setLocalAccess(policy);
+    try {
+      await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${botId}`,
+        method: "PATCH",
+        body: { tools: { localMachineAccess: policy } },
+      });
+      localStorage.setItem(`localMachineAccess:${botId}`, policy);
+      await window.agentOS.setLocalPolicy(botId, policy);
+      setBots((current) =>
+        current.map((bot) => (bot.id === botId ? { ...bot, localMachineAccess: policy } : bot)),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function replyLocal(decision: "allow" | "deny" | "allow_session") {
+    const frame = pendingLocal;
+    if (!frame) return;
+    setPendingLocal(null);
+    try {
+      await window.agentOS.replyLocalExec(decision, frame);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function returnControl() {
+    if (!handoff) return;
+    try {
+      await window.agentOS.send({
+        type: "returnToBot",
+        agentId: handoff.agentId,
+        runId: handoff.runId,
+      });
+      setScreenMode(null);
+      setHandoff(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -996,6 +1520,7 @@ function App() {
         <div className="sidebar-footer">Local agent workspace</div>
       </aside>
       <main className="chat-panel">
+        <UpdateBanner ready={updateReady} onRestart={() => void window.agentOS.restartToUpdate()} />
         <header className="chat-header">
           <div>
             <strong>{bots.find((b) => b.id === botId)?.name ?? "Choose a bot"}</strong>
@@ -1052,7 +1577,93 @@ function App() {
           >
             Webhooks
           </button>
+          <button
+            type="button"
+            className="stop-button"
+            onClick={() => setScreenMode((mode) => (mode === "view" ? null : "view"))}
+            disabled={!botId || screenMode === "handoff"}
+          >
+            {screenMode === "view" ? "Hide Agent Screen" : "View Agent Screen"}
+          </button>
+          <button
+            type="button"
+            className="stop-button"
+            onClick={() => void openLocalSettings()}
+            disabled={!botId}
+          >
+            This computer
+          </button>
         </header>
+        {localOpen && (
+          <section className="messages memory-view">
+            <h2>Local computer execution</h2>
+            {(
+              [
+                ["always_confirm", "Always require approval"],
+                ["always_allow", "Always allow"],
+                ["never", "Never allow"],
+              ] as const
+            ).map(([value, label]) => (
+              <label key={value} className="skill-approval-toggle">
+                <input
+                  type="radio"
+                  name="local-machine-access"
+                  checked={localAccess === value}
+                  onChange={() => void saveLocalAccess(value)}
+                />
+                {label}
+              </label>
+            ))}
+            <button type="button" onClick={() => setLocalOpen(false)}>
+              Close
+            </button>
+          </section>
+        )}
+        {pendingLocal && (
+          <section className="local-exec-dialog">
+            <h2>Run on this computer?</h2>
+            <pre>{pendingLocal.command}</pre>
+            <p>{pendingLocal.cwd || "The desktop's default directory"}</p>
+            <label className="skill-approval-toggle">
+              <input
+                type="checkbox"
+                checked={allowLocalSession}
+                onChange={(event) => setAllowLocalSession(event.target.checked)}
+              />
+              Always allow this session
+            </label>
+            <div className="approval-actions">
+              <button
+                type="button"
+                onClick={() => void replyLocal(allowLocalSession ? "allow_session" : "allow")}
+              >
+                Run
+              </button>
+              <button type="button" className="deny" onClick={() => void replyLocal("deny")}>
+                Block
+              </button>
+            </div>
+          </section>
+        )}
+        {screenMode && screenBotId && (
+          <section className="screen-view">
+            <p>
+              {screenMode === "handoff"
+                ? handoff?.reason
+                : "Viewing the agent screen. The turn keeps running."}
+            </p>
+            <canvas ref={screenRef} width={1280} height={800} />
+            {screenMode === "handoff" ? (
+              <button type="button" onClick={() => void returnControl()}>
+                Return to Bot
+              </button>
+            ) : (
+              <button type="button" onClick={() => setScreenMode(null)}>
+                Close
+              </button>
+            )}
+          </section>
+        )}
         {inferenceProviders.length > 0 && (
           <section className="messages memory-view">
             <h2>Model settings · {bots.find((bot) => bot.id === botId)?.name}</h2>
@@ -1062,6 +1673,7 @@ function App() {
                 value={inferenceProviderId}
                 onChange={(event) => setInferenceProviderId(event.target.value)}
               >
+                <option value="">Account default</option>
                 {inferenceProviders.map((provider) => (
                   <option key={provider} value={provider}>
                     {provider}
@@ -1078,6 +1690,19 @@ function App() {
                 maxLength={200}
               />
             </label>
+            <h2>Privacy</h2>
+            <label className="skill-approval-toggle">
+              <input
+                type="checkbox"
+                checked={retainData}
+                onChange={(event) => void saveRetainData(event.target.checked)}
+              />
+              Allow AgentOS to retain conversation data for product improvement
+            </label>
+            <p>
+              Disabling this does not delete existing data. Use Memory → Export and then delete
+              entries to remove stored facts.
+            </p>
             <button type="button" onClick={() => void saveInferenceSettings()}>
               Save model settings
             </button>
@@ -1193,15 +1818,6 @@ function App() {
             <div className="memory-toolbar">
               <h2>Connectors</h2>
               <div>
-                <button type="button" onClick={() => void connectService("gmail")}>
-                  Connect Gmail
-                </button>
-                <button type="button" onClick={() => void connectService("google-calendar")}>
-                  Connect Calendar
-                </button>
-                <button type="button" onClick={() => void connectService("google-drive")}>
-                  Connect Drive
-                </button>
                 <button type="button" onClick={() => void loadConnectors()}>
                   Refresh
                 </button>
@@ -1210,7 +1826,35 @@ function App() {
                 </button>
               </div>
             </div>
-            {!connectorItems.length && <p className="empty-note">No Google services connected.</p>}
+            {CONNECTOR_CARDS.map((card) => {
+              const connected = connectorItems.some(
+                (item) =>
+                  item.service === card.id ||
+                  (card.oauth === "microsoft" && item.service === "microsoft"),
+              );
+              return (
+                <article className="memory-entry" key={card.id}>
+                  <div>
+                    <strong>{card.label}</strong>
+                    <small>{connected ? "Connected" : "Not connected"}</small>
+                  </div>
+                  {card.oauth === "microsoft" && (
+                    <p>OneDrive, Outlook, Teams, and SharePoint share one Microsoft sign-in.</p>
+                  )}
+                  <div className="memory-actions">
+                    {connected ? (
+                      <button type="button" onClick={() => void disconnectService(card.oauth)}>
+                        Disconnect
+                      </button>
+                    ) : (
+                      <button type="button" onClick={() => void connectService(card.oauth)}>
+                        Connect
+                      </button>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
             {connectorItems.map((connector) => (
               <article className="memory-entry" key={connector.service}>
                 <div>
@@ -1286,6 +1930,9 @@ function App() {
             <div className="memory-toolbar">
               <h2>Skills and routines</h2>
               <div>
+                <button type="button" onClick={() => void toggleRecording()} disabled={!botId}>
+                  {recording ? "Stop recording" : "Start recording"}
+                </button>
                 <button type="button" onClick={() => void createSkill()}>
                   New skill
                 </button>
@@ -1314,6 +1961,13 @@ function App() {
                 >
                   New inter-bot routine
                 </button>
+                <button
+                  type="button"
+                  onClick={() => void createRoutine("file_change")}
+                  disabled={!botId || !skillItems.length}
+                >
+                  New file-change routine
+                </button>
                 <button type="button" onClick={() => setAutomationOpen(false)}>
                   Back to chat
                 </button>
@@ -1330,13 +1984,67 @@ function App() {
                 </button>
               </output>
             )}
+            {taughtDraft && (
+              <form
+                className="skill-editor"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveTaughtDraft();
+                }}
+              >
+                <strong>Review recorded skill</strong>
+                <label>
+                  Name
+                  <input
+                    value={taughtDraft.name}
+                    onChange={(event) =>
+                      setTaughtDraft({ ...taughtDraft, name: event.target.value })
+                    }
+                    maxLength={120}
+                  />
+                </label>
+                <label>
+                  Description
+                  <textarea
+                    value={taughtDraft.description}
+                    onChange={(event) =>
+                      setTaughtDraft({ ...taughtDraft, description: event.target.value })
+                    }
+                    rows={2}
+                  />
+                </label>
+                {taughtDraft.steps.map((step, index) => (
+                  <label key={step.id}>
+                    Step {index + 1}
+                    <textarea
+                      value={step.instruction}
+                      onChange={(event) => {
+                        const steps = taughtDraft.steps.slice();
+                        const current = steps[index];
+                        if (!current) return;
+                        steps[index] = { ...current, instruction: event.target.value };
+                        setTaughtDraft({ ...taughtDraft, steps });
+                      }}
+                      rows={2}
+                    />
+                  </label>
+                ))}
+                <div className="memory-actions">
+                  <button type="submit">Save skill</button>
+                  <button type="button" onClick={() => setTaughtDraft(null)}>
+                    Discard draft
+                  </button>
+                </div>
+              </form>
+            )}
             <h3>Skills</h3>
             {!skillItems.length && <p className="empty-note">No skills configured.</p>}
             {skillItems.map((skill) => (
               <article className="memory-entry" key={skill.id}>
                 <strong>{skill.name}</strong>
                 <p>
-                  {skill.description || skill.steps.map((step) => step.instruction).join(" · ")}
+                  Version {skill.version ?? 1} · {skill.steps.length} steps
+                  {skill.description ? ` · ${skill.description}` : ""}
                 </p>
                 {editingSkillId === skill.id && (
                   <div className="skill-editor">
@@ -1358,7 +2066,24 @@ function App() {
                     </label>
                     <strong>Steps</strong>
                     {skillDraftSteps.map((step, index) => (
-                      <div className="skill-step-editor" key={`${skill.id}-step-${index}`}>
+                      <div
+                        className="skill-step-editor"
+                        key={`${skill.id}-step-${index}`}
+                        draggable
+                        onDragStart={() => setSkillDragIndex(index)}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={() => {
+                          if (skillDragIndex === null || skillDragIndex === index) return;
+                          setSkillDraftSteps((previous) => {
+                            const next = previous.slice();
+                            const [moved] = next.splice(skillDragIndex, 1);
+                            if (!moved) return previous;
+                            next.splice(index, 0, moved);
+                            return next;
+                          });
+                          setSkillDragIndex(null);
+                        }}
+                      >
                         <label>
                           Step {index + 1}
                           <textarea
@@ -1508,6 +2233,14 @@ function App() {
                   >
                     {editingSkillId === skill.id ? "Close editor" : "Edit"}
                   </button>
+                  <button type="button" onClick={() => void testSkill(skill)}>
+                    Test skill
+                  </button>
+                  {skillTests[skill.id] && (
+                    <button type="button" onClick={() => void refreshSkillTest(skill)}>
+                      Test {skillTests[skill.id]?.status}
+                    </button>
+                  )}
                   <button type="button" onClick={() => void deleteSkill(skill)}>
                     Delete
                   </button>
@@ -1596,15 +2329,43 @@ function App() {
                       </select>
                     </label>
                     {routine.trigger.type === "cron" && (
+                      <>
+                        <label>
+                          Five-field cron schedule
+                          <input
+                            value={routineDraftSchedule}
+                            onChange={(event) => setRoutineDraftSchedule(event.target.value)}
+                            placeholder="0 9 * * *"
+                          />
+                        </label>
+                        <p>{cronPreview(routineDraftSchedule)}</p>
+                      </>
+                    )}
+                    {routine.trigger.type === "file_change" && (
                       <label>
-                        Five-field cron schedule
+                        Workspace path
                         <input
-                          value={routineDraftSchedule}
-                          onChange={(event) => setRoutineDraftSchedule(event.target.value)}
-                          placeholder="0 9 * * *"
+                          value={routineDraftPath}
+                          onChange={(event) => setRoutineDraftPath(event.target.value)}
+                          placeholder="/home/agent"
                         />
                       </label>
                     )}
+                    <label>
+                      When a run fails
+                      <select
+                        value={routineDraftOnError}
+                        onChange={(event) =>
+                          setRoutineDraftOnError(
+                            event.target.value as "notify_user" | "retry" | "pause",
+                          )
+                        }
+                      >
+                        <option value="pause">Pause the routine</option>
+                        <option value="notify_user">Notify you</option>
+                        <option value="retry">Retry</option>
+                      </select>
+                    </label>
                     {routine.trigger.type === "inter_bot_message" && (
                       <label>
                         Sender bot filter
@@ -1653,7 +2414,7 @@ function App() {
                 {routine.trigger.type === "webhook" && (
                   <p>Webhook: POST {`${baseUrl.replace(/\/$/, "")}/v1/webhooks/${routine.id}`}</p>
                 )}
-                {routineHistory[routine.id]?.map((run) => (
+                {routineHistory[routine.id]?.slice(0, 20).map((run) => (
                   <details key={run.id}>
                     <summary>
                       {new Date(run.triggeredAt).toLocaleString()} · {run.status}
@@ -1799,8 +2560,35 @@ function App() {
             </button>
           </div>
         )}
-        {!memoryOpen && !automationOpen && !connectorOpen && (
-          <form className="composer" onSubmit={(e) => void sendPrompt(e)}>
+        {!memoryOpen && !automationOpen && !connectorOpen && !screenMode && (
+          <form
+            className="composer"
+            onSubmit={(e) => void sendPrompt(e)}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              void addDroppedFiles(event.dataTransfer.files).catch((err) =>
+                setError(err instanceof Error ? err.message : String(err)),
+              );
+            }}
+          >
+            {pendingFiles.length > 0 && (
+              <div className="attachment-list">
+                {pendingFiles.map((file) => (
+                  <span className="attachment-chip" key={file.id}>
+                    {file.name}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setPendingFiles((current) => current.filter((item) => item.id !== file.id))
+                      }
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -1815,7 +2603,10 @@ function App() {
             />
             <div className="composer-footer">
               <span>Enter to send · Shift+Enter for a new line</span>
-              <button type="submit" disabled={!botId || !draft.trim()}>
+              <button
+                type="submit"
+                disabled={!botId || (!draft.trim() && pendingFiles.length === 0)}
+              >
                 Send <span>↗</span>
               </button>
             </div>
@@ -1824,6 +2615,38 @@ function App() {
       </main>
     </div>
   );
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x2000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x2000));
+  }
+  return btoa(binary);
+}
+
+function asBytes(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value))
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  return new Uint8Array();
+}
+
+function keysym(key: string): number | null {
+  if (key.length === 1) return key.charCodeAt(0);
+  const named: Record<string, number> = {
+    Enter: 0xff0d,
+    Backspace: 0xff08,
+    Tab: 0xff09,
+    Escape: 0xff1b,
+    ArrowLeft: 0xff51,
+    ArrowUp: 0xff52,
+    ArrowRight: 0xff53,
+    ArrowDown: 0xff54,
+  };
+  return named[key] ?? null;
 }
 
 const rootElement = document.getElementById("root");

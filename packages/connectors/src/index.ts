@@ -12,6 +12,8 @@ export interface OAuthTokens {
   expiresIn?: number;
   scope?: string;
   tokenType?: string;
+  /** Salesforce web-server responses include the instance the REST calls must use. */
+  instanceUrl?: string;
 }
 
 export function googleOAuthConfig(
@@ -111,6 +113,19 @@ export async function decryptConnectorSecret(
   return (await decryptConnectorSecretWithKeyring(value, keyHex, previousKeyHex)).plaintext;
 }
 
+/** Decrypt with the current key, then the previous key. A previous-key hit is re-encrypted and written back. */
+export async function decryptToken(
+  value: string,
+  currentKeyHex: string,
+  previousKeyHex: string | undefined,
+  writeBack: (ciphertext: string) => Promise<void>,
+): Promise<string> {
+  const decoded = await decryptConnectorSecretWithKeyring(value, currentKeyHex, previousKeyHex);
+  if (decoded.key === "previous")
+    await writeBack(await encryptConnectorSecret(decoded.plaintext, currentKeyHex));
+  return decoded.plaintext;
+}
+
 function base64Url(bytes: Uint8Array): string {
   return bytesToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
@@ -169,6 +184,7 @@ export class OAuthPkceClient {
       expires_in?: number;
       scope?: string;
       token_type?: string;
+      instance_url?: string;
       error_description?: string;
     };
     if (!response.ok || !payload.access_token)
@@ -181,6 +197,7 @@ export class OAuthPkceClient {
       expiresIn: payload.expires_in,
       scope: payload.scope,
       tokenType: payload.token_type,
+      instanceUrl: payload.instance_url,
     };
   }
 }
@@ -395,3 +412,85 @@ export class GoogleConnector {
     return googleRequest(service, action, args, accessToken, this.fetchImpl);
   }
 }
+
+export const OAUTH_START_SERVICES = [
+  "gmail",
+  "google-calendar",
+  "google-drive",
+  "microsoft",
+  "salesforce",
+] as const;
+
+export type OAuthStartService = (typeof OAUTH_START_SERVICES)[number];
+
+const MICROSOFT_SERVICES = [
+  "onedrive",
+  "outlook-mail",
+  "outlook-calendar",
+  "teams",
+  "sharepoint",
+] as const;
+
+/** Microsoft Graph services share one stored OAuth connection. */
+export function connectorCredentialService(service: string): string {
+  return (MICROSOFT_SERVICES as readonly string[]).includes(service) ? "microsoft" : service;
+}
+
+export function oauthConfigFor(
+  service: string,
+  env: {
+    googleClientId?: string;
+    googleClientSecret?: string;
+    microsoftClientId?: string;
+    microsoftClientSecret?: string;
+    salesforceClientId?: string;
+    salesforceClientSecret?: string;
+  },
+): OAuthConfig {
+  if (service === "gmail" || service === "google-calendar" || service === "google-drive") {
+    if (!env.googleClientId) throw new Error("Google OAuth is not configured");
+    return googleOAuthConfig(service, env.googleClientId, env.googleClientSecret);
+  }
+  if (service === "microsoft") {
+    const clientId = env.microsoftClientId;
+    if (!clientId) throw new Error("Microsoft OAuth is not configured");
+    return {
+      clientId,
+      clientSecret: env.microsoftClientSecret,
+      authorizationUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+      tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+      scopes: [
+        "offline_access",
+        "User.Read",
+        "Files.ReadWrite",
+        "Mail.ReadWrite",
+        "Mail.Send",
+        "Calendars.ReadWrite",
+        "Team.ReadBasic.All",
+        "Channel.ReadBasic.All",
+        "ChannelMessage.Read.All",
+        "ChannelMessage.Send",
+        "Sites.ReadWrite.All",
+      ],
+      extraAuthorizationParams: { prompt: "select_account" },
+    };
+  }
+  if (service === "salesforce") {
+    // shortcut: PKCE authorization-code flow; use a secret-only web-server client if the connected app rejects code_challenge.
+    const clientId = env.salesforceClientId;
+    if (!clientId) throw new Error("Salesforce OAuth is not configured");
+    return {
+      clientId,
+      clientSecret: env.salesforceClientSecret,
+      authorizationUrl: "https://login.salesforce.com/services/oauth2/authorize",
+      tokenUrl: "https://login.salesforce.com/services/oauth2/token",
+      scopes: ["api", "refresh_token"],
+    };
+  }
+  throw new Error("unsupported connector service");
+}
+
+export {
+  callConnector,
+  revokeConnectorToken,
+} from "./services.ts";

@@ -29,6 +29,9 @@ class MockVMManager implements VMManager {
   async getVMStatus(vmId: string): Promise<VMInfo> {
     return { vmId, accountId: "", status: "running" };
   }
+  async listVMs(): Promise<VMInfo[]> {
+    return [];
+  }
   async execInContainer(_vmId: string, cmd: string[], _input?: string): Promise<ExecResult> {
     if (cmd[0] === "cat") return { stdout: "hello file", stderr: "", exitCode: 0 };
     if (cmd[0] === "ls") return { stdout: "file.txt\n", stderr: "", exitCode: 0 };
@@ -36,6 +39,12 @@ class MockVMManager implements VMManager {
   }
   async ensureBotBrowser(): Promise<number> {
     return 9222;
+  }
+  async ensureBotVnc(): Promise<number> {
+    return 7000;
+  }
+  async watchFiles(): Promise<{ stop: () => Promise<void>; done: Promise<void> }> {
+    return { stop: async () => {}, done: new Promise(() => {}) };
   }
 }
 
@@ -160,6 +169,8 @@ describe("Phase 1 e2e", () => {
       role: "main" as const,
       skills: [] as string[],
       tools: [] as string[],
+      localMachineAccess: "always_confirm" as const,
+      retainData: true,
       memorySettings: { agentScope: true, userScope: true, projectScope: false },
       approvalSettings: {
         autoReviewRules: [] as { actionPattern: string; mode: "require" | "always_allow" }[],

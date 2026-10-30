@@ -18,6 +18,9 @@ class StubVM implements VMManager {
   async getVMStatus(vmId: string): Promise<VMInfo> {
     return { vmId, accountId: "", status: "running" };
   }
+  async listVMs(): Promise<VMInfo[]> {
+    return [];
+  }
   async execInContainer(_vmId: string, cmd: string[], input?: string): Promise<ExecResult> {
     this.lastCmd = cmd;
     this.lastInput = input;
@@ -27,6 +30,12 @@ class StubVM implements VMManager {
   }
   async ensureBotBrowser(): Promise<number> {
     return 9222;
+  }
+  async ensureBotVnc(): Promise<number> {
+    return 7000;
+  }
+  async watchFiles(): Promise<{ stop: () => Promise<void>; done: Promise<void> }> {
+    return { stop: async () => {}, done: new Promise(() => {}) };
   }
 }
 
@@ -44,5 +53,13 @@ describe("file/shell tools", () => {
     expect(vm.lastCmd[0]).toBe("sh");
     const shell = await runShell({ command: "echo hi", cwd: "/tmp" }, "v", vm);
     expect(shell).toEqual({ stdout: "ok", stderr: "", exitCode: 0 });
+  });
+
+  test("readFile rejects path traversal", async () => {
+    const vm = new StubVM();
+    expect(await readFile({ path: "/home/agent/../../etc/passwd" }, "v", vm)).toEqual({
+      error: "path traversal denied",
+    });
+    expect(vm.lastCmd).toEqual([]);
   });
 });

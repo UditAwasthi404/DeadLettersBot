@@ -1,8 +1,9 @@
-import { decryptConnectorSecret } from "@agentOS/connectors";
+import { decryptToken } from "@agentOS/connectors";
 import { mcpServers } from "@agentOS/shared";
 import { discoverMcpTools } from "@agentOS/tools";
 import { and, eq } from "drizzle-orm";
 import type { GatewayDeps } from "./gateway.ts";
+import { loggedError, logger } from "./logger.ts";
 
 let activeRun: Promise<number> | undefined;
 
@@ -39,16 +40,22 @@ async function refreshMcpHealth(deps: GatewayDeps): Promise<number> {
             throw new Error("MCP token decryption is not configured");
           const token =
             row.authTokenCiphertext && key
-              ? await decryptConnectorSecret(
+              ? await decryptToken(
                   row.authTokenCiphertext,
                   key,
                   process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
+                  async (ciphertext) => {
+                    await deps.db
+                      .update(mcpServers)
+                      .set({ authTokenCiphertext: ciphertext })
+                      .where(eq(mcpServers.id, row.id));
+                  },
                 )
               : undefined;
           await discoverMcpTools(row.url, token);
         } catch (err) {
           health = "error";
-          console.warn(`[mcp] health check failed for ${row.id}`, err);
+          logger.warn({ ...loggedError(err), serverId: row.id }, "MCP health check failed");
         }
         await deps.db
           .update(mcpServers)

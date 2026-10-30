@@ -57,7 +57,8 @@ export interface SkillRecord {
 export type RoutineTrigger =
   | { type: "cron"; schedule: string }
   | { type: "webhook"; secretHash?: string }
-  | { type: "inter_bot_message"; senderBotId?: string };
+  | { type: "inter_bot_message"; senderBotId?: string }
+  | { type: "file_change"; path: string };
 export interface RoutineRecord {
   id: string;
   accountId: string;
@@ -196,10 +197,17 @@ export class AgentOSError extends Error {
 
 /** Typed JSON API and WebSocket client for an AgentOS account. */
 export class AgentOSClient {
+  private readonly options: AgentOSClientOptions;
   private readonly baseUrl: URL;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(private readonly options: AgentOSClientOptions) {
+  constructor(baseUrlOrOptions: string | AgentOSClientOptions, token?: string) {
+    const options =
+      typeof baseUrlOrOptions === "string"
+        ? { baseUrl: baseUrlOrOptions, token: token ?? "" }
+        : baseUrlOrOptions;
+    if (!options.token) throw new Error("token is required");
+    this.options = options;
     this.baseUrl = new URL(options.baseUrl);
     if (this.baseUrl.protocol !== "http:" && this.baseUrl.protocol !== "https:")
       throw new Error("baseUrl must use HTTP or HTTPS");
@@ -353,6 +361,45 @@ export class AgentOSClient {
     return this.request("/v1/skills", { method: "POST", body: input });
   }
 
+  draftSkill(events: unknown[]): Promise<{
+    name: string;
+    description: string;
+    steps: SkillStep[];
+  }> {
+    return this.request("/v1/skills/draft", { method: "POST", body: { events } });
+  }
+
+  startBrowserRecording(botId: string): Promise<{ recording: true }> {
+    return this.request(`/v1/bots/${encodeURIComponent(botId)}/browser-recording/start`, {
+      method: "POST",
+    });
+  }
+
+  stopBrowserRecording(botId: string): Promise<{ events: unknown[] }> {
+    return this.request(`/v1/bots/${encodeURIComponent(botId)}/browser-recording/stop`, {
+      method: "POST",
+    });
+  }
+
+  testSkill(
+    skillId: string,
+    botId: string,
+  ): Promise<{ runId: string; turnId: string; status: string }> {
+    return this.request(`/v1/skills/${encodeURIComponent(skillId)}/test`, {
+      method: "POST",
+      body: { botId },
+    });
+  }
+
+  getSkillTest(
+    skillId: string,
+    runId: string,
+  ): Promise<{ runId: string; turnId: string; status: string }> {
+    return this.request(
+      `/v1/skills/${encodeURIComponent(skillId)}/test/${encodeURIComponent(runId)}`,
+    );
+  }
+
   assignSkill(skillId: string, botId: string): Promise<SkillRecord> {
     return this.request(`/v1/skills/${encodeURIComponent(skillId)}/assign`, {
       method: "POST",
@@ -491,7 +538,7 @@ export class AgentOSClient {
   }
 
   async startConnectorOAuth(
-    service: "gmail" | "google-calendar" | "google-drive",
+    service: "gmail" | "google-calendar" | "google-drive" | "microsoft" | "salesforce",
     signal?: AbortSignal,
   ): Promise<string> {
     const path = `/v1/connectors/oauth/start/${encodeURIComponent(service)}`;
@@ -595,5 +642,29 @@ export class AgentOSClient {
 
   interrupt(socket: GatewaySocket, frame: { agentId: string; runId: string }): void {
     socket.send(JSON.stringify({ type: "interrupt", ...frame }));
+  }
+
+  testRoutine(routineId: string) {
+    return this.runRoutine(routineId);
+  }
+
+  getAuditLog(params?: { limit?: number; offset?: number }): Promise<AuditLogRecord[]> {
+    const query = new URLSearchParams();
+    if (params?.limit !== undefined) query.set("limit", String(params.limit));
+    if (params?.offset !== undefined) query.set("offset", String(params.offset));
+    const text = query.toString();
+    return this.request(`/v1/audit-log${text ? `?${text}` : ""}`);
+  }
+
+  listMcp() {
+    return this.listMcpServers();
+  }
+
+  addMcp(input: { name: string; url: string; apiKey?: string }) {
+    return this.createMcpServer(input);
+  }
+
+  deleteMcp(serverId: string) {
+    return this.deleteMcpServer(serverId);
   }
 }

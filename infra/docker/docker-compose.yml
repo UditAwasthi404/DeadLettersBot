@@ -32,14 +32,35 @@ services:
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-http://localhost:8787/v1/connectors/oauth/callback}
+      MICROSOFT_OAUTH_CLIENT_ID: ${MICROSOFT_OAUTH_CLIENT_ID:-}
+      MICROSOFT_OAUTH_CLIENT_SECRET: ${MICROSOFT_OAUTH_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      SALESFORCE_OAUTH_CLIENT_ID: ${SALESFORCE_OAUTH_CLIENT_ID:-}
+      SALESFORCE_OAUTH_CLIENT_SECRET: ${SALESFORCE_OAUTH_CLIENT_SECRET:-}
+      SALESFORCE_CLIENT_ID: ${SALESFORCE_CLIENT_ID:-}
+      SALESFORCE_CLIENT_SECRET: ${SALESFORCE_CLIENT_SECRET:-}
       INFERENCE_MOCK: ${INFERENCE_MOCK:-1}
       INFERENCE_PROVIDERS: ${INFERENCE_PROVIDERS:-openai,anthropic,ollama}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       DOCKER_HOST: unix:///var/run/docker.sock
     ports:
       - "127.0.0.1:8787:8787"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "const r=await fetch('http://127.0.0.1:8787/health'); if(!r.ok) process.exit(1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 25s
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -54,7 +75,7 @@ services:
     image: caddy:2-alpine
     profiles: ["tls"]
     environment:
-      AGENTOS_DOMAIN: ${AGENTOS_DOMAIN:-localhost}
+      AGENTOS_DOMAIN: ${CADDY_DOMAIN:-${AGENTOS_DOMAIN:-localhost}}
     ports:
       - "80:80"
       - "443:443"

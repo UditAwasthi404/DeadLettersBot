@@ -1,8 +1,8 @@
-/** JWT user sessions (REQ-H06). Secret from JWT_SECRET env — no rotation yet. */
+/** JWT user sessions. Verification accepts JWT_SECRET, then JWT_SECRET_PREVIOUS during overlap. */
 
 import { type Database, accounts } from "@agentOS/shared";
 import { eq } from "drizzle-orm";
-import { verify } from "hono/jwt";
+import { sign, verify } from "hono/jwt";
 
 export type AuthScope = "read-only" | "read-write" | "admin";
 
@@ -11,6 +11,8 @@ export interface AuthPayload {
   sub?: string;
   scopes: AuthScope[];
   sessionVersion: number;
+  /** Present when the presented JWT verified with JWT_SECRET_PREVIOUS and was re-signed. */
+  refreshedToken?: string;
 }
 
 export async function verifyBearerToken(
@@ -20,15 +22,20 @@ export async function verifyBearerToken(
   if (!authorization?.startsWith("Bearer ")) {
     throw new AuthError("missing bearer token");
   }
-  const secrets = [process.env.JWT_SECRET, process.env.JWT_SECRET_PREVIOUS]
-    .map((secret) => secret?.trim())
-    .filter((secret): secret is string => Boolean(secret));
+  const currentSecret = process.env.JWT_SECRET?.trim();
+  const previousSecret = process.env.JWT_SECRET_PREVIOUS?.trim();
+  const secrets = [currentSecret, previousSecret].filter((secret): secret is string =>
+    Boolean(secret),
+  );
   if (!secrets.length) throw new AuthError("JWT_SECRET not configured");
   const token = authorization.slice("Bearer ".length).trim();
   let payload: Awaited<ReturnType<typeof verify>> | undefined;
+  let usedPrevious = false;
   for (const secret of secrets) {
     try {
       payload = await verify(token, secret, "HS256");
+      usedPrevious =
+        Boolean(previousSecret) && secret === previousSecret && secret !== currentSecret;
       break;
     } catch {
       // During key rotation tokens signed by the previous key remain valid
@@ -56,11 +63,26 @@ export async function verifyBearerToken(
         ? (rawScopes as AuthScope[])
         : [];
   if (!scopes.length) throw new AuthError("invalid token scopes");
+  const exp = typeof payload.exp === "number" ? payload.exp : Math.floor(Date.now() / 1000) + 86_400;
+  const refreshedToken =
+    usedPrevious && currentSecret
+      ? await sign(
+          {
+            accountId,
+            ...(typeof payload.sub === "string" ? { sub: payload.sub } : {}),
+            scopes,
+            sessionVersion: tokenVersion,
+            exp,
+          },
+          currentSecret,
+        )
+      : undefined;
   return {
     accountId,
     sub: typeof payload.sub === "string" ? payload.sub : undefined,
     scopes,
     sessionVersion: tokenVersion,
+    refreshedToken,
   };
 }
 

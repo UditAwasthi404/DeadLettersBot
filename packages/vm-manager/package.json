@@ -11,7 +11,9 @@
     "test": "bun test"
   },
   "dependencies": {
-    "dockerode": "4.0.12"
+    "@agentOS/shared": "workspace:*",
+    "dockerode": "4.0.12",
+    "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
     "@types/bun": "1.1.14",

@@ -28,6 +28,10 @@ export interface Bot {
   role: "main" | "peer" | "subagent";
   skills: string[];
   tools: string[];
+  /** Runs on the connected desktop. Missing rows default to always_confirm. */
+  localMachineAccess?: "never" | "always_confirm" | "always_allow";
+  /** Stored preference. This self-hosted build does not upload conversation data. */
+  retainData?: boolean;
   memorySettings: BotMemorySettings;
   approvalSettings: ApprovalPolicy;
   createdAt: Date;

@@ -2,6 +2,7 @@ export {
   type DispatcherDeps,
   type ToolExecutor,
   dispatchTool,
+  wrapUntrusted,
 } from "./dispatcher.ts";
 export { PermissionDeniedError, checkPermission } from "./permissions.ts";
 export {

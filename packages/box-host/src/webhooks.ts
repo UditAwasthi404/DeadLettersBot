@@ -1,7 +1,8 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { decryptConnectorSecret } from "@agentOS/connectors";
+import { decryptToken } from "@agentOS/connectors";
 import { type Database, webhookDeliveries, webhookSubscriptions } from "@agentOS/shared";
 import { and, asc, eq, lte, or, sql } from "drizzle-orm";
+import { loggedError, logger } from "./logger.ts";
 
 export type WebhookEvent = "turn.settled" | "routine.completed" | "approval.required";
 
@@ -168,10 +169,16 @@ export async function processWebhookDeliveries(
         try {
           const encryptionKey = process.env.CONNECTOR_ENCRYPTION_KEY;
           if (!encryptionKey) throw new Error("CONNECTOR_ENCRYPTION_KEY is not configured");
-          const secret = await decryptConnectorSecret(
+          const secret = await decryptToken(
             subscription.secretCiphertext,
             encryptionKey,
             process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
+            async (ciphertext) => {
+              await db
+                .update(webhookSubscriptions)
+                .set({ secretCiphertext: ciphertext })
+                .where(eq(webhookSubscriptions.id, delivery.subscriptionId));
+            },
           );
           const timestamp = Math.floor(Date.now() / 1000).toString();
           const body = JSON.stringify({
@@ -245,8 +252,14 @@ export async function processWebhookDeliveries(
                 eq(webhookDeliveries.status, "processing"),
               ),
             );
-          console.warn(
-            `[webhooks] delivery ${delivery.id} attempt ${delivery.attemptCount}/${MAX_ATTEMPTS} failed: ${message}`,
+          logger.warn(
+            {
+              deliveryId: delivery.id,
+              attempt: delivery.attemptCount,
+              maxAttempts: MAX_ATTEMPTS,
+              err: message,
+            },
+            "webhook delivery failed",
           );
         }
       }),

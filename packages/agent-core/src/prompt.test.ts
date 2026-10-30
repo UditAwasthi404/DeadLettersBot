@@ -73,11 +73,28 @@ describe("buildDefaultSections / assembleTurnAction / hashSection", () => {
     expect(s.computer.length).toBeGreaterThan(0);
   });
 
-  test("assembleTurnAction appends attachment markers", () => {
+  test("assembleTurnAction appends text, image URIs, and name markers", () => {
     const msg = assembleTurnAction("hi", [
-      { id: "1", name: "a.png", mimeType: "image/png", sizeBytes: 1, uri: "x" },
+      { id: "1", name: "a.png", mimeType: "image/png", sizeBytes: 1, uri: "blob/a" },
+      {
+        id: "2",
+        name: "note.txt",
+        mimeType: "text/plain",
+        sizeBytes: 4,
+        uri: "blob/b",
+        text: "hello",
+      },
+      {
+        id: "3",
+        name: "file.bin",
+        mimeType: "application/octet-stream",
+        sizeBytes: 3,
+        uri: "blob/c",
+      },
     ]);
-    expect(msg).toEqual({ role: "user", content: "hi [attachment: a.png]" });
+    expect(msg.content).toContain("[attachment: a.png image/png blob/a]");
+    expect(msg.content).toContain("[attachment: note.txt]\nhello");
+    expect(msg.content).toContain("[attachment: file.bin]");
   });
 
   test("hashSection is 16 hex chars", () => {

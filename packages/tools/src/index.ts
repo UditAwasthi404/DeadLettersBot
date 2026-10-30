@@ -1,4 +1,4 @@
-export { BrowserSession } from "./browser-tools.ts";
+export { BrowserSession, recordingAccepts } from "./browser-tools.ts";
 export {
   appendFile,
   deleteFile,

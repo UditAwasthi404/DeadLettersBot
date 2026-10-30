@@ -110,10 +110,26 @@ export function hashSection(s: string): string {
   return createHash("sha256").update(s).digest("hex").slice(0, 16);
 }
 
-export function assembleTurnAction(prompt: string, attachments: Attachment[]): ModelMessage {
+const TEXT_ATTACHMENT_CHARS = 8_000;
+
+export function assembleTurnAction(
+  prompt: string,
+  attachments: Array<Attachment & { text?: string }>,
+): ModelMessage {
   let content = prompt;
-  for (const a of attachments) {
-    content += ` [attachment: ${a.name}]`;
+  for (const attachment of attachments) {
+    if (typeof attachment.text === "string") {
+      content += `\n[attachment: ${attachment.name}]\n${attachment.text.slice(0, TEXT_ATTACHMENT_CHARS)}`;
+    } else if (
+      attachment.mimeType === "image/png" ||
+      attachment.mimeType === "image/jpeg" ||
+      attachment.mimeType === "image/webp"
+    ) {
+      // shortcut: ModelMessage is text-only, so image bytes stay in the blob and the model sees the URI.
+      content += `\n[attachment: ${attachment.name} ${attachment.mimeType} ${attachment.uri}]`;
+    } else {
+      content += ` [attachment: ${attachment.name}]`;
+    }
   }
   return { role: "user", content };
 }

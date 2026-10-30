@@ -9,11 +9,13 @@
     "electron": "electron .",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "typecheck": "tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "test": "bun test",
     "start": "electron .",
     "pack:dir": "pnpm build && electron-builder --dir",
     "dist": "pnpm build && electron-builder"
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "ws": "8.21.0"
@@ -46,6 +48,11 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "OWNER",
+      "repo": "REPO"
     }
   }
 }

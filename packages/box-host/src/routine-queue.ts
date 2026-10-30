@@ -62,3 +62,35 @@ export async function queueRoutine(
     .where(eq(routines.id, routine.id));
   return { turnId, runId, routineRunId: run.id };
 }
+
+export async function queueSkillTest(
+  deps: RoutineQueueDeps,
+  botId: string,
+  skill: typeof skills.$inferSelect,
+  startDrain: (botId: string) => void = () => {},
+) {
+  const turnId = crypto.randomUUID();
+  const runId = crypto.randomUUID();
+  await deps.db.insert(turns).values({
+    id: turnId,
+    botId,
+    runId,
+    type: "routine",
+    input: {
+      prompt: `Execute the skill "${skill.name}" once as a confirmed test. Follow its steps, approval checkpoints, and error policy.`,
+      attachments: [],
+      nonce: crypto.randomUUID(),
+      skillId: skill.id,
+    },
+    state: "pending",
+  });
+  await enqueue(deps.redis, botId, "background", {
+    turnId,
+    runId,
+    botId,
+    accountId: skill.accountId,
+  });
+  await deps.redis.set(`run:${runId}:agentId`, botId, "EX", 86400);
+  startDrain(botId);
+  return { turnId, runId, status: "queued" as const };
+}

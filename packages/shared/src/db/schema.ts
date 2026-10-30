@@ -21,6 +21,7 @@ export const accounts = pgTable("accounts", {
   /** Provider preference order: primary → secondary → tertiary. */
   inferenceProviders: jsonb("inference_providers").$type<string[]>().default([]).notNull(),
   sessionVersion: integer("session_version").notNull().default(0),
+  lastActiveAt: timestamp("last_active_at", { withTimezone: true }).defaultNow().notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
@@ -38,6 +39,11 @@ export const bots = pgTable(
     role: text("role").$type<"main" | "peer" | "subagent">().notNull().default("main"),
     skills: jsonb("skills").$type<string[]>().notNull().default([]),
     tools: jsonb("tools").$type<string[]>().notNull().default([]),
+    localMachineAccess: text("local_machine_access")
+      .$type<"never" | "always_confirm" | "always_allow">()
+      .notNull()
+      .default("always_confirm"),
+    retainData: boolean("retain_data").notNull().default(true),
     memorySettings: jsonb("memory_settings")
       .$type<{
         agentScope: boolean;
@@ -344,6 +350,7 @@ export const routines = pgTable(
         | { type: "cron"; schedule: string }
         | { type: "webhook"; secretHash?: string }
         | { type: "inter_bot_message"; senderBotId?: string }
+        | { type: "file_change"; path: string }
       >()
       .notNull(),
     enabled: boolean("enabled").notNull().default(true),

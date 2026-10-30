@@ -6,11 +6,14 @@ type Histogram = {
   count: number;
   sum: number;
   buckets: number[];
+  boundaries: number[];
 };
 
 const counters = new Map<string, Metric>();
+const gauges = new Map<string, Metric>();
 const histograms = new Map<string, Histogram>();
 const histogramBoundaries = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+const millisBoundaries = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000, 30_000, 60_000];
 
 function key(name: string, labels: Labels): string {
   return `${name}:${JSON.stringify(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b)))}`;
@@ -28,13 +31,19 @@ export function incrementCounter(name: string, labels: Labels = {}, amount = 1):
   counters.set(id, { name, labels, value: (previous?.value ?? 0) + amount });
 }
 
-export function observeHistogram(name: string, value: number, labels: Labels = {}): void {
+export function adjustGauge(name: string, delta: number, labels: Labels = {}): void {
+  const id = key(name, labels);
+  const previous = gauges.get(id);
+  gauges.set(id, { name, labels, value: (previous?.value ?? 0) + delta });
+}
+
+function observe(name: string, value: number, boundaries: number[], labels: Labels): void {
   if (!Number.isFinite(value) || value < 0) return;
   const id = key(name, labels);
   const previous = histograms.get(id);
-  const buckets = previous?.buckets ?? Array(histogramBoundaries.length).fill(0);
-  for (let i = 0; i < histogramBoundaries.length; i += 1) {
-    const boundary = histogramBoundaries[i];
+  const buckets = previous?.buckets ?? Array(boundaries.length).fill(0);
+  for (let i = 0; i < boundaries.length; i += 1) {
+    const boundary = boundaries[i];
     if (boundary !== undefined && value <= boundary) buckets[i] = (buckets[i] ?? 0) + 1;
   }
   histograms.set(id, {
@@ -43,13 +52,22 @@ export function observeHistogram(name: string, value: number, labels: Labels = {
     count: (previous?.count ?? 0) + 1,
     sum: (previous?.sum ?? 0) + value,
     buckets,
+    boundaries,
   });
+}
+
+export function observeHistogram(name: string, value: number, labels: Labels = {}): void {
+  observe(name, value, histogramBoundaries, labels);
+}
+
+export function observeMillis(name: string, valueMs: number, labels: Labels = {}): void {
+  observe(name, valueMs, millisBoundaries, labels);
 }
 
 export function renderPrometheusMetrics(): string {
   const lines: string[] = [];
   const declared = new Set<string>();
-  const declare = (name: string, type: "counter" | "histogram") => {
+  const declare = (name: string, type: "counter" | "gauge" | "histogram") => {
     if (declared.has(name)) return;
     declared.add(name);
     lines.push(`# HELP ${name} AgentOS ${name.replaceAll("_", " ")}`);
@@ -59,10 +77,14 @@ export function renderPrometheusMetrics(): string {
     declare(metric.name, "counter");
     lines.push(`${metric.name}${labelText(metric.labels)} ${metric.value}`);
   }
+  for (const metric of gauges.values()) {
+    declare(metric.name, "gauge");
+    lines.push(`${metric.name}${labelText(metric.labels)} ${metric.value}`);
+  }
   for (const metric of histograms.values()) {
     declare(metric.name, "histogram");
-    for (let i = 0; i < histogramBoundaries.length; i += 1) {
-      const boundary = histogramBoundaries[i];
+    for (let i = 0; i < metric.boundaries.length; i += 1) {
+      const boundary = metric.boundaries[i];
       if (boundary === undefined) continue;
       const labels = labelText({ ...metric.labels, le: String(boundary) });
       lines.push(`${metric.name}_bucket${labels} ${metric.buckets[i] ?? 0}`);

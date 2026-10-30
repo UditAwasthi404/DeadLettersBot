@@ -1,6 +1,6 @@
 /** REQ-I01/I02: provider-agnostic InferenceSession (BUILD_PLAN Track B). */
 
-import type { ModelMessage, ToolCall } from "@agentOS/shared";
+import { type ModelMessage, type ToolCall, observeMillis } from "@agentOS/shared";
 import type { ZodTypeAny } from "zod";
 
 export type InferencePurpose = "main" | "summarization";
@@ -22,6 +22,21 @@ export interface InferenceSession {
     messages: ModelMessage[],
     tools?: InferenceTool[],
   ): AsyncIterable<InferenceStreamEvent>;
+}
+
+export async function* observeInferenceStream(
+  session: InferenceSession,
+  messages: ModelMessage[],
+  tools?: InferenceTool[],
+): AsyncIterable<InferenceStreamEvent> {
+  const startedAt = performance.now();
+  try {
+    yield* session.streamComplete(messages, tools);
+  } finally {
+    observeMillis("inference_duration_ms", performance.now() - startedAt, {
+      provider: session.providerId,
+    });
+  }
 }
 
 export interface ProviderFactory {

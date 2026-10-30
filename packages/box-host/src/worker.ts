@@ -1,9 +1,10 @@
 import {
   GoogleConnector,
   OAuthPkceClient,
-  decryptConnectorSecret,
+  callConnector,
+  connectorCredentialService,
+  decryptToken,
   encryptConnectorSecret,
-  googleOAuthConfig,
 } from "@agentOS/connectors";
 import { type ProviderFactory, createFallbackSession } from "@agentOS/inference";
 import {
@@ -14,6 +15,7 @@ import {
   type ModelMessage,
   type RedisClient,
   type ServerFrame,
+  accounts,
   bots,
   connectorAccounts,
   mcpServers,
@@ -31,6 +33,8 @@ import {
 import { callMcpTool, discoverMcpTools } from "@agentOS/tools";
 import { NoopVMManager, type VMManager } from "@agentOS/vm-manager";
 import { and, asc, eq, inArray, lte, or, sql } from "drizzle-orm";
+import { oauthConfigFromEnv } from "./connector-oauth.ts";
+import { loggedError, logger } from "./logger.ts";
 import { queueRoutine } from "./routine-queue.ts";
 import { createTurnRunShell } from "./runner.ts";
 import { dequeue, enqueue, hasQueuedWork } from "./scheduler.ts";
@@ -251,7 +255,9 @@ export async function processMemoryExtractionJobs(
                 eq(memoryExtractionJobs.leaseToken, leaseToken),
               ),
             )
-            .catch((err) => console.warn(`[memory] lease renewal failed for ${job.id}`, err));
+            .catch((err) =>
+              logger.warn({ ...loggedError(err), jobId: job.id }, "memory lease renewal failed"),
+            );
         }, 60_000);
         try {
           const [[bot], [turn]] = await Promise.all([
@@ -335,8 +341,9 @@ export async function processMemoryExtractionJobs(
                 eq(memoryExtractionJobs.leaseToken, leaseToken),
               ),
             );
-          console.warn(
-            `[memory] extraction job ${job.id} attempt ${attempt} failed; retry scheduled: ${message}`,
+          logger.warn(
+            { jobId: job.id, attempt, err: message },
+            "memory extraction failed; retry scheduled",
           );
         } finally {
           clearInterval(leaseHeartbeat);
@@ -591,7 +598,9 @@ export async function processMemorySynthesisJobs(deps: WorkerDeps, batchSize = 2
                 eq(memorySynthesisJobs.leaseToken, leaseToken),
               ),
             )
-            .catch((err) => console.warn("[memory] synthesis lease heartbeat failed", err));
+            .catch((err) =>
+              logger.warn(loggedError(err), "memory synthesis lease heartbeat failed"),
+            );
         }, 20_000);
         try {
           await runMemorySynthesisJob(deps, job);
@@ -632,7 +641,7 @@ export async function processMemorySynthesisJobs(deps: WorkerDeps, batchSize = 2
                 eq(memorySynthesisJobs.leaseToken, leaseToken),
               ),
             );
-          console.warn(`[memory] synthesis job ${job.id} retry scheduled: ${message}`);
+          logger.warn({ jobId: job.id, err: message }, "memory synthesis retry scheduled");
         } finally {
           clearInterval(heartbeat);
         }
@@ -653,7 +662,7 @@ function scheduleIdleSuspend(vm: VMManager, vmId: string): void {
       const status = await vm.getVMStatus(vmId);
       if (status.status === "running") await vm.suspendVM(vmId);
     } catch (err) {
-      console.warn(`[worker] idle suspend failed for ${vmId}`, err);
+      logger.warn({ ...loggedError(err), vmId }, "idle VM suspend failed");
     }
   }, IDLE_TIMEOUT_MS);
   idleTimers.set(vmId, timer);
@@ -775,7 +784,7 @@ export async function drainAgent(
         .where(eq(bots.id, item.payload.botId))
         .limit(1);
       if (!botRow) {
-        console.error(`[worker] bot missing for turn ${item.payload.turnId}`);
+        logger.error({ turnId: item.payload.turnId }, "bot missing for turn");
         continue;
       }
       const [turnRow] = await deps.db
@@ -787,6 +796,10 @@ export async function drainAgent(
         if (turnRow?.input.subagentId) await completeSubagent(deps, turnRow.input.subagentId, send);
         continue;
       }
+      await deps.db
+        .update(accounts)
+        .set({ lastActiveAt: new Date() })
+        .where(eq(accounts.id, item.payload.accountId));
       if (turnRow.input.subagentId)
         await deps.db
           .update(subagents)
@@ -905,7 +918,10 @@ export async function drainAgent(
                 hopCount,
               );
             } catch (err) {
-              console.error(`[routines] inter-bot trigger failed for ${routine.id}`, err);
+              logger.error(
+                { ...loggedError(err), routineId: routine.id },
+                "inter-bot routine trigger failed",
+              );
             }
           }
         },
@@ -1069,37 +1085,47 @@ export async function drainAgent(
           return { subagentId: record.id, status: "cancellation_requested" };
         },
         connectorCall: async (service, action, params) => {
+          const credentialService = connectorCredentialService(service);
           const [connection] = await deps.db
             .select()
             .from(connectorAccounts)
             .where(
               and(
                 eq(connectorAccounts.accountId, item.payload.accountId),
-                eq(connectorAccounts.service, service),
+                eq(connectorAccounts.service, credentialService),
               ),
             )
             .limit(1);
-          if (!connection) throw new Error(`${service} is not connected`);
+          if (!connection) throw new Error(`${credentialService} is not connected`);
           const encryptionKey = process.env.CONNECTOR_ENCRYPTION_KEY;
           if (!encryptionKey) throw new Error("connector encryption is not configured");
-          let accessToken = await decryptConnectorSecret(
+          let accessToken = await decryptToken(
             connection.accessTokenCiphertext,
             encryptionKey,
             process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
+            async (ciphertext) => {
+              await deps.db
+                .update(connectorAccounts)
+                .set({ accessTokenCiphertext: ciphertext, updatedAt: new Date() })
+                .where(eq(connectorAccounts.id, connection.id));
+            },
           );
-          const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
-          if (!clientId) throw new Error("Google OAuth is not configured");
           if (connection.expiresAt && connection.expiresAt.getTime() < Date.now() + 60_000) {
+            const oauthConfig = oauthConfigFromEnv(credentialService);
             if (!connection.refreshTokenCiphertext)
               throw new Error("connector token expired; reconnect this service");
-            const refreshToken = await decryptConnectorSecret(
+            const refreshToken = await decryptToken(
               connection.refreshTokenCiphertext,
               encryptionKey,
               process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
+              async (ciphertext) => {
+                await deps.db
+                  .update(connectorAccounts)
+                  .set({ refreshTokenCiphertext: ciphertext, updatedAt: new Date() })
+                  .where(eq(connectorAccounts.id, connection.id));
+              },
             );
-            const tokens = await new OAuthPkceClient(
-              googleOAuthConfig(service, clientId, process.env.GOOGLE_OAUTH_CLIENT_SECRET),
-            ).refresh(refreshToken);
+            const tokens = await new OAuthPkceClient(oauthConfig).refresh(refreshToken);
             accessToken = tokens.accessToken;
             const encryptedAccess = await encryptConnectorSecret(accessToken, encryptionKey);
             const encryptedRefresh = tokens.refreshToken
@@ -1113,20 +1139,31 @@ export async function drainAgent(
                 expiresAt: tokens.expiresIn
                   ? new Date(Date.now() + tokens.expiresIn * 1000)
                   : connection.expiresAt,
+                ...(tokens.instanceUrl ? { providerUserId: tokens.instanceUrl } : {}),
                 updatedAt: new Date(),
               })
               .where(eq(connectorAccounts.id, connection.id));
+            if (tokens.instanceUrl) connection.providerUserId = tokens.instanceUrl;
           }
-          const connector = new GoogleConnector();
-          return connector.call(
-            service === "google-calendar"
-              ? "calendar"
-              : service === "google-drive"
-                ? "drive"
-                : "gmail",
+          if (service === "gmail" || service === "google-calendar" || service === "google-drive") {
+            return new GoogleConnector().call(
+              service === "google-calendar"
+                ? "calendar"
+                : service === "google-drive"
+                  ? "drive"
+                  : "gmail",
+              action,
+              params,
+              accessToken,
+            );
+          }
+          return callConnector(
+            service,
             action,
             params,
             accessToken,
+            fetch,
+            connection.providerUserId,
           );
         },
         memoryCall: async (action, params) => {
@@ -1204,10 +1241,16 @@ export async function drainAgent(
             throw new Error("MCP token decryption is not configured");
           const token =
             server.authTokenCiphertext && key
-              ? await decryptConnectorSecret(
+              ? await decryptToken(
                   server.authTokenCiphertext,
                   key,
                   process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
+                  async (ciphertext) => {
+                    await deps.db
+                      .update(mcpServers)
+                      .set({ authTokenCiphertext: ciphertext })
+                      .where(eq(mcpServers.id, server.id));
+                  },
                 )
               : undefined;
           const tools = await discoverMcpTools(server.url, token);
@@ -1294,7 +1337,7 @@ export async function drainAgent(
                 await deps.redis.set(`run:${retryRunId}:agentId`, routine.botId, "EX", 86400);
                 void drainAgent(routine.botId, deps, send);
               })().catch((retryError) =>
-                console.error("[routines] retry scheduling failed", retryError),
+                logger.error(loggedError(retryError), "routine retry scheduling failed"),
               );
             },
             1_000 * 2 ** attempt,

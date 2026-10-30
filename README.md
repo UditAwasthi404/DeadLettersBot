@@ -2,7 +2,7 @@
 
 AgentOS is a self-hostable, multi-bot agent runtime. It combines a TypeScript monorepo, a WebSocket turn gateway, provider adapters, a Docker-backed browser VM, scoped memory, approvals, peer messages, skills, and routines.
 
-> **Project status:** implementation is in progress. Core host, PostgreSQL and Redis persistence, account bootstrap, scoped memory and memory tools, peer messaging, approvals, skill/routine APIs, cron/webhook triggers, Gmail/Calendar/initial Drive OAuth connectors, initial MCP support, and a desktop chat/memory shell are present. Outbound signed webhooks have a durable retry queue and delivery history. Secure handoff, local PC execution, full subagent lifecycle, runtime compaction acceptance, Microsoft/Salesforce connectors, routine connector/file triggers, production deployment hardening, and launch artifacts remain incomplete.
+> **Project status:** implementation is in progress. Core host, PostgreSQL and Redis persistence, account bootstrap, scoped memory and memory tools, peer messaging, approvals, skill/routine APIs, cron/webhook/file-change triggers, Google and Microsoft/Salesforce connector actions, browser skill recording, initial MCP support, and an Electron chat shell with session restore are present. Outbound signed webhooks have a durable retry queue and delivery history. Secure handoff, local PC execution, full subagent lifecycle, runtime compaction acceptance, connector-event triggers, production deployment hardening, and launch artifacts remain incomplete.
 
 ## Local self-host quickstart
 

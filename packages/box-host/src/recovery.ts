@@ -2,6 +2,7 @@
 
 import { type Database, type RedisClient, bots, turns } from "@agentOS/shared";
 import { eq, or } from "drizzle-orm";
+import { logger } from "./logger.ts";
 import { enqueue } from "./scheduler.ts";
 
 export async function recoverInProgressTurns(
@@ -18,7 +19,7 @@ export async function recoverInProgressTurns(
       await db.update(turns).set({ state: "pending" }).where(eq(turns.id, turn.id));
     const [bot] = await db.select().from(bots).where(eq(bots.id, turn.botId)).limit(1);
     if (!bot) {
-      console.warn(`[recovery] bot missing for turn ${turn.id}; skipped`);
+      logger.warn({ turnId: turn.id }, "recovery skipped a turn with no bot");
       continue;
     }
     const lane =
@@ -36,6 +37,6 @@ export async function recoverInProgressTurns(
     });
     agentIds.add(turn.botId);
   }
-  console.info(`[recovery] re-enqueued ${pending.length} pending/in-progress turn(s)`);
+  logger.info({ count: pending.length }, "re-enqueued pending turns");
   return { count: pending.length, agentIds: [...agentIds] };
 }
