@@ -532,7 +532,7 @@ add({
   security: publicRoute,
 });
 
-export function openApiDocument() {
+export function openApiDocument(): Record<string, unknown> {
   const document = api.getOpenAPI31Document({
     openapi: "3.1.0",
     info: {
