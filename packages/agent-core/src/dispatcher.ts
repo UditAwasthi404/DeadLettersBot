@@ -199,7 +199,8 @@ export async function dispatchTool(
 
     const flagged = withErrorFlag(raw);
     const source = UNTRUSTED_TOOL_SOURCES[tc.name];
-    const result = !flagged.isError && source ? wrapUntrusted(source, flagged.result) : flagged.result;
+    const result =
+      !flagged.isError && source ? wrapUntrusted(source, flagged.result) : flagged.result;
     const { isError } = flagged;
     return { toolCallId: tc.id, name: tc.name, result, isError };
   } catch (err) {

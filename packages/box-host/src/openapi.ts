@@ -186,7 +186,13 @@ function add(spec: {
 
 const publicRoute = [] as Array<Record<string, string[]>>;
 
-add({ method: "get", path: "/health", summary: "Liveness probe", response: Ok, security: publicRoute });
+add({
+  method: "get",
+  path: "/health",
+  summary: "Liveness probe",
+  response: Ok,
+  security: publicRoute,
+});
 add({
   method: "get",
   path: "/ready",
@@ -200,8 +206,21 @@ add({
   summary: "List bots",
   response: z.array(Bot),
 });
-add({ method: "post", path: "/v1/bots", summary: "Create a bot", body: CreateBot, response: Bot, status: 201 });
-add({ method: "get", path: "/v1/bots/{botId}", summary: "Read a bot", params: botId, response: Bot });
+add({
+  method: "post",
+  path: "/v1/bots",
+  summary: "Create a bot",
+  body: CreateBot,
+  response: Bot,
+  status: 201,
+});
+add({
+  method: "get",
+  path: "/v1/bots/{botId}",
+  summary: "Read a bot",
+  params: botId,
+  response: Bot,
+});
 add({
   method: "patch",
   path: "/v1/bots/{botId}",
@@ -519,7 +538,8 @@ export function openApiDocument() {
     info: {
       title: "AgentOS API",
       version: "0.1.0",
-      description: "Bearer authentication applies to /v1 routes except bootstrap, the OAuth callback, and routine webhooks.",
+      description:
+        "Bearer authentication applies to /v1 routes except bootstrap, the OAuth callback, and routine webhooks.",
     },
   });
   return {

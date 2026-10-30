@@ -63,7 +63,8 @@ export async function verifyBearerToken(
         ? (rawScopes as AuthScope[])
         : [];
   if (!scopes.length) throw new AuthError("invalid token scopes");
-  const exp = typeof payload.exp === "number" ? payload.exp : Math.floor(Date.now() / 1000) + 86_400;
+  const exp =
+    typeof payload.exp === "number" ? payload.exp : Math.floor(Date.now() / 1000) + 86_400;
   const refreshedToken =
     usedPrevious && currentSecret
       ? await sign(

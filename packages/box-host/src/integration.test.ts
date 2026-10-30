@@ -10,7 +10,13 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { InferenceSession, InferenceStreamEvent, ProviderFactory } from "@agentOS/inference";
-import { BlobStore, type ModelMessage, type ServerFrame, createDb, createRedis } from "@agentOS/shared";
+import {
+  BlobStore,
+  type ModelMessage,
+  type ServerFrame,
+  createDb,
+  createRedis,
+} from "@agentOS/shared";
 import { NoopVMManager } from "@agentOS/vm-manager";
 import { Hono } from "hono";
 import { createGateway } from "./gateway.ts";

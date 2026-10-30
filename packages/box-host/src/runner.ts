@@ -27,9 +27,9 @@ import {
   type TokenUsage,
   type ToolCall,
   type ToolResult,
+  adjustGauge,
   auditLog,
   bots,
-  adjustGauge,
   incrementCounter,
   mcpServers,
   memories,
@@ -1345,7 +1345,10 @@ ${server.cachedTools
           "application/json",
         );
       } catch (restoreError) {
-        logger.error(loggedError(restoreError), "failed to restore transcript after compaction error");
+        logger.error(
+          loggedError(restoreError),
+          "failed to restore transcript after compaction error",
+        );
       }
     }
     incrementCounter("agentos_turns_total", { status: "error" });
@@ -1370,7 +1373,9 @@ ${server.cachedTools
         routineRunId,
         status: "error",
         error: err instanceof Error ? err.message : String(err),
-      }).catch((hookError) => logger.warn(loggedError(hookError), "routine webhook dispatch failed"));
+      }).catch((hookError) =>
+        logger.warn(loggedError(hookError), "routine webhook dispatch failed"),
+      );
     if (routineRunId && ctx.onRoutineError) {
       try {
         await ctx.onRoutineError(

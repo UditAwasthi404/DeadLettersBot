@@ -1,6 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { connect as connectTcp } from "node:net";
-import { apiReference } from "@scalar/hono-api-reference";
 import {
   OAUTH_START_SERVICES,
   OAuthPkceClient,
@@ -45,6 +44,7 @@ import {
 } from "@agentOS/shared";
 import { BrowserSession, discoverMcpTools, validateMcpEndpoint } from "@agentOS/tools";
 import type { VMManager } from "@agentOS/vm-manager";
+import { apiReference } from "@scalar/hono-api-reference";
 import { and, desc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
@@ -56,9 +56,9 @@ import {
   validateAttachmentList,
 } from "./attachments.ts";
 import { AuthError, verifyBearerToken } from "./auth.ts";
+import { oauthConfigFromEnv } from "./connector-oauth.ts";
 import { loggedError, logger } from "./logger.ts";
 import { openApiDocument } from "./openapi.ts";
-import { oauthConfigFromEnv } from "./connector-oauth.ts";
 import { queueRoutine, queueSkillTest } from "./routine-queue.ts";
 import { enqueue } from "./scheduler.ts";
 import { parseSkillDraft } from "./skill-draft.ts";
@@ -310,7 +310,9 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       ? Math.max(1, Math.min(requestedLimit, 500))
       : 100;
     const requestedOffset = Number(c.req.query("offset") ?? 0);
-    const offset = Number.isInteger(requestedOffset) ? Math.max(0, Math.min(requestedOffset, 10_000)) : 0;
+    const offset = Number.isInteger(requestedOffset)
+      ? Math.max(0, Math.min(requestedOffset, 10_000))
+      : 0;
     const rows = await deps.db
       .select()
       .from(auditLog)
