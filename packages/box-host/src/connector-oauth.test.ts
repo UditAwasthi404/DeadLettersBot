@@ -4,6 +4,7 @@ import { accounts, connectorAccounts } from "@agentOS/shared";
 import { Hono } from "hono";
 import { sign } from "hono/jwt";
 import { validateRuntimeConfig } from "./config.ts";
+import { describeConnectedConnectors } from "./connector-availability.ts";
 import { configuredOAuthRedirectUri } from "./connector-oauth.ts";
 import { createGateway } from "./gateway.ts";
 
@@ -214,6 +215,11 @@ describe("oauth connect flow", () => {
           );
           expect(reconnected.status).toBe(200);
           expect(connections).toHaveLength(1);
+          const connected = describeConnectedConnectors(
+            connections.map((row) => String(row.service)),
+          );
+          expect(connected).toContain("gmail is connected");
+          expect(connected).toContain('action "SendMessage"');
           expect(
             await decryptConnectorSecret(
               String(connections[0]?.refreshTokenCiphertext),
