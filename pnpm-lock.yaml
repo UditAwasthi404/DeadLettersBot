@@ -102,7 +102,14 @@ importers:
         specifier: 5.7.2
         version: 5.7.2
 
-  packages/connectors: {}
+  packages/connectors:
+    devDependencies:
+      '@types/bun':
+        specifier: 1.1.14
+        version: 1.1.14
+      typescript:
+        specifier: 5.7.2
+        version: 5.7.2
 
   packages/desktop:
     dependencies:
@@ -197,6 +204,9 @@ importers:
         specifier: 0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.0)(bun-types@1.1.37)(postgres@3.4.5)
     devDependencies:
+      '@types/bun':
+        specifier: 1.1.14
+        version: 1.1.14
       typescript:
         specifier: 5.7.2
         version: 5.7.2

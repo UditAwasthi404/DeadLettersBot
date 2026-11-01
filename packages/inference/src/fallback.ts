@@ -45,12 +45,16 @@ export class FallbackSession implements InferenceSession {
     for (let i = 0; i < this.chain.length; i++) {
       const session = this.chain[i];
       if (!session) continue;
+      // A failure before the first event can fall through. Once any event has
+      // been yielded, the caller already observed this provider, so a later
+      // error must not be stitched onto another provider's stream.
+      let yielded = false;
       try {
-        // Buffer first event so a cold failure before any yield can fall through.
         const iter = session.streamComplete(messages, tools)[Symbol.asyncIterator]();
         const first = await iter.next();
         if (first.done) return;
         yield first.value;
+        yielded = true;
         while (true) {
           const next = await iter.next();
           if (next.done) return;
@@ -59,7 +63,7 @@ export class FallbackSession implements InferenceSession {
       } catch (err) {
         lastError = err;
         const hasNext = i < this.chain.length - 1;
-        if (!hasNext || !isRetryableInferenceError(err)) throw err;
+        if (yielded || !hasNext || !isRetryableInferenceError(err)) throw err;
       }
     }
     throw lastError;

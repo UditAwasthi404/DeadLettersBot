@@ -44,4 +44,27 @@ describe("FallbackSession", () => {
     }
     expect(out).toEqual(["ok"]);
   });
+
+  test("does not continue with another provider after a token was streamed", async () => {
+    const primary = session("a", async function* () {
+      yield { type: "token", delta: "partial" };
+      throw Object.assign(new Error("overloaded"), { status: 503 });
+    });
+    const secondary = session("b", async function* () {
+      yield { type: "token", delta: "other" };
+    });
+    const fb = new FallbackSession("main", [primary, secondary]);
+    const out: string[] = [];
+    let thrown: unknown;
+    try {
+      for await (const ev of fb.streamComplete([{ role: "user", content: "hi" }])) {
+        if (ev.type === "token") out.push(ev.delta);
+      }
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe("overloaded");
+    expect(out).toEqual(["partial"]);
+  });
 });

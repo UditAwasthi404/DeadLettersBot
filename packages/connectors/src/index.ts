@@ -126,6 +126,17 @@ export async function decryptToken(
   return decoded.plaintext;
 }
 
+function headerValue(value: unknown): string {
+  return String(value ?? "")
+    .replace(/[\r\n\0]/g, "")
+    .trim()
+    .slice(0, 500);
+}
+
+export function isSafeUploadMime(mimeType: string): boolean {
+  return /^(?:text\/[a-z0-9][a-z0-9.+-]*|application\/json)$/i.test(mimeType);
+}
+
 function base64Url(bytes: Uint8Array): string {
   return bytesToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
@@ -235,8 +246,8 @@ async function googleRequest(
       method = "POST";
       path = "/messages/send";
       const raw = [
-        `To: ${String(args.to ?? "")}`,
-        `Subject: ${String(args.subject ?? "")}`,
+        `To: ${headerValue(args.to)}`,
+        `Subject: ${headerValue(args.subject)}`,
         "Content-Type: text/plain; charset=utf-8",
         "",
         String(args.body ?? ""),
@@ -248,8 +259,7 @@ async function googleRequest(
     if (action === "ListEvents") {
       const timeMin = typeof args.timeMin === "string" ? `&timeMin=${encode(args.timeMin)}` : "";
       path = `/calendars/${calendarId}/events?maxResults=${Math.min(250, Number(args.maxResults ?? 50))}&singleEvents=true&orderBy=startTime${timeMin}`;
-    }
-    else if (action === "CreateEvent") {
+    } else if (action === "CreateEvent") {
       method = "POST";
       path = `/calendars/${calendarId}/events`;
       body = args.event;
@@ -309,7 +319,7 @@ async function googleRequest(
       if (!name) throw new Error("name is required");
       if (new TextEncoder().encode(content).byteLength > 1_000_000)
         throw new Error("file content exceeds 1 MB");
-      if (!mimeType.startsWith("text/") && mimeType !== "application/json")
+      if (!isSafeUploadMime(mimeType))
         throw new Error("WriteFile supports text and JSON files only");
       method = args.fileId ? "PATCH" : "POST";
       const metadata = args.fileId ? "" : JSON.stringify({ name, mimeType });

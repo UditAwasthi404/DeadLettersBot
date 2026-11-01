@@ -2025,6 +2025,11 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     upgradeWebSocket((c) => {
       const authHeader = c.req.header("Authorization");
       let accountId = "";
+      let authenticated = false;
+      let resolveReady: () => void = () => {};
+      const ready = new Promise<void>((resolve) => {
+        resolveReady = resolve;
+      });
 
       return {
         async onOpen(_evt, ws) {
@@ -2035,30 +2040,43 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
               return;
             }
             accountId = auth.accountId;
+            authenticated = true;
             logger.info({ accountId }, "gateway connected");
-            const waiting = await deps.redis.hgetall(`handoffs:${accountId}`);
-            for (const value of Object.values(waiting)) {
-              let parsed: { agentId?: string; runId?: string; reason?: string };
-              try {
-                parsed = JSON.parse(value) as { agentId?: string; runId?: string; reason?: string };
-              } catch {
-                continue;
+            try {
+              const waiting = await deps.redis.hgetall(`handoffs:${accountId}`);
+              for (const value of Object.values(waiting)) {
+                let parsed: { agentId?: string; runId?: string; reason?: string };
+                try {
+                  parsed = JSON.parse(value) as {
+                    agentId?: string;
+                    runId?: string;
+                    reason?: string;
+                  };
+                } catch {
+                  continue;
+                }
+                if (!parsed.agentId || !parsed.runId) continue;
+                ws.send(
+                  JSON.stringify({
+                    type: "secureHandoff",
+                    agentId: parsed.agentId,
+                    runId: parsed.runId,
+                    reason: parsed.reason ?? "Secure handoff",
+                  } satisfies ServerFrame),
+                );
               }
-              if (!parsed.agentId || !parsed.runId) continue;
-              ws.send(
-                JSON.stringify({
-                  type: "secureHandoff",
-                  agentId: parsed.agentId,
-                  runId: parsed.runId,
-                  reason: parsed.reason ?? "Secure handoff",
-                } satisfies ServerFrame),
-              );
+            } catch (err) {
+              logger.warn(loggedError(err), "failed to replay secure handoffs");
             }
           } catch {
             ws.close(1008, "unauthorized");
+          } finally {
+            resolveReady();
           }
         },
         async onMessage(evt, ws) {
+          await ready;
+          if (!authenticated) return;
           const send = (frame: ServerFrame) => {
             ws.send(JSON.stringify(frame));
           };

@@ -122,7 +122,7 @@ async function microsoftCall(
       if (new TextEncoder().encode(content).byteLength > FILE_BYTES)
         throw new Error("file content exceeds 1 MB");
       const mimeType = String(args.mimeType ?? "text/plain");
-      if (!mimeType.startsWith("text/") && mimeType !== "application/json")
+      if (!/^(?:text\/[a-z0-9][a-z0-9.+-]*|application\/json)$/i.test(mimeType))
         throw new Error("WriteFile supports text and JSON files only");
       const target = args.fileId
         ? `/me/drive/items/${encode(args.fileId)}/content`
