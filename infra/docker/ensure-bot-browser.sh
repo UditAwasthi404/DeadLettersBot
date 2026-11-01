@@ -69,7 +69,9 @@ fi
 
 if ! port_open "$port"; then
   nohup env DISPLAY=":$display" chromium \
+    --no-sandbox \
     --disable-dev-shm-usage \
+    --disable-gpu \
     --remote-debugging-port="$port" \
     --remote-debugging-address=0.0.0.0 \
     --user-data-dir="$state_dir/profile-$bot_id" \

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("agentOS", {
+  platform: process.platform,
   apiRequest: (request: {
     baseUrl: string;
     token: string;

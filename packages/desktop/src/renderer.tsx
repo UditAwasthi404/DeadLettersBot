@@ -105,6 +105,26 @@ function cronFieldOk(field: string, min: number, max: number): boolean {
   });
 }
 
+function gatewayHost(value: string): string {
+  try {
+    return new URL(value).host;
+  } catch {
+    return "Set a gateway";
+  }
+}
+
+function isAccountEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function Glyph({ children }: { children: React.ReactNode }) {
+  return (
+    <svg className="glyph" viewBox="0 0 16 16" aria-hidden="true">
+      {children}
+    </svg>
+  );
+}
+
 function cronPreview(expression: string): string {
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5) return "Use five fields: minute hour day month weekday.";
@@ -277,6 +297,24 @@ function App() {
   const screenRef = useRef<HTMLCanvasElement>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingAttachment[]>([]);
   const [localOpen, setLocalOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
+  const [signedIn, setSignedIn] = useState(false);
+  const [authMode, setAuthMode] = useState<"create" | "token">("create");
+  const [accountName, setAccountName] = useState("");
+  const [accountEmail, setAccountEmail] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const accountNameRef = useRef<HTMLInputElement>(null);
+  const [botQuery, setBotQuery] = useState("");
+  const [botDraftOpen, setBotDraftOpen] = useState(false);
+  const [botDraftName, setBotDraftName] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const [notice, setNotice] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const botNameRef = useRef<HTMLInputElement>(null);
   const [localAccess, setLocalAccess] = useState<LocalPolicy>("always_confirm");
   const [pendingLocal, setPendingLocal] = useState<{
     agentId: string;
@@ -386,10 +424,11 @@ function App() {
     const stopStatus = window.agentOS.onStatus(setStatus);
     let active = true;
     void window.agentOS.restoreSession().then(async (saved) => {
-      if (!active || !saved?.baseUrl || !saved.token) return;
-      setBaseUrl(saved.baseUrl);
-      setToken(saved.token);
       try {
+        if (!active || !saved?.baseUrl || !saved.token) return;
+        setBaseUrl(saved.baseUrl);
+        setToken(saved.token);
+        setAuthMode("token");
         await window.agentOS.connect(saved.baseUrl, saved.token);
         if (!active) return;
         const roster = (await window.agentOS.apiRequest({
@@ -400,8 +439,11 @@ function App() {
         if (!active) return;
         setBots(roster);
         setBotId(roster[0]?.id ?? "");
+        setSignedIn(true);
       } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : String(err));
+        if (active) setAuthError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (active) setSessionReady(true);
       }
     });
     return () => {
@@ -418,6 +460,68 @@ function App() {
   }, [items]);
 
   useEffect(() => window.agentOS.onUpdateReady(() => setUpdateReady(true)), []);
+
+  useEffect(() => {
+    if (window.agentOS.platform)
+      document.documentElement.dataset.platform = window.agentOS.platform;
+  }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 3200);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
+    if (botDraftOpen) botNameRef.current?.focus();
+  }, [botDraftOpen]);
+
+  useEffect(() => {
+    if (sessionReady && !signedIn && authMode === "create") accountNameRef.current?.focus();
+  }, [sessionReady, signedIn, authMode]);
+
+  useEffect(() => {
+    const node = composerRef.current;
+    if (node && !draft) node.style.height = "";
+  }, [draft]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const meta = event.metaKey || event.ctrlKey;
+      if (event.key === "Escape") {
+        setConnectOpen(false);
+        setBotDraftOpen(false);
+        setScreenMode((mode) => (mode === "view" ? null : mode));
+        return;
+      }
+      const target = event.target;
+      const typing =
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable);
+      if (!meta) return;
+      const key = event.key.toLowerCase();
+      if (key === "n" && !typing) {
+        event.preventDefault();
+        setBotDraftName("");
+        setBotDraftOpen(true);
+      } else if (key === "k") {
+        event.preventDefault();
+        showWorkspace("chat");
+        window.setTimeout(() => composerRef.current?.focus(), 0);
+      } else if (key === ",") {
+        event.preventDefault();
+        setConnectOpen(true);
+      } else if (key === "f" && !typing) {
+        event.preventDefault();
+        document.querySelector<HTMLInputElement>(".sidebar-search")?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(
     () =>
@@ -472,7 +576,7 @@ function App() {
       if (!closed) session.push(asBytes(bytes));
     });
     const stopStatus = window.agentOS.onVncStatus((next) => {
-      if (!closed && next === "closed") setError("The VM screen connection closed.");
+      if (!closed && next) setError(next);
     });
     void window.agentOS.openVnc(screenBotId).catch((err) => {
       if (!closed) setError(err instanceof Error ? err.message : String(err));
@@ -517,32 +621,93 @@ function App() {
     };
   }, [screenMode, screenBotId]);
 
-  async function connect() {
+  async function connect(next?: { baseUrl?: string; token?: string }): Promise<boolean> {
+    const url = next?.baseUrl ?? baseUrl;
+    const bearer = next?.token ?? token;
     setError("");
+    setAuthError("");
     try {
-      await window.agentOS.connect(baseUrl, token);
+      await window.agentOS.connect(url, bearer);
       const roster = (await window.agentOS.apiRequest({
-        baseUrl,
-        token,
+        baseUrl: url,
+        token: bearer,
         path: "/v1/bots",
       })) as Bot[];
+      setBaseUrl(url);
+      setToken(bearer);
       setBots(roster);
       setBotId(roster[0]?.id ?? "");
+      setConnectOpen(false);
+      setSignedIn(true);
+      return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      setAuthError(message);
+      setError(message);
+      return false;
     }
   }
 
-  async function createBot() {
-    const name = window.prompt("Name for the new bot");
-    if (!name?.trim()) return;
+  async function createAccount() {
+    const name = accountName.trim();
+    const email = accountEmail.trim().toLowerCase();
+    if (!name) {
+      setAuthError("Enter your name.");
+      return;
+    }
+    if (!isAccountEmail(email)) {
+      setAuthError("Enter a valid email address.");
+      return;
+    }
+    let gateway: URL;
+    try {
+      gateway = new URL(baseUrl.trim());
+    } catch {
+      setAuthError("Enter a gateway address such as http://localhost:8787.");
+      return;
+    }
+    if (gateway.protocol !== "http:" && gateway.protocol !== "https:") {
+      setAuthError("The gateway address must start with http:// or https://.");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const created = (await window.agentOS.apiRequest({
+        baseUrl: gateway.origin,
+        token: "",
+        path: "/v1/auth/bootstrap",
+        method: "POST",
+        body: { email, displayName: name },
+      })) as { token?: string };
+      if (!created.token) throw new Error("The gateway did not return a session.");
+      setBaseUrl(gateway.origin);
+      setToken(created.token);
+      const signedInNow = await connect({ baseUrl: gateway.origin, token: created.token });
+      if (!signedInNow) setAuthMode("token");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.toLowerCase().includes("bootstrap is closed")) {
+        setAuthMode("token");
+        setAuthError("This gateway already has an account. Sign in with its saved token.");
+      } else {
+        setAuthError(message);
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function createBot(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
     try {
       await window.agentOS.apiRequest({
         baseUrl,
         token,
         path: "/v1/bots",
         method: "POST",
-        body: { name },
+        body: { name: trimmed },
       });
       const roster = (await window.agentOS.apiRequest({
         baseUrl,
@@ -551,6 +716,9 @@ function App() {
       })) as Bot[];
       setBots(roster);
       setBotId(roster[roster.length - 1]?.id ?? "");
+      setBotDraftOpen(false);
+      setBotDraftName("");
+      showWorkspace("chat");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -565,9 +733,7 @@ function App() {
         path: `/v1/bots/${botId}/memory`,
       })) as MemoryEntry[];
       setMemoryEntries(rows);
-      setAutomationOpen(false);
-      setWebhookOpen(false);
-      setMemoryOpen(true);
+      showWorkspace("memory");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -585,10 +751,7 @@ function App() {
       setInferenceProviderId(bot.inferenceSettings?.providerId ?? "");
       setInferenceModel(bot.inferenceSettings?.model ?? "");
       setRetainData(bot.retainData !== false);
-      setAutomationOpen(false);
-      setMemoryOpen(false);
-      setConnectorOpen(false);
-      setWebhookOpen(false);
+      showWorkspace("model");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -605,7 +768,7 @@ function App() {
           inferenceSettings: { providerId: inferenceProviderId, model: inferenceModel.trim() },
         },
       });
-      setError("Model settings saved. They apply to new runs.");
+      setNotice("Model settings saved. They apply to new runs.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -621,10 +784,7 @@ function App() {
       ]);
       setSkillItems(skills);
       setRoutineItems(routines);
-      setConnectorOpen(false);
-      setMemoryOpen(false);
-      setWebhookOpen(false);
-      setAutomationOpen(true);
+      showWorkspace("automation");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -947,10 +1107,7 @@ function App() {
       ])) as [ConnectorItem[], McpServerItem[]];
       setConnectorItems(rows);
       setMcpItems(mcpRows);
-      setAutomationOpen(false);
-      setMemoryOpen(false);
-      setWebhookOpen(false);
-      setConnectorOpen(true);
+      showWorkspace("connectors");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -964,11 +1121,7 @@ function App() {
       ])) as [WebhookSubscriptionItem[], WebhookDeliveryItem[]];
       setWebhookSubscriptions(subscriptions);
       setWebhookDeliveries(deliveries);
-      setAutomationOpen(false);
-      setMemoryOpen(false);
-      setConnectorOpen(false);
-      setInferenceProviders([]);
-      setWebhookOpen(true);
+      showWorkspace("webhooks");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1142,7 +1295,7 @@ function App() {
           customPrompt: "",
         })),
       });
-      setAutomationOpen(true);
+      showWorkspace("automation");
     } catch (err) {
       setRecording(false);
       setError(err instanceof Error ? err.message : String(err));
@@ -1387,7 +1540,7 @@ function App() {
       setLocalAccess(policy);
       localStorage.setItem(`localMachineAccess:${botId}`, policy);
       await window.agentOS.setLocalPolicy(botId, policy);
-      setLocalOpen(true);
+      showWorkspace("local");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1462,43 +1615,286 @@ function App() {
     );
   }
 
+  function showWorkspace(
+    next: "chat" | "memory" | "automation" | "connectors" | "webhooks" | "local" | "model",
+  ) {
+    setMemoryOpen(next === "memory");
+    setAutomationOpen(next === "automation");
+    setConnectorOpen(next === "connectors");
+    setWebhookOpen(next === "webhooks");
+    setLocalOpen(next === "local");
+    setModelOpen(next === "model");
+    setConnectOpen(false);
+    if (next !== "chat") setScreenMode((mode) => (mode === "handoff" ? mode : null));
+  }
+
+  const selectedBot = bots.find((bot) => bot.id === botId);
+  const visibleBots = bots.filter((bot) =>
+    bot.name.toLowerCase().includes(botQuery.trim().toLowerCase()),
+  );
+  const workspace = webhookOpen
+    ? "webhooks"
+    : connectorOpen
+      ? "connectors"
+      : automationOpen
+        ? "automation"
+        : memoryOpen
+          ? "memory"
+          : localOpen
+            ? "local"
+            : modelOpen
+              ? "model"
+              : "chat";
+  const workspaceTitle =
+    workspace === "memory"
+      ? "Memory"
+      : workspace === "automation"
+        ? "Skills & routines"
+        : workspace === "connectors"
+          ? "Connectors"
+          : workspace === "webhooks"
+            ? "Webhooks"
+            : workspace === "local"
+              ? "This computer"
+              : workspace === "model"
+                ? "Model & privacy"
+                : (selectedBot?.name ?? "Choose a bot");
+  const workspaceSubtitle =
+    workspace === "chat"
+      ? activeRun
+        ? "Working"
+        : (selectedBot?.role ?? "Agent conversation")
+      : (selectedBot?.name ?? "Workspace");
+
   return (
     <div className="app-shell">
+      {!signedIn && (
+        <section className="auth-gate" aria-label="Account">
+          <form
+            className="auth-card"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!sessionReady || authBusy) return;
+              if (authMode === "create") void createAccount();
+              else void connect();
+            }}
+          >
+            <div className="auth-mark">A</div>
+            <h1>{authMode === "create" ? "Create your account" : "Sign in"}</h1>
+            <p>
+              {sessionReady
+                ? authMode === "create"
+                  ? "This creates the first account on the gateway and keeps you signed in on this computer."
+                  : "Use the token from the account that already exists on this gateway."
+                : "Opening your saved session…"}
+            </p>
+            {sessionReady && authMode === "create" && (
+              <>
+                <label>
+                  Name
+                  <input
+                    ref={accountNameRef}
+                    value={accountName}
+                    onChange={(event) => setAccountName(event.target.value)}
+                    placeholder="Your name"
+                    maxLength={80}
+                    autoComplete="name"
+                  />
+                </label>
+                <label>
+                  Email
+                  <input
+                    value={accountEmail}
+                    onChange={(event) => setAccountEmail(event.target.value)}
+                    placeholder="you@example.com"
+                    type="email"
+                    autoComplete="email"
+                    spellCheck={false}
+                  />
+                </label>
+              </>
+            )}
+            {sessionReady && authMode === "token" && (
+              <label>
+                Account token
+                <input
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                  type="password"
+                  placeholder="Paste token"
+                  autoComplete="current-password"
+                  spellCheck={false}
+                />
+              </label>
+            )}
+            {sessionReady && (
+              <label>
+                Gateway
+                <input
+                  value={baseUrl}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  spellCheck={false}
+                  autoComplete="url"
+                />
+              </label>
+            )}
+            {authError && (
+              <p className="auth-error" role="alert">
+                {authError}
+              </p>
+            )}
+            {sessionReady && (
+              <button type="submit" className="primary" disabled={authBusy}>
+                {authBusy
+                  ? "Creating account…"
+                  : authMode === "create"
+                    ? "Create account"
+                    : "Sign in"}
+              </button>
+            )}
+            {sessionReady &&
+              (authMode === "create" ? (
+                <button
+                  type="button"
+                  className="auth-switch"
+                  onClick={() => {
+                    setAuthMode("token");
+                    setAuthError("");
+                  }}
+                >
+                  I already have a token
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="auth-switch"
+                  onClick={() => {
+                    setAuthMode("create");
+                    setAuthError("");
+                  }}
+                >
+                  Create a new account
+                </button>
+              ))}
+          </form>
+        </section>
+      )}
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">A</span>
           <span>AgentOS</span>
         </div>
-        <div className="connection">
-          <label>
-            Gateway URL
-            <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-          </label>
-          <label>
-            Bearer token
-            <input
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              type="password"
-              placeholder="Paste bootstrap token"
-            />
-          </label>
-          <button type="button" className="connect-button" onClick={() => void connect()}>
-            Connect
+        <nav className="sidebar-nav" aria-label="Workspace">
+          <button
+            type="button"
+            className={`nav-item ${workspace === "chat" ? "active" : ""}`}
+            aria-current={workspace === "chat" ? "page" : undefined}
+            onClick={() => showWorkspace("chat")}
+          >
+            <Glyph>
+              <path d="M2.5 3.5h11v7.2H6.2L3.2 13V10.7H2.5z" />
+            </Glyph>
+            Chat
           </button>
-          <div className="connection-state">
-            <i className={status === "connected" ? "online" : ""} />
-            {status}
-          </div>
-        </div>
+          <button
+            type="button"
+            className={`nav-item ${workspace === "memory" ? "active" : ""}`}
+            aria-current={workspace === "memory" ? "page" : undefined}
+            disabled={!botId}
+            onClick={() => void loadMemories()}
+          >
+            <Glyph>
+              <path d="M4 2.5h8v11l-4-2.2-4 2.2z" />
+            </Glyph>
+            Memory
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${workspace === "automation" ? "active" : ""}`}
+            aria-current={workspace === "automation" ? "page" : undefined}
+            disabled={!token}
+            onClick={() => void loadAutomations()}
+          >
+            <Glyph>
+              <path d="M3 4.5h10M3 8h10M3 11.5h6" />
+            </Glyph>
+            Skills
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${workspace === "connectors" ? "active" : ""}`}
+            aria-current={workspace === "connectors" ? "page" : undefined}
+            disabled={!token}
+            onClick={() => void loadConnectors()}
+          >
+            <Glyph>
+              <path d="M6.2 9.2 4.4 11a2.2 2.2 0 0 1-3.1-3.1l1.8-1.8M9.8 6.8 11.6 5a2.2 2.2 0 0 1 3.1 3.1l-1.8 1.8M6.2 9.8l3.6-3.6" />
+            </Glyph>
+            Connectors
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${workspace === "webhooks" ? "active" : ""}`}
+            aria-current={workspace === "webhooks" ? "page" : undefined}
+            disabled={!token}
+            onClick={() => void loadWebhooks()}
+          >
+            <Glyph>
+              <path d="M8.8 1.8 4.2 8.2h3.2L6.6 14l5.2-7.2H8.6z" />
+            </Glyph>
+            Webhooks
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${workspace === "model" ? "active" : ""}`}
+            aria-current={workspace === "model" ? "page" : undefined}
+            disabled={!botId}
+            onClick={() => void loadInferenceSettings()}
+          >
+            <Glyph>
+              <path d="M8 2.2v2.1M8 11.7v2.1M2.2 8h2.1M11.7 8h2.1M4 4l1.5 1.5M10.5 10.5 12 12M12 4l-1.5 1.5M5.5 10.5 4 12" />
+              <circle cx="8" cy="8" r="2.2" />
+            </Glyph>
+            Model
+          </button>
+          <button
+            type="button"
+            className={`nav-item ${workspace === "local" ? "active" : ""}`}
+            aria-current={workspace === "local" ? "page" : undefined}
+            disabled={!botId}
+            onClick={() => void openLocalSettings()}
+          >
+            <Glyph>
+              <rect x="2.2" y="3" width="11.6" height="7.6" rx="1.2" />
+              <path d="M6 13.2h4M8 10.6v2.6" />
+            </Glyph>
+            This computer
+          </button>
+        </nav>
         <div className="roster-head">
-          <span>BOTS</span>
-          <button type="button" onClick={() => void createBot()} disabled={!token}>
-            ＋
+          <span>Bots</span>
+          <button
+            type="button"
+            className="icon-button"
+            title="New bot (Ctrl+N)"
+            onClick={() => {
+              setBotDraftName("");
+              setBotDraftOpen(true);
+            }}
+            disabled={!token}
+          >
+            +
           </button>
         </div>
+        <input
+          className="sidebar-search"
+          value={botQuery}
+          onChange={(event) => setBotQuery(event.target.value)}
+          placeholder="Search bots"
+          aria-label="Search bots"
+        />
         <div className="roster">
-          {bots.map((bot) => (
+          {visibleBots.map((bot) => (
             <button
               type="button"
               key={bot.id}
@@ -1506,6 +1902,7 @@ function App() {
               onClick={() => {
                 setBotId(bot.id);
                 setItems([]);
+                showWorkspace("chat");
               }}
             >
               <span className="bot-avatar">{bot.name.slice(0, 1).toUpperCase()}</span>
@@ -1516,85 +1913,136 @@ function App() {
             </button>
           ))}
           {!bots.length && <p className="empty-note">Connect to load your bots.</p>}
+          {!!bots.length && !visibleBots.length && (
+            <p className="empty-note">No bots match that search.</p>
+          )}
         </div>
-        <div className="sidebar-footer">Local agent workspace</div>
+        <div className="sidebar-footer">
+          {connectOpen && (
+            <form
+              className="connect-popover"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void connect();
+              }}
+            >
+              <label>
+                Gateway URL
+                <input
+                  value={baseUrl}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                Bearer token
+                <input
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                  type="password"
+                  placeholder="Account token"
+                  autoComplete="current-password"
+                />
+              </label>
+              <div className="popover-actions">
+                <button type="submit" className="primary">
+                  Connect
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void window.agentOS.disconnect();
+                    setSignedIn(false);
+                    setAuthMode(token ? "token" : "create");
+                    setAuthError("");
+                  }}
+                  disabled={status !== "connected"}
+                >
+                  Disconnect
+                </button>
+              </div>
+            </form>
+          )}
+          <button
+            type="button"
+            className="account-row"
+            onClick={() => setConnectOpen((open) => !open)}
+            aria-expanded={connectOpen}
+          >
+            <i className={status === "connected" ? "online" : ""} />
+            <span>
+              <strong>{status === "connected" ? "Connected" : "Not connected"}</strong>
+              <small>{gatewayHost(baseUrl)}</small>
+            </span>
+          </button>
+        </div>
       </aside>
       <main className="chat-panel">
         <UpdateBanner ready={updateReady} onRestart={() => void window.agentOS.restartToUpdate()} />
         <header className="chat-header">
-          <div>
-            <strong>{bots.find((b) => b.id === botId)?.name ?? "Choose a bot"}</strong>
-            <span>Agent conversation</span>
+          <div className="title-block">
+            <strong>{workspaceTitle}</strong>
+            <span>
+              {activeRun && workspace === "chat" && <i className="working-dot" />}
+              {workspaceSubtitle}
+            </span>
           </div>
-          {activeRun && (
+          <div className="header-actions">
+            {activeRun && (
+              <button
+                type="button"
+                className="stop-button"
+                onClick={() =>
+                  void window.agentOS.send({ type: "interrupt", agentId: botId, runId: activeRun })
+                }
+              >
+                Stop
+              </button>
+            )}
             <button
               type="button"
-              className="stop-button"
-              onClick={() =>
-                void window.agentOS.send({ type: "interrupt", agentId: botId, runId: activeRun })
-              }
+              className={screenMode === "view" ? "primary" : ""}
+              onClick={() => setScreenMode((mode) => (mode === "view" ? null : "view"))}
+              disabled={!botId || screenMode === "handoff"}
             >
-              Stop run
+              {screenMode === "view" ? "Hide screen" : "Agent screen"}
             </button>
-          )}
-          <button
-            type="button"
-            className="stop-button"
-            onClick={() => void loadMemories()}
-            disabled={!botId}
-          >
-            Memory
-          </button>
-          <button
-            type="button"
-            className="stop-button"
-            onClick={() => void loadInferenceSettings()}
-            disabled={!botId}
-          >
-            Model settings
-          </button>
-          <button
-            type="button"
-            className="stop-button"
-            onClick={() => void loadAutomations()}
-            disabled={!token}
-          >
-            Skills & routines
-          </button>
-          <button
-            type="button"
-            className="stop-button"
-            onClick={() => void loadConnectors()}
-            disabled={!token}
-          >
-            Connectors
-          </button>
-          <button
-            type="button"
-            className="stop-button"
-            onClick={() => void loadWebhooks()}
-            disabled={!token}
-          >
-            Webhooks
-          </button>
-          <button
-            type="button"
-            className="stop-button"
-            onClick={() => setScreenMode((mode) => (mode === "view" ? null : "view"))}
-            disabled={!botId || screenMode === "handoff"}
-          >
-            {screenMode === "view" ? "Hide Agent Screen" : "View Agent Screen"}
-          </button>
-          <button
-            type="button"
-            className="stop-button"
-            onClick={() => void openLocalSettings()}
-            disabled={!botId}
-          >
-            This computer
-          </button>
+          </div>
         </header>
-        {localOpen && (
+        {botDraftOpen && (
+          <form
+            className="sheet-backdrop"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createBot(botDraftName);
+            }}
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setBotDraftOpen(false);
+            }}
+          >
+            <div className="sheet">
+              <h2>New bot</h2>
+              <p>Give this agent a name. You can change its model after it is created.</p>
+              <input
+                ref={botNameRef}
+                value={botDraftName}
+                onChange={(event) => setBotDraftName(event.target.value)}
+                placeholder="Name"
+                maxLength={80}
+                aria-label="Bot name"
+              />
+              <div className="popover-actions">
+                <button type="button" onClick={() => setBotDraftOpen(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="primary" disabled={!botDraftName.trim() || !token}>
+                  Create
+                </button>
+              </div>
+            </div>
+          </form>
+        )}
+        {workspace === "local" && (
           <section className="messages memory-view">
             <h2>Local computer execution</h2>
             {(
@@ -1604,7 +2052,7 @@ function App() {
                 ["never", "Never allow"],
               ] as const
             ).map(([value, label]) => (
-              <label key={value} className="skill-approval-toggle">
+              <label key={value} className="skill-approval-toggle choice-card">
                 <input
                   type="radio"
                   name="local-machine-access"
@@ -1614,36 +2062,38 @@ function App() {
                 {label}
               </label>
             ))}
-            <button type="button" onClick={() => setLocalOpen(false)}>
-              Close
+            <button type="button" onClick={() => showWorkspace("chat")}>
+              Back to chat
             </button>
           </section>
         )}
         {pendingLocal && (
-          <section className="local-exec-dialog">
-            <h2>Run on this computer?</h2>
-            <pre>{pendingLocal.command}</pre>
-            <p>{pendingLocal.cwd || "The desktop's default directory"}</p>
-            <label className="skill-approval-toggle">
-              <input
-                type="checkbox"
-                checked={allowLocalSession}
-                onChange={(event) => setAllowLocalSession(event.target.checked)}
-              />
-              Always allow this session
-            </label>
-            <div className="approval-actions">
-              <button
-                type="button"
-                onClick={() => void replyLocal(allowLocalSession ? "allow_session" : "allow")}
-              >
-                Run
-              </button>
-              <button type="button" className="deny" onClick={() => void replyLocal("deny")}>
-                Block
-              </button>
-            </div>
-          </section>
+          <div className="sheet-backdrop">
+            <section className="local-exec-dialog">
+              <h2>Run on this computer?</h2>
+              <pre>{pendingLocal.command}</pre>
+              <p>{pendingLocal.cwd || "The desktop's default directory"}</p>
+              <label className="skill-approval-toggle">
+                <input
+                  type="checkbox"
+                  checked={allowLocalSession}
+                  onChange={(event) => setAllowLocalSession(event.target.checked)}
+                />
+                Always allow this session
+              </label>
+              <div className="approval-actions">
+                <button
+                  type="button"
+                  onClick={() => void replyLocal(allowLocalSession ? "allow_session" : "allow")}
+                >
+                  Run
+                </button>
+                <button type="button" className="deny" onClick={() => void replyLocal("deny")}>
+                  Block
+                </button>
+              </div>
+            </section>
+          </div>
         )}
         {screenMode && screenBotId && (
           <section className="screen-view">
@@ -1664,7 +2114,7 @@ function App() {
             )}
           </section>
         )}
-        {inferenceProviders.length > 0 && (
+        {workspace === "model" && (
           <section className="messages memory-view">
             <h2>Model settings · {bots.find((bot) => bot.id === botId)?.name}</h2>
             <label>
@@ -1703,15 +2153,21 @@ function App() {
               Disabling this does not delete existing data. Use Memory → Export and then delete
               entries to remove stored facts.
             </p>
-            <button type="button" onClick={() => void saveInferenceSettings()}>
-              Save model settings
-            </button>
-            <button type="button" onClick={() => setInferenceProviders([])}>
-              Close
-            </button>
+            <div className="memory-actions">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void saveInferenceSettings()}
+              >
+                Save model settings
+              </button>
+              <button type="button" onClick={() => showWorkspace("chat")}>
+                Back to chat
+              </button>
+            </div>
           </section>
         )}
-        {webhookOpen ? (
+        {workspace === "webhooks" ? (
           <section className="messages memory-view">
             <div className="memory-toolbar">
               <h2>Outbound webhooks</h2>
@@ -1813,7 +2269,7 @@ function App() {
               </article>
             ))}
           </section>
-        ) : connectorOpen ? (
+        ) : workspace === "connectors" ? (
           <section className="messages memory-view">
             <div className="memory-toolbar">
               <h2>Connectors</h2>
@@ -1826,35 +2282,40 @@ function App() {
                 </button>
               </div>
             </div>
-            {CONNECTOR_CARDS.map((card) => {
-              const connected = connectorItems.some(
-                (item) =>
-                  item.service === card.id ||
-                  (card.oauth === "microsoft" && item.service === "microsoft"),
-              );
-              return (
-                <article className="memory-entry" key={card.id}>
-                  <div>
-                    <strong>{card.label}</strong>
-                    <small>{connected ? "Connected" : "Not connected"}</small>
-                  </div>
-                  {card.oauth === "microsoft" && (
-                    <p>OneDrive, Outlook, Teams, and SharePoint share one Microsoft sign-in.</p>
-                  )}
-                  <div className="memory-actions">
-                    {connected ? (
-                      <button type="button" onClick={() => void disconnectService(card.oauth)}>
-                        Disconnect
-                      </button>
-                    ) : (
-                      <button type="button" onClick={() => void connectService(card.oauth)}>
-                        Connect
-                      </button>
+            <div className="connector-grid">
+              {CONNECTOR_CARDS.map((card) => {
+                const connected = connectorItems.some(
+                  (item) =>
+                    item.service === card.id ||
+                    (card.oauth === "microsoft" && item.service === "microsoft"),
+                );
+                return (
+                  <article
+                    className={`memory-entry connector-card ${connected ? "is-on" : ""}`}
+                    key={card.id}
+                  >
+                    <div>
+                      <strong>{card.label}</strong>
+                      <small>{connected ? "Connected" : "Not connected"}</small>
+                    </div>
+                    {card.oauth === "microsoft" && (
+                      <p>OneDrive, Outlook, Teams, and SharePoint share one Microsoft sign-in.</p>
                     )}
-                  </div>
-                </article>
-              );
-            })}
+                    <div className="memory-actions">
+                      {connected ? (
+                        <button type="button" onClick={() => void disconnectService(card.oauth)}>
+                          Disconnect
+                        </button>
+                      ) : (
+                        <button type="button" onClick={() => void connectService(card.oauth)}>
+                          Connect
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
             {connectorItems.map((connector) => (
               <article className="memory-entry" key={connector.service}>
                 <div>
@@ -1925,50 +2386,72 @@ function App() {
               </article>
             ))}
           </section>
-        ) : automationOpen ? (
+        ) : workspace === "automation" ? (
           <section className="messages memory-view">
             <div className="memory-toolbar">
-              <h2>Skills and routines</h2>
               <div>
+                <h2>Skills and routines</h2>
+                <p className="page-subtitle">
+                  Procedures this workspace can run on a schedule or an event.
+                </p>
+              </div>
+              <div className="toolbar-actions">
                 <button type="button" onClick={() => void toggleRecording()} disabled={!botId}>
-                  {recording ? "Stop recording" : "Start recording"}
+                  {recording ? "Stop recording" : "Record browser task"}
                 </button>
-                <button type="button" onClick={() => void createSkill()}>
+                <button type="button" className="primary" onClick={() => void createSkill()}>
                   New skill
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void createRoutine("cron")}
-                  disabled={!botId || !skillItems.length}
-                >
-                  New cron routine
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void createRoutine("webhook")}
-                  disabled={!botId || !skillItems.length}
-                >
-                  New webhook routine
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void createRoutine("inter_bot_message")}
-                  disabled={
-                    !botId ||
-                    !skillItems.length ||
-                    bots.filter((bot) => bot.id !== botId).length === 0
-                  }
-                >
-                  New inter-bot routine
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void createRoutine("file_change")}
-                  disabled={!botId || !skillItems.length}
-                >
-                  New file-change routine
-                </button>
-                <button type="button" onClick={() => setAutomationOpen(false)}>
+                <details className="menu">
+                  <summary>New routine</summary>
+                  <div className="menu-panel">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.currentTarget.closest("details")?.removeAttribute("open");
+                        void createRoutine("cron");
+                      }}
+                      disabled={!botId || !skillItems.length}
+                    >
+                      On a schedule
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.currentTarget.closest("details")?.removeAttribute("open");
+                        void createRoutine("webhook");
+                      }}
+                      disabled={!botId || !skillItems.length}
+                    >
+                      From a webhook
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.currentTarget.closest("details")?.removeAttribute("open");
+                        void createRoutine("inter_bot_message");
+                      }}
+                      disabled={
+                        !botId ||
+                        !skillItems.length ||
+                        bots.filter((bot) => bot.id !== botId).length === 0
+                      }
+                    >
+                      When another bot messages
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.currentTarget.closest("details")?.removeAttribute("open");
+                        void createRoutine("file_change");
+                      }}
+                      disabled={!botId || !skillItems.length}
+                    >
+                      When a file changes
+                    </button>
+                  </div>
+                </details>
+                <button type="button" onClick={() => showWorkspace("chat")}>
                   Back to chat
                 </button>
               </div>
@@ -2450,7 +2933,7 @@ function App() {
               </article>
             ))}
           </section>
-        ) : memoryOpen ? (
+        ) : workspace === "memory" ? (
           <section className="messages memory-view">
             <div className="memory-toolbar">
               <h2>Memory</h2>
@@ -2458,7 +2941,7 @@ function App() {
                 <button type="button" onClick={() => void exportMemories()}>
                   Export JSON
                 </button>
-                <button type="button" onClick={() => setMemoryOpen(false)}>
+                <button type="button" onClick={() => showWorkspace("chat")}>
                   Back to chat
                 </button>
               </div>
@@ -2502,16 +2985,35 @@ function App() {
               </article>
             ))}
           </section>
-        ) : (
+        ) : workspace === "chat" ? (
           <div className="messages" ref={scrollRef}>
             {!items.length && (
               <div className="welcome">
                 <div className="welcome-icon">✦</div>
-                <h1>What can I help with?</h1>
+                <h1>{selectedBot ? `Message ${selectedBot.name}` : "What can I help with?"}</h1>
                 <p>
-                  Send a task to your selected agent. Tool activity and approval requests appear
-                  here.
+                  Send a task to the selected agent. Tool activity, files, and approval requests
+                  stay in this conversation.
                 </p>
+                <div className="suggestion-row">
+                  {[
+                    "Summarize what you can do",
+                    "Check my connected accounts",
+                    "Plan the next routine",
+                  ].map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      disabled={!botId}
+                      onClick={() => {
+                        setDraft(suggestion);
+                        composerRef.current?.focus();
+                      }}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
             {items.map((item) => (
@@ -2539,34 +3041,51 @@ function App() {
                     )}
                   </details>
                 ) : (
-                  <>
+                  <div className="message-bubble">
                     <div className="message-label">
-                      {item.role === "user"
-                        ? "YOU"
-                        : (bots.find((b) => b.id === botId)?.name ?? "AGENT")}
+                      {item.role === "user" ? "You" : (selectedBot?.name ?? "Agent")}
+                      {item.role === "assistant" && (
+                        <button
+                          type="button"
+                          className="copy-button"
+                          onClick={() => void navigator.clipboard.writeText(item.content)}
+                        >
+                          Copy
+                        </button>
+                      )}
                     </div>
                     <div className="message-content">{item.content}</div>
-                  </>
+                  </div>
                 )}
               </article>
             ))}
           </div>
-        )}
+        ) : null}
         {error && (
-          <div className="error-banner">
+          <div className="error-banner" role="alert">
             {error}
-            <button type="button" onClick={() => setError("")}>
+            <button type="button" onClick={() => setError("")} aria-label="Dismiss">
               ×
             </button>
           </div>
         )}
-        {!memoryOpen && !automationOpen && !connectorOpen && !screenMode && (
+        {notice && <output className="notice-banner">{notice}</output>}
+        {workspace === "chat" && !screenMode && (
           <form
-            className="composer"
+            className={`composer${dragOver ? " dragover" : ""}`}
             onSubmit={(e) => void sendPrompt(e)}
-            onDragOver={(event) => event.preventDefault()}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setDragOver(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
             onDrop={(event) => {
               event.preventDefault();
+              setDragOver(false);
               void addDroppedFiles(event.dataTransfer.files).catch((err) =>
                 setError(err instanceof Error ? err.message : String(err)),
               );
@@ -2590,24 +3109,67 @@ function App() {
               </div>
             )}
             <textarea
+              ref={composerRef}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder={botId ? "Message your agent…" : "Connect and choose a bot first"}
+              onChange={(event) => {
+                setDraft(event.target.value);
+                const node = event.target;
+                node.style.height = "0px";
+                node.style.height = `${Math.min(180, node.scrollHeight)}px`;
+              }}
+              placeholder={
+                botId ? `Message ${selectedBot?.name ?? "your agent"}` : "Connect and choose a bot"
+              }
               disabled={!botId}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  e.currentTarget.form?.requestSubmit();
+              rows={1}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
                 }
               }}
             />
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(event) => {
+                const files = event.target.files;
+                if (files?.length)
+                  void addDroppedFiles(files).catch((err) =>
+                    setError(err instanceof Error ? err.message : String(err)),
+                  );
+                event.target.value = "";
+              }}
+            />
             <div className="composer-footer">
-              <span>Enter to send · Shift+Enter for a new line</span>
+              <div className="composer-tools">
+                <button
+                  type="button"
+                  className="icon-button"
+                  title="Attach files"
+                  disabled={!botId}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Glyph>
+                    <path d="M8.2 4.2 4.4 8a2.6 2.6 0 0 0 3.7 3.7l4.6-4.6a1.7 1.7 0 0 0-2.4-2.4L5.8 9.2a.8.8 0 0 0 1.1 1.1l3.6-3.6" />
+                  </Glyph>
+                </button>
+                <span>
+                  <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+                  {dragOver ? " · Drop to attach" : ""}
+                </span>
+              </div>
               <button
                 type="submit"
+                className="primary"
                 disabled={!botId || (!draft.trim() && pendingFiles.length === 0)}
               >
-                Send <span>↗</span>
+                Send
+                <Glyph>
+                  <path d="M3 8h10M9 4l4 4-4 4" />
+                </Glyph>
               </button>
             </div>
           </form>
@@ -2649,10 +3211,21 @@ function keysym(key: string): number | null {
   return named[key] ?? null;
 }
 
+function DesktopRequired() {
+  return (
+    <div className="app-shell">
+      <p className="desktop-required">
+        The chat UI runs in the Electron window. Keep this Vite server running, then start Electron
+        from the repository root with <code>pnpm --filter @agentOS/desktop electron</code>.
+      </p>
+    </div>
+  );
+}
+
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("root mount node is missing");
 createRoot(rootElement).render(
   <React.StrictMode>
-    <App />
+    {typeof window.agentOS?.onFrame === "function" ? <App /> : <DesktopRequired />}
   </React.StrictMode>,
 );

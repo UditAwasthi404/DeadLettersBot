@@ -5,7 +5,7 @@
 Use Docker Engine with Compose v2 on Linux or macOS. On Windows, use Docker Desktop with Linux containers enabled. The host mounts the Docker socket so it can provision browser containers; run it only on a host where you trust the AgentOS account and tool policy.
 
 1. Copy `.env.example` to `.env` and set `JWT_SECRET` to a random secret. For example, `openssl rand -hex 32`.
-2. For a model-backed setup, set `INFERENCE_MOCK=0` and configure `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. Mock mode is enabled in the example for local API development.
+2. For Grok answers, set `XAI_API_KEY` in that same root `.env`. There is no second env file under `infra/docker`.
 3. Start the stack from the repository root:
 
    ```sh
@@ -13,9 +13,8 @@ Use Docker Engine with Compose v2 on Linux or macOS. On Windows, use Docker Desk
    ```
 
    Compose starts PostgreSQL, Redis, MinIO, builds the browser VM image, runs database migrations, and starts the host. Each account VM uses a dedicated Docker bridge network; the host joins that network for browser and shell operations. A bot's Xvfb and Chromium browser are created on first browser-tool use with a dedicated display, CDP port, and persistent profile.
-4. Bootstrap the first account using `POST /v1/auth/bootstrap` with an email and display name. The endpoint closes after the first account exists.
-5. Use the returned bearer token for `/v1` routes and the `/ws` WebSocket gateway.
-6. Build the desktop client with `pnpm --filter @agentOS/desktop build`, or run it locally with `pnpm --filter @agentOS/desktop dev` and `pnpm --filter @agentOS/desktop electron` in separate terminals.
+4. Build the desktop client with `pnpm --filter @agentOS/desktop build`, or run it locally with `pnpm --filter @agentOS/desktop dev` and `pnpm --filter @agentOS/desktop electron` in separate terminals.
+5. In the desktop window, enter a name and email and choose Create account. The app calls `POST /v1/auth/bootstrap` once, stores the session, and uses it for `/v1` and the `/ws` gateway. That route closes after the first account exists.
 
 For long-lived integrations, create an API key through `POST /v1/api-keys` and store the returned secret in a password manager. The secret is only shown once. OAuth-backed Google connectors need the Google client ID, client secret, encryption key, and a redirect URI registered in the Google Cloud project. Enable the Gmail, Calendar, and Drive APIs that you plan to use. Google Drive currently requests the broad `drive` scope for list/read/write/share actions; complete Google's OAuth consent and scope verification requirements before using it with real account data. Set `GOOGLE_OAUTH_REDIRECT_URI` to the public HTTPS callback URL when deployed outside localhost. Register that same callback on the Microsoft and Salesforce apps. Microsoft services share one connection. Salesforce stores its instance URL with the encrypted tokens.
 
@@ -45,7 +44,8 @@ The host validates required store credentials, endpoint formats, secret formats,
 | `JWT_SECRET` | HMAC key for account session tokens |
 | `JWT_SECRET_PREVIOUS` | Temporary previous HMAC key during rotation; remove after the 24-hour token overlap |
 | `INFERENCE_MOCK` | Use deterministic mock inference (`1`) or configured providers (`0`) |
-| `INFERENCE_PROVIDERS` | Provider order: `openai`, `anthropic`, `ollama` |
+| `INFERENCE_PROVIDERS` | Provider order: `xai`, `openai`, `anthropic`, `ollama`. Default is `xai` |
+| `XAI_API_KEY` | xAI key used for Grok answers (`https://api.x.ai/v1`) |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | Provider credentials |
 | `OLLAMA_BASE_URL` | Ollama HTTP endpoint |
 | `PORT` | Host HTTP and WebSocket port |

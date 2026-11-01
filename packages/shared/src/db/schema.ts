@@ -105,6 +105,7 @@ export const turns = pgTable(
       promptTokens: number;
       completionTokens: number;
       totalTokens: number;
+      source?: "provider" | "estimate";
     }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
@@ -351,8 +352,42 @@ export const routines = pgTable(
         | { type: "webhook"; secretHash?: string }
         | { type: "inter_bot_message"; senderBotId?: string }
         | { type: "file_change"; path: string }
+        | {
+            type: "connector_event";
+            service: "gmail" | "google-calendar";
+            sender?: string;
+            subject?: string;
+            query?: string;
+            calendarId?: string;
+          }
       >()
       .notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    onError: text("on_error").$type<"notify_user" | "retry" | "pause">().notNull().default("pause"),
+    lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
+    /** Set when a hosted box hides the routine until an explicit automation sync deletes the shadow. */
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("routines_account_id_idx").on(t.accountId),
+    index("routines_enabled_idx").on(t.enabled),
+  ],
+);
+
+export const automationShadows = pgTable(
+  "automation_shadows",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    routineId: uuid("routine_id").notNull(),
+    botId: uuid("bot_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    name: text("name").notNull(),
+    trigger: jsonb("trigger").$type<(typeof routines.$inferSelect)["trigger"]>().notNull(),
     enabled: boolean("enabled").notNull().default(true),
     onError: text("on_error").$type<"notify_user" | "retry" | "pause">().notNull().default("pause"),
     lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
@@ -360,8 +395,8 @@ export const routines = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
-    index("routines_account_id_idx").on(t.accountId),
-    index("routines_enabled_idx").on(t.enabled),
+    uniqueIndex("automation_shadows_routine_idx").on(t.routineId),
+    index("automation_shadows_account_idx").on(t.accountId),
   ],
 );
 
@@ -532,7 +567,7 @@ export const subagents = pgTable(
     taskDescription: text("task_description").notNull(),
     allowedTools: jsonb("allowed_tools").$type<string[]>().notNull(),
     status: text("status")
-      .$type<"queued" | "running" | "completed" | "error" | "cancelled">()
+      .$type<"queued" | "running" | "completed" | "error" | "cancelled" | "stalled">()
       .notNull()
       .default("queued"),
     result: text("result").notNull().default(""),
@@ -540,7 +575,18 @@ export const subagents = pgTable(
       promptTokens: number;
       completionTokens: number;
       totalTokens: number;
+      source?: "provider" | "estimate";
     }>(),
+    stallCount: integer("stall_count").notNull().default(0),
+    lastProgressAt: timestamp("last_progress_at", { withTimezone: true }),
+    stallEvents: jsonb("stall_events")
+      .$type<Array<{ at: string; reason: string }>>()
+      .notNull()
+      .default([]),
+    steeringEvents: jsonb("steering_events")
+      .$type<Array<{ at: string; message: string }>>()
+      .notNull()
+      .default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),

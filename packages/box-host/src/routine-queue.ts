@@ -1,6 +1,7 @@
 import {
   type Database,
   type RedisClient,
+  automationShadows,
   routineRuns,
   routines,
   skills,
@@ -56,10 +57,15 @@ export async function queueRoutine(
   });
   await deps.redis.set(`run:${runId}:agentId`, routine.botId, "EX", 86400);
   startDrain(routine.botId);
+  const triggeredAt = new Date();
   await deps.db
     .update(routines)
-    .set({ lastTriggeredAt: new Date(), updatedAt: new Date() })
+    .set({ lastTriggeredAt: triggeredAt, updatedAt: triggeredAt })
     .where(eq(routines.id, routine.id));
+  await deps.db
+    .update(automationShadows)
+    .set({ lastTriggeredAt: triggeredAt, updatedAt: triggeredAt })
+    .where(eq(automationShadows.routineId, routine.id));
   return { turnId, runId, routineRunId: run.id };
 }
 

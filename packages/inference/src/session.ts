@@ -1,6 +1,6 @@
 /** REQ-I01/I02: provider-agnostic InferenceSession (BUILD_PLAN Track B). */
 
-import { type ModelMessage, type ToolCall, observeMillis } from "@agentOS/shared";
+import { type ModelMessage, type TokenUsage, type ToolCall, observeMillis } from "@agentOS/shared";
 import type { ZodTypeAny } from "zod";
 
 export type InferencePurpose = "main" | "summarization";
@@ -13,7 +13,8 @@ export interface InferenceTool {
 
 export type InferenceStreamEvent =
   | { type: "token"; delta: string }
-  | { type: "toolCall"; toolCall: ToolCall };
+  | { type: "toolCall"; toolCall: ToolCall }
+  | { type: "usage"; usage: TokenUsage };
 
 export interface InferenceSession {
   readonly purpose: InferencePurpose;

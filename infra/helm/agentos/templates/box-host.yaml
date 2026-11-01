@@ -99,6 +99,11 @@ spec:
               value: "0"
             - name: INFERENCE_PROVIDERS
               value: {{ .Values.inference.providers | quote }}
+            - name: XAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentos.fullname" . }}
+                  key: XAI_API_KEY
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:

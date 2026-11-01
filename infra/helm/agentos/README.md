@@ -16,8 +16,8 @@ postgres:
 minio:
   rootPassword: "<random object-store password>"
 inference:
-  providers: openai
-  openaiApiKey: "<provider API key>"
+  providers: xai
+  xaiApiKey: "<xAI API key>"
 ```
 
 Install with `helm upgrade --install agentos ./infra/helm/agentos -f deployment-values.yaml`. Set ingress hosts and TLS secrets for public access. Back up the PostgreSQL and MinIO PVC data independently; this chart does not configure backup jobs or high availability.

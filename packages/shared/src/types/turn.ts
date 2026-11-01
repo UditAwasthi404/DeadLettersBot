@@ -33,6 +33,8 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Provider-reported totals, or a local estimate when the provider sent none. */
+  source?: "provider" | "estimate";
 }
 
 export type TurnType = "user" | "peer" | "routine" | "wake" | "subagent";

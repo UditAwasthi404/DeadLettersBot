@@ -32,8 +32,16 @@ export class OpenAISession implements InferenceSession {
     messages: ModelMessage[],
     tools?: InferenceTool[],
   ): AsyncIterable<InferenceStreamEvent> {
+    if (messages.length === 0) {
+      yield {
+        type: "usage",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, source: "estimate" },
+      };
+      return;
+    }
     const result = streamText({
       model: this.client(this.modelId),
+      allowSystemInMessages: true,
       messages: toCoreMessages(messages),
       tools: toToolSet(tools),
       stopWhen: stepCountIs(1),

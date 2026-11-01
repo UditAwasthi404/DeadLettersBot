@@ -114,6 +114,16 @@ export const STATIC_CATALOG: CatalogTool[] = [
     permissionLevel: 1,
   },
   {
+    name: "SteerSubagent",
+    description:
+      "Send additional guidance to a queued or running subagent started by this bot. The child reads it before its next step.",
+    parameters: z.object({
+      subagentId: z.string(),
+      message: z.string().min(1).max(2000),
+    }),
+    permissionLevel: 0,
+  },
+  {
     name: "ReadMemory",
     description: "Read memories visible to this bot, optionally filtered by scope or project.",
     parameters: z.object({ scope: z.enum(["agent", "user", "project"]).optional() }),

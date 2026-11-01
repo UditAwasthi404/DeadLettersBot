@@ -26,6 +26,17 @@ export class MockSession implements InferenceSession {
       ? `Mock reply: ${lastUser.content}`
       : "Mock reply: ready";
     yield { type: "token", delta: reply };
+    const promptTokens = Math.max(1, Math.ceil(JSON.stringify(messages).length / 4));
+    const completionTokens = Math.max(1, Math.ceil(reply.length / 4));
+    yield {
+      type: "usage",
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        source: "provider",
+      },
+    };
     yield {
       type: "toolCall",
       toolCall: {

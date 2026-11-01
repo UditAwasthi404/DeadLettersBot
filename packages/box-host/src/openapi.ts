@@ -72,6 +72,14 @@ const RoutineTrigger = z.union([
   z.object({ type: z.literal("webhook") }),
   z.object({ type: z.literal("inter_bot_message"), senderBotId: z.string().optional() }),
   z.object({ type: z.literal("file_change"), path: z.string() }),
+  z.object({
+    type: z.literal("connector_event"),
+    service: z.enum(["gmail", "google-calendar"]),
+    sender: z.string().optional(),
+    subject: z.string().optional(),
+    query: z.string().optional(),
+    calendarId: z.string().optional(),
+  }),
 ]);
 const Routine = z.object({
   id: z.string(),
@@ -321,6 +329,12 @@ add({
   summary: "Delete a routine",
   params: routineId,
   response: Deleted,
+});
+add({
+  method: "post",
+  path: "/v1/automation/sync",
+  summary: "Delete hosted schedules whose local routines were removed",
+  response: z.object({ upserted: z.number(), deleted: z.number() }),
 });
 add({
   method: "post",

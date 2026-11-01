@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 /**
  * Docker-based VM manager (BUILD_PLAN Track D).
- * Image `agentOS-vm` is built in Week 4; NoopVMManager keeps host startable without Docker.
+ * Image `agentos-vm` is built by infra/docker/Dockerfile.vm. NoopVMManager keeps the host startable without Docker.
  */
 import { PassThrough } from "node:stream";
 import Docker from "dockerode";
 import type { ExecResult, VMInfo, VMManager, VMStatus } from "./interface.ts";
 
-const IMAGE = "agentOS-vm";
+const IMAGE = "agentos-vm";
 
 type StateFile = Record<string, { accountId: string; vmId: string }>;
 
@@ -172,7 +172,20 @@ export class DockerVMManager implements VMManager {
     const state = loadState();
     state[accountId] = { accountId, vmId };
     saveState(state);
-    return this.getVMStatus(vmId);
+    return this.waitUntilAddressed(vmId);
+  }
+
+  private async waitUntilAddressed(vmId: string): Promise<VMInfo> {
+    let latest = await this.getVMStatus(vmId);
+    for (
+      let attempt = 0;
+      attempt < 20 && (latest.status !== "running" || !latest.ipAddress);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      latest = await this.getVMStatus(vmId);
+    }
+    return latest;
   }
 
   async wakeVM(vmId: string): Promise<VMInfo> {
@@ -256,6 +269,11 @@ export class DockerVMManager implements VMManager {
       AttachStderr: true,
       AttachStdin: attachStdin,
       User: "agent",
+      Env: [
+        "HOME=/home/agent",
+        "USER=agent",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      ],
     });
     const stream = await exec.start({ hijack: true, stdin: attachStdin });
 

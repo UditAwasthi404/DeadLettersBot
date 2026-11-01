@@ -6,11 +6,11 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "electron": "electron .",
-    "build": "vite build && tsc -p tsconfig.electron.json",
+    "electron": "tsc -p tsconfig.electron.json && node ./ensure-cjs-package.mjs && electron .",
+    "build": "vite build && tsc -p tsconfig.electron.json && node ./ensure-cjs-package.mjs",
     "typecheck": "tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "bun test",
-    "start": "electron .",
+    "start": "node ./ensure-cjs-package.mjs && electron .",
     "pack:dir": "pnpm build && electron-builder --dir",
     "dist": "pnpm build && electron-builder"
   },

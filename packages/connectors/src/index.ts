@@ -245,8 +245,10 @@ async function googleRequest(
     } else throw new Error(`unsupported Gmail action: ${action}`);
   } else if (service === "calendar") {
     const calendarId = encode(args.calendarId ?? "primary");
-    if (action === "ListEvents")
-      path = `/calendars/${calendarId}/events?maxResults=${Math.min(250, Number(args.maxResults ?? 50))}&singleEvents=true&orderBy=startTime`;
+    if (action === "ListEvents") {
+      const timeMin = typeof args.timeMin === "string" ? `&timeMin=${encode(args.timeMin)}` : "";
+      path = `/calendars/${calendarId}/events?maxResults=${Math.min(250, Number(args.maxResults ?? 50))}&singleEvents=true&orderBy=startTime${timeMin}`;
+    }
     else if (action === "CreateEvent") {
       method = "POST";
       path = `/calendars/${calendarId}/events`;

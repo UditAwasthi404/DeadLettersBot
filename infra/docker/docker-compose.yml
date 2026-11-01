@@ -1,9 +1,18 @@
 # Self-hosted local AgentOS stack.
+# Settings come from the repository root .env. Start with:
+# docker compose --project-directory . -f infra/docker/docker-compose.yml up -d --build
 services:
   box-host:
     build:
-      context: ../..
+      context: .
       dockerfile: infra/docker/Dockerfile.host
+    # Matches Dockerfile.host. Migrations must run from packages/shared so relative paths resolve.
+    command:
+      [
+        "sh",
+        "-c",
+        "cd /app/packages/shared && bun ./node_modules/drizzle-kit/bin.cjs migrate && cd /app && bun run packages/box-host/src/index.ts",
+      ]
     environment:
       PORT: 8787
       METRICS_ENABLED: ${METRICS_ENABLED:-0}
@@ -40,8 +49,10 @@ services:
       SALESFORCE_OAUTH_CLIENT_SECRET: ${SALESFORCE_OAUTH_CLIENT_SECRET:-}
       SALESFORCE_CLIENT_ID: ${SALESFORCE_CLIENT_ID:-}
       SALESFORCE_CLIENT_SECRET: ${SALESFORCE_CLIENT_SECRET:-}
-      INFERENCE_MOCK: ${INFERENCE_MOCK:-1}
-      INFERENCE_PROVIDERS: ${INFERENCE_PROVIDERS:-openai,anthropic,ollama}
+      INFERENCE_MOCK: ${INFERENCE_MOCK:-0}
+      INFERENCE_PROVIDERS: ${INFERENCE_PROVIDERS:-xai}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      XAI_BASE_URL: ${XAI_BASE_URL:-https://api.x.ai/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
@@ -81,7 +92,7 @@ services:
       - "443:443"
       - "443:443/udp"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - infra/docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
       - caddyconfig:/config
     depends_on:
@@ -97,7 +108,7 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
-      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheusdata:/prometheus
     depends_on:
       - box-host
@@ -111,7 +122,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
-      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafanadata:/var/lib/grafana
     depends_on:
       - prometheus
@@ -143,7 +154,8 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio:latest
+    # Official minio/minio images no longer allow anonymous pulls (Docker Hub removed, Quay returns 401).
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minio
@@ -154,7 +166,7 @@ services:
     volumes:
       - miniodata:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -162,9 +174,9 @@ services:
   # Build the VM image before the host starts; runtime instances are launched on demand.
   vm-template:
     build:
-      context: .
+      context: infra/docker
       dockerfile: Dockerfile.vm
-    image: agentOS-vm
+    image: agentos-vm
     command: ["true"]
     restart: "no"
 

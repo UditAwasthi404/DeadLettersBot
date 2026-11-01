@@ -38,6 +38,7 @@ import { loggedError, logger } from "./logger.ts";
 import { queueRoutine } from "./routine-queue.ts";
 import { createTurnRunShell } from "./runner.ts";
 import { dequeue, enqueue, hasQueuedWork } from "./scheduler.ts";
+import { shouldRecordStall, subagentIsStalled, subagentStallWindowMs } from "./subagent-stall.ts";
 
 export interface WorkerDeps {
   db: Database;
@@ -708,7 +709,9 @@ async function completeSubagent(
     .where(eq(turns.id, subagent.childTurnId))
     .limit(1);
   if (!childTurn || childTurn.state === "pending" || childTurn.state === "running") return;
-  const status = childTurn.state === "settled" ? "completed" : childTurn.state;
+  const stalled = (await deps.redis.get(`run:${subagent.childRunId}:stalled`)) === "1";
+  const status =
+    childTurn.state === "settled" ? "completed" : stalled ? "stalled" : childTurn.state;
   const completionTurnId = crypto.randomUUID();
   const completionRunId = crypto.randomUUID();
   const prompt = `[SubagentComplete]\nTask: ${subagent.taskDescription}\nStatus: ${status}\nResult:\n${subagent.result || "No result was returned."}\n\nYou may now continue.`;
@@ -754,6 +757,53 @@ async function completeSubagent(
   });
   await deps.redis.set(`run:${completionRunId}:agentId`, subagent.parentBotId, "EX", 86400);
   void drainAgent(subagent.parentBotId, deps, send);
+}
+
+export async function detectStalledSubagents(
+  deps: WorkerDeps,
+  send: (frame: ServerFrame) => void = () => {},
+  now = Date.now(),
+): Promise<number> {
+  const stallMs = subagentStallWindowMs();
+  const rows = await deps.db
+    .select()
+    .from(subagents)
+    .where(or(eq(subagents.status, "queued"), eq(subagents.status, "running")));
+  let stalled = 0;
+  for (const row of rows) {
+    if (
+      !subagentIsStalled(row, now, stallMs) ||
+      !shouldRecordStall(row.stallEvents, now, stallMs)
+    )
+      continue;
+    stalled += 1;
+    await deps.redis.set(`run:${row.childRunId}:stalled`, "1", "EX", 86400);
+    await deps.redis.set(`run:${row.childRunId}:cancelled`, "1", "EX", 86400);
+    const stallEvents = [
+      ...row.stallEvents,
+      { at: new Date(now).toISOString(), reason: "no checkpoint progress before the stall deadline" },
+    ].slice(-20);
+    await deps.db
+      .update(subagents)
+      .set({ stallCount: row.stallCount + 1, stallEvents })
+      .where(
+        and(
+          eq(subagents.id, row.id),
+          or(eq(subagents.status, "queued"), eq(subagents.status, "running")),
+        ),
+      );
+    const [turn] = await deps.db.select().from(turns).where(eq(turns.id, row.childTurnId)).limit(1);
+    if (turn?.state === "pending") {
+      await deps.db
+        .update(turns)
+        .set({ state: "cancelled" })
+        .where(and(eq(turns.id, turn.id), eq(turns.state, "pending")));
+      await completeSubagent(deps, row.id, send);
+    } else if (turn && turn.state !== "running") {
+      await completeSubagent(deps, row.id, send);
+    }
+  }
+  return stalled;
 }
 
 export async function reconcileSubagents(
@@ -803,7 +853,7 @@ export async function drainAgent(
       if (turnRow.input.subagentId)
         await deps.db
           .update(subagents)
-          .set({ status: "running", startedAt: new Date() })
+          .set({ status: "running", startedAt: new Date(), lastProgressAt: new Date() })
           .where(and(eq(subagents.id, turnRow.input.subagentId), eq(subagents.status, "queued")));
 
       let vmId = deps.accountVms.get(item.payload.accountId) ?? null;
@@ -1068,10 +1118,31 @@ export async function drainAgent(
               status: record.status,
               result: record.result,
               usage: record.usage,
+              stallCount: record.stallCount,
+              lastProgressAt: record.lastProgressAt,
+              stallEvents: record.stallEvents,
+              steeringEvents: record.steeringEvents,
               createdAt: record.createdAt,
               startedAt: record.startedAt,
               completedAt: record.completedAt,
             };
+          if (action === "SteerSubagent") {
+            const message = String(params.message ?? "").trim().slice(0, 2000);
+            if (!message) throw new Error("steering message is required");
+            if (record.status !== "queued" && record.status !== "running")
+              throw new Error(`subagent is already ${record.status}`);
+            const steeringEvents = [
+              ...record.steeringEvents,
+              { at: new Date().toISOString(), message },
+            ].slice(-20);
+            await deps.db
+              .update(subagents)
+              .set({ steeringEvents })
+              .where(eq(subagents.id, record.id));
+            await deps.redis.rpush(`subagent:${record.childTurnId}:steer`, message);
+            await deps.redis.expire(`subagent:${record.childTurnId}:steer`, 86400);
+            return { subagentId: record.id, status: record.status, steered: true };
+          }
           if (record.status !== "queued" && record.status !== "running")
             throw new Error(`subagent is already ${record.status}`);
           await deps.redis.set(`run:${record.childRunId}:cancelled`, "1", "EX", 86400);

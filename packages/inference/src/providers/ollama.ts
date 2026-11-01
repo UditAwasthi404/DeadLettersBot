@@ -81,6 +81,8 @@ export class OllamaSession implements InferenceSession {
     const decoder = new TextDecoder();
     let buf = "";
     let toolCallSeq = 0;
+    let promptTokens = 0;
+    let completionTokens = 0;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -96,12 +98,16 @@ export class OllamaSession implements InferenceSession {
             content?: string;
             tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }>;
           };
+          prompt_eval_count?: number;
+          eval_count?: number;
         };
         try {
           chunk = JSON.parse(trimmed);
         } catch {
           continue;
         }
+        if (typeof chunk.prompt_eval_count === "number") promptTokens = chunk.prompt_eval_count;
+        if (typeof chunk.eval_count === "number") completionTokens = chunk.eval_count;
         const content = chunk.message?.content;
         if (content) yield { type: "token", delta: content };
         for (const tc of chunk.message?.tool_calls ?? []) {
@@ -114,6 +120,17 @@ export class OllamaSession implements InferenceSession {
           };
         }
       }
+    }
+    if (promptTokens > 0 || completionTokens > 0) {
+      yield {
+        type: "usage",
+        usage: {
+          promptTokens,
+          completionTokens,
+          totalTokens: promptTokens + completionTokens,
+          source: "provider",
+        },
+      };
     }
   }
 }

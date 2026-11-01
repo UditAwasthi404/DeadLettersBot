@@ -8,6 +8,8 @@ import { createVMManager, gcIdleVMs } from "@agentOS/vm-manager";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { validateRuntimeConfig } from "./config.ts";
+import { reconcileAutomationShadows } from "./automation-sync.ts";
+import { pollConnectorEvents } from "./connector-events.ts";
 import { startFileChangeWatcher } from "./file-watch.ts";
 import { createGateway, runScheduledRoutines } from "./gateway.ts";
 import { acquireProcessLock } from "./lock.ts";
@@ -18,6 +20,7 @@ import { recoverInProgressTurns } from "./recovery.ts";
 import { processWebhookDeliveries } from "./webhooks.ts";
 import {
   drainAgent,
+  detectStalledSubagents,
   processMemoryExtractionJobs,
   processMemorySynthesisJobs,
   reconcileSubagents,
@@ -84,7 +87,17 @@ export async function runHostMain(): Promise<void> {
     }
   });
   const gatewayDeps = { db, redis, blob, providers, vm, accountVms };
+  await reconcileAutomationShadows(db);
   await reconcileSubagents(gatewayDeps);
+  void detectStalledSubagents(gatewayDeps).catch((err) =>
+    logger.error(loggedError(err), "subagent stall check failed"),
+  );
+  const stallTimer = setInterval(() => {
+    void detectStalledSubagents(gatewayDeps).catch((err) =>
+      logger.error(loggedError(err), "subagent stall check failed"),
+    );
+  }, 30_000);
+  stallTimer.unref();
   const { websocket } = createGateway(app, gatewayDeps);
 
   void processMcpHealthChecks(gatewayDeps).catch((err) =>
@@ -98,6 +111,15 @@ export async function runHostMain(): Promise<void> {
   mcpHealthTimer.unref();
 
   startFileChangeWatcher(gatewayDeps);
+  void pollConnectorEvents(gatewayDeps).catch((err) =>
+    logger.error(loggedError(err), "connector event poll failed"),
+  );
+  const connectorEventTimer = setInterval(() => {
+    void pollConnectorEvents(gatewayDeps).catch((err) =>
+      logger.error(loggedError(err), "connector event poll failed"),
+    );
+  }, 60_000);
+  connectorEventTimer.unref();
   void runScheduledRoutines(gatewayDeps);
   const routineTimer = setInterval(() => void runScheduledRoutines(gatewayDeps), 15_000);
   routineTimer.unref();

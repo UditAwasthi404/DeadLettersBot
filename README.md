@@ -4,31 +4,56 @@ AgentOS is a self-hostable, multi-bot agent runtime. It combines a TypeScript mo
 
 > **Project status:** implementation is in progress. Core host, PostgreSQL and Redis persistence, account bootstrap, scoped memory and memory tools, peer messaging, approvals, skill/routine APIs, cron/webhook/file-change triggers, Google and Microsoft/Salesforce connector actions, browser skill recording, initial MCP support, and an Electron chat shell with session restore are present. Outbound signed webhooks have a durable retry queue and delivery history. Secure handoff, local PC execution, full subagent lifecycle, runtime compaction acceptance, connector-event triggers, production deployment hardening, and launch artifacts remain incomplete.
 
-## Local self-host quickstart
+## Run the app
 
-Requirements: Docker Engine with Compose, and a machine able to build the VM image.
+Requirements: Docker Desktop with Linux containers, Node.js 22, and pnpm 9.15. The first start builds the host and the browser VM image, so it takes several minutes.
+
+From the repository root, copy `.env.example` to `.env`. Set `JWT_SECRET` to a long random value and `XAI_API_KEY` to your xAI key. That root file is the only env file. Compose reads it when the project directory is the repository root.
 
 ```sh
 cp .env.example .env
 ```
 
-Change `JWT_SECRET` in `.env` to a long random value. Keep `INFERENCE_MOCK=1` for local protocol work, or set `INFERENCE_MOCK=0` and provide an inference API key.
-
-```sh
-docker compose --project-directory . -f infra/docker/docker-compose.yml up --build
+```powershell
+Copy-Item .env.example .env
 ```
 
-The gateway listens on `http://localhost:8787`. Bootstrap the first account once:
+Start PostgreSQL, Redis, MinIO, the VM image, and the gateway:
 
 ```sh
-curl -X POST http://localhost:8787/v1/auth/bootstrap \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"you@example.com","displayName":"Admin"}'
+docker compose --project-directory . -f infra/docker/docker-compose.yml up -d --build
 ```
 
-Save the returned token. The bootstrap route closes automatically after the first account is created. Create bots and manage memory, skills, and routines through the authenticated `/v1` API. The WebSocket endpoint is `/ws` and uses the same bearer token.
+The gateway listens on `http://localhost:8787`. Confirm it is up:
 
-Stop the stack with `Ctrl+C`; persistent PostgreSQL and MinIO data remain in Compose volumes.
+```sh
+curl http://localhost:8787/health
+```
+
+```powershell
+Invoke-RestMethod http://localhost:8787/health
+```
+
+The chat UI is the Electron desktop app. Install dependencies, then run these in two terminals:
+
+```sh
+pnpm install
+pnpm --filter @agentOS/desktop dev
+```
+
+```sh
+pnpm --filter @agentOS/desktop electron
+```
+
+In the app, enter your name and email and choose Create account. That creates the first account on the gateway, signs you in, and keeps the session on this computer. The route closes after the first account exists; a later setup uses **I already have a token**. Use ＋ to create a bot. The same session authorizes the `/v1` API and the `/ws` WebSocket.
+
+After editing `.env`, apply it with the same `docker compose ... up -d` command. Stop the stack with:
+
+```sh
+docker compose --project-directory . -f infra/docker/docker-compose.yml down
+```
+
+PostgreSQL and MinIO data stay in Compose volumes. See [Self Hosting](docs/SELF_HOSTING.md) for TLS, metrics, connectors, and key rotation.
 
 ## Workspace
 

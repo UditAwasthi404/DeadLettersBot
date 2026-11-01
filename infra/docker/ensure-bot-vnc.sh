@@ -26,7 +26,7 @@ port_open() {
 
 # shortcut: no VNC password; the gateway authenticates and the port stays on the account bridge.
 if ! port_open "$vnc_port"; then
-  nohup x11vnc -display ":$display" -rfbport "$vnc_port" -nopw -shared -forever -noxdamage \
+  nohup x11vnc -display ":$display" -rfbport "$vnc_port" -listen 0.0.0.0 -nopw -shared -forever -noxdamage \
     >"$state_dir/vnc-$bot_id.log" 2>&1 9>&- &
 fi
 

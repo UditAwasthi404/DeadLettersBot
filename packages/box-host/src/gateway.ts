@@ -56,10 +56,17 @@ import {
   validateAttachmentList,
 } from "./attachments.ts";
 import { AuthError, verifyBearerToken } from "./auth.ts";
+import {
+  isBoxHostedForAutomationSync,
+  loadScheduleSources,
+  syncAutomationShadows,
+  upsertAutomationShadow,
+} from "./automation-sync.ts";
 import { oauthConfigFromEnv } from "./connector-oauth.ts";
 import { loggedError, logger } from "./logger.ts";
 import { openApiDocument } from "./openapi.ts";
 import { queueRoutine, queueSkillTest } from "./routine-queue.ts";
+import { normalizeConnectorEventTrigger } from "./routine-trigger.ts";
 import { enqueue } from "./scheduler.ts";
 import { parseSkillDraft } from "./skill-draft.ts";
 import { deleteWebhookSubscription } from "./webhooks.ts";
@@ -139,7 +146,7 @@ async function authenticateRequest(
 }
 
 export async function runScheduledRoutines(deps: GatewayDeps, now = new Date()): Promise<number> {
-  const due = await deps.db.select().from(routines).where(eq(routines.enabled, true));
+  const due = await loadScheduleSources(deps.db);
   let queued = 0;
   const minuteStart = new Date(now);
   minuteStart.setSeconds(0, 0);
@@ -1252,7 +1259,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     const rows = await deps.db
       .select()
       .from(routines)
-      .where(eq(routines.accountId, auth.accountId));
+      .where(and(eq(routines.accountId, auth.accountId), isNull(routines.deletedAt)));
     const cronTimezone =
       process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "local time";
     return c.json(
@@ -1278,7 +1285,15 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
         | { type: "cron"; schedule?: string }
         | { type: "webhook" }
         | { type: "inter_bot_message"; senderBotId?: string }
-        | { type: "file_change"; path?: string };
+        | { type: "file_change"; path?: string }
+        | {
+            type: "connector_event";
+            service?: string;
+            sender?: string;
+            subject?: string;
+            query?: string;
+            calendarId?: string;
+          };
       enabled?: boolean;
       onError?: "notify_user" | "retry" | "pause";
     }>();
@@ -1287,13 +1302,15 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       !body.skillId ||
       !body.name?.trim() ||
       !body.trigger ||
-      !["cron", "webhook", "inter_bot_message", "file_change"].includes(body.trigger.type)
+      !["cron", "webhook", "inter_bot_message", "file_change", "connector_event"].includes(
+        body.trigger.type,
+      )
     )
       return c.json({ error: "botId, skillId, name, and a valid trigger are required" }, 400);
     const owned = await deps.db
       .select()
       .from(routines)
-      .where(eq(routines.accountId, auth.accountId));
+      .where(and(eq(routines.accountId, auth.accountId), isNull(routines.deletedAt)));
     if (owned.length >= 50) return c.json({ error: "Routine limit reached" }, 429);
     const [bot] = await deps.db
       .select()
@@ -1315,6 +1332,11 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       return c.json({ error: "cron schedule must be a valid five-field expression" }, 400);
     if (body.trigger.type === "file_change" && !botWorkspacePath(body.trigger.path ?? ""))
       return c.json({ error: "file change path must stay inside /home/agent" }, 400);
+    if (body.trigger.type === "connector_event" && !normalizeConnectorEventTrigger(body.trigger))
+      return c.json(
+        { error: "connector event needs gmail or google-calendar and a short filter" },
+        400,
+      );
     if (body.trigger.type === "inter_bot_message" && body.trigger.senderBotId) {
       const [senderBot] = await deps.db
         .select({ id: bots.id })
@@ -1337,7 +1359,10 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
               type: "file_change" as const,
               path: botWorkspacePath(body.trigger.path ?? "") as string,
             }
-          : body.trigger;
+          : body.trigger.type === "connector_event"
+            ? normalizeConnectorEventTrigger(body.trigger)
+            : body.trigger;
+    if (!trigger) return c.json({ error: "connector event trigger is invalid" }, 400);
     const webhookSecret =
       body.trigger.type === "webhook" ? randomBytes(24).toString("hex") : undefined;
     const [routine] = await deps.db
@@ -1358,6 +1383,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       })
       .returning();
     if (!routine) return c.json({ error: "routine could not be created" }, 500);
+    await upsertAutomationShadow(deps.db, routine);
     return c.json(
       {
         routine: {
@@ -1382,12 +1408,26 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
         | { type: "cron"; schedule: string }
         | { type: "webhook" }
         | { type: "inter_bot_message"; senderBotId?: string }
-        | { type: "file_change"; path: string };
+        | { type: "file_change"; path: string }
+        | {
+            type: "connector_event";
+            service?: string;
+            sender?: string;
+            subject?: string;
+            query?: string;
+            calendarId?: string;
+          };
     }>();
     const [current] = await deps.db
       .select()
       .from(routines)
-      .where(and(eq(routines.id, c.req.param("routineId")), eq(routines.accountId, auth.accountId)))
+      .where(
+        and(
+          eq(routines.id, c.req.param("routineId")),
+          eq(routines.accountId, auth.accountId),
+          isNull(routines.deletedAt),
+        ),
+      )
       .limit(1);
     if (!current) return c.json({ error: "not found" }, 404);
     const nextBotId = body.botId ?? current.botId;
@@ -1420,6 +1460,11 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       return c.json({ error: "cron schedule must be a valid five-field expression" }, 400);
     if (body.trigger?.type === "file_change" && !botWorkspacePath(body.trigger.path))
       return c.json({ error: "file change path must stay inside /home/agent" }, 400);
+    if (body.trigger?.type === "connector_event" && !normalizeConnectorEventTrigger(body.trigger))
+      return c.json(
+        { error: "connector event needs gmail or google-calendar and a short filter" },
+        400,
+      );
     if (body.trigger?.type === "inter_bot_message" && body.trigger.senderBotId) {
       const [senderBot] = await deps.db
         .select({ id: bots.id })
@@ -1438,7 +1483,9 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     let trigger: (typeof current)["trigger"] | undefined =
       body.trigger?.type === "file_change"
         ? { type: "file_change", path: botWorkspacePath(body.trigger.path) as string }
-        : body.trigger;
+        : body.trigger?.type === "connector_event"
+          ? (normalizeConnectorEventTrigger(body.trigger) ?? undefined)
+          : body.trigger;
     if (trigger?.type === "webhook") {
       if (current.trigger.type === "webhook" && current.trigger.secretHash) {
         trigger = { ...trigger, secretHash: current.trigger.secretHash };
@@ -1461,37 +1508,68 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
         ...(trigger ? { trigger } : {}),
         updatedAt: new Date(),
       })
-      .where(and(eq(routines.id, c.req.param("routineId")), eq(routines.accountId, auth.accountId)))
+      .where(
+        and(
+          eq(routines.id, c.req.param("routineId")),
+          eq(routines.accountId, auth.accountId),
+          isNull(routines.deletedAt),
+        ),
+      )
       .returning();
-    return routine
-      ? c.json({
-          routine: {
-            ...routine,
-            trigger:
-              routine.trigger.type === "webhook" ? { type: "webhook" as const } : routine.trigger,
-          },
-          ...(webhookSecret ? { webhookSecret } : {}),
-        })
-      : c.json({ error: "not found" }, 404);
+    if (!routine) return c.json({ error: "not found" }, 404);
+    await upsertAutomationShadow(deps.db, routine);
+    return c.json({
+      routine: {
+        ...routine,
+        trigger:
+          routine.trigger.type === "webhook" ? { type: "webhook" as const } : routine.trigger,
+      },
+      ...(webhookSecret ? { webhookSecret } : {}),
+    });
   });
   app.delete("/v1/routines/:routineId", async (c) => {
     const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
     const [target] = await deps.db
       .select({ id: routines.id })
       .from(routines)
-      .where(and(eq(routines.id, c.req.param("routineId")), eq(routines.accountId, auth.accountId)))
+      .where(
+        and(
+          eq(routines.id, c.req.param("routineId")),
+          eq(routines.accountId, auth.accountId),
+          isNull(routines.deletedAt),
+        ),
+      )
       .limit(1);
     if (!target) return c.json({ error: "not found" }, 404);
-    await deps.db.delete(routineRuns).where(eq(routineRuns.routineId, target.id));
-    await deps.db.delete(routines).where(eq(routines.id, target.id));
-    return c.json({ deleted: true });
+    if (!isBoxHostedForAutomationSync()) {
+      await deps.db.delete(routineRuns).where(eq(routineRuns.routineId, target.id));
+      await deps.db.delete(routines).where(eq(routines.id, target.id));
+      return c.json({ deleted: true });
+    }
+    await deps.db
+      .update(routines)
+      .set({ deletedAt: new Date(), enabled: false, updatedAt: new Date() })
+      .where(eq(routines.id, target.id));
+    return c.json({ deleted: true, remoteScheduleRetained: true });
+  });
+  app.post("/v1/automation/sync", async (c) => {
+    const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
+    if (!isBoxHostedForAutomationSync())
+      return c.json({ error: "this box is excluded from hosted automation sync" }, 409);
+    return c.json(await syncAutomationShadows(deps.db, auth.accountId));
   });
   app.post("/v1/routines/:routineId/test", async (c) => {
     const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
     const [routine] = await deps.db
       .select()
       .from(routines)
-      .where(and(eq(routines.id, c.req.param("routineId")), eq(routines.accountId, auth.accountId)))
+      .where(
+        and(
+          eq(routines.id, c.req.param("routineId")),
+          eq(routines.accountId, auth.accountId),
+          isNull(routines.deletedAt),
+        ),
+      )
       .limit(1);
     if (!routine) return c.json({ error: "not found" }, 404);
     return c.json(
@@ -1504,7 +1582,13 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     const [routine] = await deps.db
       .select()
       .from(routines)
-      .where(and(eq(routines.id, c.req.param("routineId")), eq(routines.accountId, auth.accountId)))
+      .where(
+        and(
+          eq(routines.id, c.req.param("routineId")),
+          eq(routines.accountId, auth.accountId),
+          isNull(routines.deletedAt),
+        ),
+      )
       .limit(1);
     if (!routine) return c.json({ error: "not found" }, 404);
     return c.json(
@@ -1576,6 +1660,10 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
         status: subagents.status,
         result: subagents.result,
         usage: subagents.usage,
+        stallCount: subagents.stallCount,
+        lastProgressAt: subagents.lastProgressAt,
+        stallEvents: subagents.stallEvents,
+        steeringEvents: subagents.steeringEvents,
         createdAt: subagents.createdAt,
         startedAt: subagents.startedAt,
         completedAt: subagents.completedAt,
@@ -2042,7 +2130,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
             }
             const vmInfo = await deps.vm.provisionVM(auth.accountId);
             if (!vmInfo.ipAddress) {
-              ws.close(1011, "vm unavailable");
+              ws.close(1011, "VM has no network address");
               return;
             }
             await deps.vm.ensureBotBrowser(vmInfo.vmId, botId);
@@ -2053,10 +2141,17 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
               ws.send(Uint8Array.from(chunk));
             });
             socket.on("close", () => ws.close());
-            socket.on("error", () => ws.close());
-          } catch {
+            socket.on("error", (err) => {
+              logger.warn({ ...loggedError(err), botId }, "vnc tcp failed");
+              ws.close(1011, "VM screen is not reachable");
+            });
+          } catch (err) {
+            logger.error({ ...loggedError(err), botId }, "vnc open failed");
             stop();
-            ws.close(1011, "vnc unavailable");
+            const message = (err instanceof Error ? err.message : "vnc unavailable")
+              .replace(/\s+/g, " ")
+              .slice(0, 120);
+            ws.close(1011, message || "vnc unavailable");
           }
         },
         async onMessage(evt) {

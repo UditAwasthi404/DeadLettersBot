@@ -21,4 +21,6 @@ export interface ModelMessage {
   toolCalls?: ToolCall[];
   toolCallId?: string;
   name?: string;
+  /** Summary carrier inserted by compaction. It is context, not a new user instruction. */
+  isSummary?: boolean;
 }

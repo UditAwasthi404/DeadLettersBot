@@ -3,6 +3,7 @@ export {};
 declare global {
   interface Window {
     agentOS: {
+      platform: string;
       apiRequest(request: {
         baseUrl: string;
         token: string;

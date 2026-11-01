@@ -38,12 +38,22 @@ function localResult(
 }
 
 function createWindow(): void {
+  const darwin = process.platform === "darwin";
   windowRef = new BrowserWindow({
-    width: 1180,
-    height: 780,
-    minWidth: 860,
-    minHeight: 600,
-    backgroundColor: "#101114",
+    width: 1280,
+    height: 840,
+    minWidth: 980,
+    minHeight: 680,
+    backgroundColor: "#1c1c1e",
+    ...(darwin
+      ? {
+          titleBarStyle: "hiddenInset" as const,
+          trafficLightPosition: { x: 16, y: 18 },
+        }
+      : {
+          titleBarStyle: "hidden" as const,
+          titleBarOverlay: { color: "#1c1c1e", symbolColor: "#f5f5f7", height: 52 },
+        }),
     webPreferences: {
       preload: join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -73,6 +83,16 @@ function sendStatus(status: string): void {
 function clearReconnect(): void {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = null;
+}
+
+function cleanToken(raw: string): string {
+  const compact = raw.replace(/\s+/g, "");
+  const embedded = compact.match(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+  return embedded?.[0] ?? compact;
+}
+
+async function clearSession(): Promise<void> {
+  await session.defaultSession.cookies.remove(SESSION_URL, "gateway");
 }
 
 async function persistSession(baseUrl: string, token: string): Promise<void> {
@@ -123,6 +143,11 @@ function openSocket(generation: number): void {
   previous?.removeAllListeners();
   previous?.close();
   socket = new WebSocket(base, { headers: { Authorization: `Bearer ${bearerToken}` } });
+  let authRejected = false;
+  socket.on("unexpected-response", (_request, response) => {
+    if (response.statusCode === 401 || response.statusCode === 403) authRejected = true;
+    response.resume();
+  });
   socket.on("open", () => {
     if (generation !== connectionGeneration) return;
     reconnectAttempt = 0;
@@ -131,7 +156,7 @@ function openSocket(generation: number): void {
   socket.on("close", () => {
     if (generation !== connectionGeneration) return;
     sendStatus("disconnected");
-    scheduleReconnect(generation);
+    if (!authRejected) scheduleReconnect(generation);
   });
   socket.on("error", (err) => {
     if (generation !== connectionGeneration) return;
@@ -227,10 +252,13 @@ ipcMain.handle(
     if (!["http:", "https:"].includes(base.protocol) || !request.path.startsWith("/v1/"))
       throw new Error("invalid API request");
     gatewayBase = base.origin;
-    bearerToken = request.token;
+    const cleaned = cleanToken(request.token);
+    if (cleaned) bearerToken = cleaned;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (cleaned) headers.Authorization = `Bearer ${cleaned}`;
     const response = await fetch(new URL(request.path, gatewayBase), {
       method: request.method ?? "GET",
-      headers: { Authorization: `Bearer ${bearerToken}`, "Content-Type": "application/json" },
+      headers,
       body: request.body === undefined ? undefined : JSON.stringify(request.body),
     });
     const text = await response.text();
@@ -248,8 +276,25 @@ ipcMain.handle(
 ipcMain.handle("gateway:connect", async (_event, baseUrl: string, token: string) => {
   const base = new URL(baseUrl);
   if (!["http:", "https:"].includes(base.protocol)) throw new Error("invalid gateway URL");
+  const cleaned = cleanToken(token);
+  if (!cleaned) throw new Error("invalid token");
+  const probe = await fetch(new URL("/v1/bots", base.origin), {
+    headers: { Authorization: `Bearer ${cleaned}` },
+  });
+  if (!probe.ok) {
+    await clearSession();
+    const text = await probe.text();
+    let message = `HTTP ${probe.status}`;
+    try {
+      const data = JSON.parse(text) as { error?: unknown };
+      if (typeof data.error === "string") message = data.error;
+    } catch {
+      if (text) message = text;
+    }
+    throw new Error(message);
+  }
   gatewayBase = base.origin;
-  bearerToken = token;
+  bearerToken = cleaned;
   userDisconnected = false;
   reconnectAttempt = 0;
   clearReconnect();
@@ -292,12 +337,18 @@ ipcMain.handle("vnc:open", (_event, botId: string) => {
       else reject(err ?? new Error("vnc closed"));
     };
     const sock = new WebSocket(url, { headers: { Authorization: `Bearer ${bearerToken}` } });
+    let opened = false;
+    sock.on("unexpected-response", (_request, response) => {
+      finish(false, new Error(`VM screen HTTP ${response.statusCode ?? "error"}`));
+      response.resume();
+    });
     sock.on("open", () => {
       if (epoch !== vncEpoch) {
         sock.close();
-        finish(false);
+        finish(false, new Error("VM screen open was superseded"));
         return;
       }
+      opened = true;
       vncSocket = sock;
       finish(true);
     });
@@ -308,14 +359,16 @@ ipcMain.handle("vnc:open", (_event, botId: string) => {
         : new TextEncoder().encode(String(data));
       windowRef?.webContents.send("vnc:data", bytes);
     });
-    sock.on("close", () => {
-      finish(false);
+    sock.on("close", (code, reason) => {
+      const text = Buffer.isBuffer(reason) ? reason.toString("utf8").trim() : "";
+      finish(false, new Error(text || `VM screen connection closed (${code})`));
       if (epoch !== vncEpoch) return;
       vncSocket = null;
-      windowRef?.webContents.send("vnc:status", "closed");
+      if (opened)
+        windowRef?.webContents.send("vnc:status", text || "The VM screen connection closed.");
     });
-    sock.on("error", () => {
-      finish(false, new Error("vnc failed"));
+    sock.on("error", (err) => {
+      finish(false, new Error(err.message || "VM screen connection failed"));
     });
   });
 });

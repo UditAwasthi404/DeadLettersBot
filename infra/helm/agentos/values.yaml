@@ -36,7 +36,8 @@ secrets:
   connectorEncryptionKeyPrevious: ""
 
 inference:
-  providers: "openai"
+  providers: "xai"
+  xaiApiKey: ""
   openaiApiKey: ""
   anthropicApiKey: ""
   ollamaBaseUrl: "http://ollama:11434"
@@ -63,7 +64,8 @@ redis:
   storageClassName: ""
 
 minio:
-  image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+  # Official minio/minio images no longer allow anonymous pulls (Docker Hub removed, Quay returns 401).
+  image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
   rootUser: agentos-minio
   rootPassword: ""
   storage: 50Gi

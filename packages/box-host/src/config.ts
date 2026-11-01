@@ -1,4 +1,4 @@
-const PROVIDERS = new Set(["openai", "anthropic", "ollama", "mock"]);
+const PROVIDERS = new Set(["openai", "anthropic", "xai", "ollama", "mock"]);
 
 function requireValue(name: string, errors: string[]): string {
   const value = process.env[name]?.trim();
@@ -99,8 +99,14 @@ export function validateRuntimeConfig(): void {
   booleanValue("METRICS_ENABLED", errors);
   booleanValue("MEMORY_SYNTHESIS_ENABLED", errors);
   booleanValue("MCP_STRICT_MODE", errors);
+  booleanValue("BOX_HOSTED_FOR_AUTOMATION_SYNC", errors);
+  if (process.env.SUBAGENT_STALL_MS !== undefined && process.env.SUBAGENT_STALL_MS !== "") {
+    const stallMs = Number(process.env.SUBAGENT_STALL_MS);
+    if (!Number.isInteger(stallMs) || stallMs < 1_000 || stallMs > 86_400_000)
+      errors.push("SUBAGENT_STALL_MS must be an integer from 1000 to 86400000 (default 180000)");
+  }
 
-  const providerNames = (process.env.INFERENCE_PROVIDERS ?? "openai,anthropic,ollama")
+  const providerNames = (process.env.INFERENCE_PROVIDERS ?? "xai")
     .split(",")
     .map((provider) => provider.trim())
     .filter(Boolean);
@@ -112,6 +118,12 @@ export function validateRuntimeConfig(): void {
       if (production && provider === "mock")
         errors.push("mock cannot be selected in INFERENCE_PROVIDERS in production");
     }
+    if (providerNames.includes("xai") && !process.env.XAI_API_KEY?.trim())
+      errors.push("XAI_API_KEY is required when xai is an inference provider");
+    if (providerNames.includes("openai") && !process.env.OPENAI_API_KEY?.trim())
+      errors.push("OPENAI_API_KEY is required when openai is an inference provider");
+    if (providerNames.includes("anthropic") && !process.env.ANTHROPIC_API_KEY?.trim())
+      errors.push("ANTHROPIC_API_KEY is required when anthropic is an inference provider");
   }
 
   if (errors.length) throw new Error(`Invalid runtime configuration:\n- ${errors.join("\n- ")}`);

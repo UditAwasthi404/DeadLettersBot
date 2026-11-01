@@ -10,4 +10,4 @@ WORKDIR /app
 COPY --from=deps /app /app
 ENV NODE_ENV=production
 EXPOSE 8787
-CMD ["sh", "-c", "bun ./packages/shared/node_modules/.bin/drizzle-kit migrate --config=./packages/shared/drizzle.config.ts && bun run packages/box-host/src/index.ts"]
+CMD ["sh", "-c", "cd /app/packages/shared && bun ./node_modules/drizzle-kit/bin.cjs migrate && cd /app && bun run packages/box-host/src/index.ts"]
