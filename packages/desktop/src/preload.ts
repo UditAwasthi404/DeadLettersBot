@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("agentOS", {
   }) => ipcRenderer.invoke("api:request", request),
   connect: (baseUrl: string, token: string) =>
     ipcRenderer.invoke("gateway:connect", baseUrl, token),
+  updateToken: (token: string) => ipcRenderer.invoke("gateway:updateToken", token),
   restoreSession: () =>
     ipcRenderer.invoke("gateway:restore") as Promise<{ baseUrl: string; token: string } | null>,
   send: (frame: unknown) => ipcRenderer.invoke("gateway:send", frame),

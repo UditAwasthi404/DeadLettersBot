@@ -134,6 +134,13 @@
       "when": 1793310000000,
       "tag": "0018_automation_and_stalls",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1793320000000,
+      "tag": "0019_clerk_user",
+      "breakpoints": true
     }
   ]
 }

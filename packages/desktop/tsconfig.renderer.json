@@ -6,5 +6,5 @@
     "types": ["vite/client"],
     "noEmit": true
   },
-  "include": ["src/renderer.tsx", "src/preload.d.ts"]
+  "include": ["src/renderer.tsx", "src/preload.d.ts", "src/clerk-env.d.ts"]
 }
