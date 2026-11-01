@@ -12,6 +12,7 @@ declare global {
         body?: unknown;
       }): Promise<unknown>;
       connect(baseUrl: string, token: string): Promise<boolean>;
+      updateToken(token: string): Promise<boolean>;
       restoreSession(): Promise<{ baseUrl: string; token: string } | null>;
       send(frame: unknown): Promise<void>;
       disconnect(): Promise<void>;

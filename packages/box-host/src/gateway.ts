@@ -55,7 +55,7 @@ import {
   attachmentKey,
   validateAttachmentList,
 } from "./attachments.ts";
-import { AuthError, verifyBearerToken } from "./auth.ts";
+import { AuthError, revokeClerkSession, useMockAuth, verifyBearerToken } from "./auth.ts";
 import {
   isBoxHostedForAutomationSync,
   loadScheduleSources,
@@ -113,6 +113,7 @@ type AuthenticatedRequest = {
   apiKeyId?: string;
   sessionVersion?: number;
   refreshedToken?: string;
+  clerkSessionId?: string;
 };
 
 type SkillStepInput = {
@@ -248,6 +249,11 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
   app.get("/docs", apiReference({ url: "/openapi.json" }));
 
   app.post("/v1/auth/bootstrap", async (c) => {
+    if (!useMockAuth())
+      return c.json(
+        { error: "sign in with Clerk; this gateway does not issue a local account password" },
+        410,
+      );
     const lockToken = crypto.randomUUID();
     if ((await deps.redis.set("auth:bootstrap-lock", lockToken, "EX", 30, "NX")) !== "OK")
       return c.json({ error: "bootstrap is already in progress" }, 409);
@@ -294,6 +300,13 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       .limit(1);
     if (auth.sessionVersion !== undefined && auth.sessionVersion !== account?.sessionVersion)
       return c.json({ error: "session revoked" }, 401);
+    if (!useMockAuth())
+      return c.json({
+        accountId: auth.accountId,
+        scopes: auth.scopes,
+        provider: "clerk",
+        expiresInSeconds: null,
+      });
     const secret = process.env.JWT_SECRET;
     if (!account || !secret)
       return c.json({ error: "account or JWT signing key unavailable" }, 503);
@@ -315,6 +328,13 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
     if (!auth.scopes.includes("admin"))
       return c.json({ error: "admin scope is required to revoke account sessions" }, 403);
+    if (auth.clerkSessionId) {
+      try {
+        await revokeClerkSession(auth.clerkSessionId);
+      } catch (err) {
+        logger.warn(loggedError(err), "clerk session revoke failed");
+      }
+    }
     const [account] = await deps.db
       .update(accounts)
       .set({ sessionVersion: sql`${accounts.sessionVersion} + 1`, updatedAt: new Date() })

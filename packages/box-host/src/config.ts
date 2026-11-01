@@ -63,6 +63,9 @@ export function validateRuntimeConfig(): void {
     "SALESFORCE_OAUTH_CLIENT_SECRET",
     "SALESFORCE_CLIENT_ID",
     "SALESFORCE_CLIENT_SECRET",
+    "CLERK_PUBLISHABLE_KEY",
+    "CLERK_SECRET_KEY",
+    "CLERK_AUTHORIZED_PARTIES",
   ])
     cleanedEnv(name);
   const production = process.env.NODE_ENV === "production";
@@ -103,6 +106,10 @@ export function validateRuntimeConfig(): void {
       );
     if (process.env.INFERENCE_MOCK === "1")
       errors.push("INFERENCE_MOCK cannot be enabled in production");
+    if (process.env.CLERK_MOCK === "1") errors.push("CLERK_MOCK cannot be enabled in production");
+    if (!cleanedEnv("CLERK_SECRET_KEY")) errors.push("CLERK_SECRET_KEY is required in production");
+    if (!cleanedEnv("CLERK_PUBLISHABLE_KEY"))
+      errors.push("CLERK_PUBLISHABLE_KEY is required in production");
   }
 
   const port = Number(process.env.PORT ?? 8787);
@@ -125,6 +132,7 @@ export function validateRuntimeConfig(): void {
   booleanValue("MEMORY_SYNTHESIS_ENABLED", errors);
   booleanValue("MCP_STRICT_MODE", errors);
   booleanValue("BOX_HOSTED_FOR_AUTOMATION_SYNC", errors);
+  booleanValue("CLERK_MOCK", errors);
   if (process.env.SUBAGENT_STALL_MS !== undefined && process.env.SUBAGENT_STALL_MS !== "") {
     const stallMs = Number(process.env.SUBAGENT_STALL_MS);
     if (!Number.isInteger(stallMs) || stallMs < 1_000 || stallMs > 86_400_000)

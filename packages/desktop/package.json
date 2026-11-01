@@ -15,9 +15,10 @@
     "dist": "pnpm build && electron-builder"
   },
   "dependencies": {
+    "@clerk/react": "6.18.4",
     "electron-updater": "^6.8.11",
-    "react": "19.0.0",
-    "react-dom": "19.0.0",
+    "react": "19.0.3",
+    "react-dom": "19.0.3",
     "ws": "8.21.0"
   },
   "devDependencies": {

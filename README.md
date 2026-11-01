@@ -55,6 +55,50 @@ docker compose --project-directory . -f infra/docker/docker-compose.yml down
 
 PostgreSQL and MinIO data stay in Compose volumes. See [Self Hosting](docs/SELF_HOSTING.md) for TLS, metrics, connectors, and key rotation.
 
+## Signing in with Clerk
+
+App login uses [Clerk](https://dashboard.clerk.com). Gmail, Drive, Calendar, and Microsoft stay on their own OAuth clients in the next section. Clerk does not replace those.
+
+In the Clerk dashboard, create an application and copy the publishable key and the secret key into the repository `.env`:
+
+```powershell
+Set-Location D:\CODE\DeadLettersBot
+notepad .env
+```
+
+Set `CLERK_PUBLISHABLE_KEY` and `VITE_CLERK_PUBLISHABLE_KEY` to the same `pk_test_...` value, and `CLERK_SECRET_KEY` to the `sk_test_...` value. Leave `CLERK_MOCK=0`. Do not wrap the values in quotes.
+
+In the Clerk dashboard, under **Configure**, **Domains** or **Paths** (the names vary by dashboard version), allow these origins and redirect URLs:
+
+- `http://127.0.0.1:5173`
+- `http://localhost:5173`
+
+The Electron window is served from port 5173. The gateway on port 8787 only checks the session token; it is not a Clerk redirect URL. Add your Google or Microsoft social connection inside Clerk only if you want Clerk itself to offer those buttons. That is separate from the Gmail and Drive connectors.
+
+Recreate the gateway after saving `.env`:
+
+```powershell
+Set-Location D:\CODE\DeadLettersBot
+docker compose --project-directory . -f infra/docker/docker-compose.yml up -d --build
+```
+
+Then start the desktop app in two PowerShell windows:
+
+```powershell
+Set-Location D:\CODE\DeadLettersBot
+pnpm install
+pnpm --filter @agentOS/desktop dev
+```
+
+```powershell
+Set-Location D:\CODE\DeadLettersBot
+pnpm --filter @agentOS/desktop electron
+```
+
+The gateway field in the app should stay `http://127.0.0.1:8787`. The first Clerk sign-in creates the local account and keeps that user's connectors and bots.
+
+Without Clerk keys, or with `CLERK_MOCK=1` or `INFERENCE_MOCK=1`, the app keeps the local token login so tests and a credential-free run still work. Production requires both Clerk keys and rejects `CLERK_MOCK`.
+
 ## Setting up connectors
 
 Connectors are optional. The gateway still runs without them. Gmail, Google Calendar, Google Drive, OneDrive, Outlook, Teams, SharePoint, and Salesforce all use the same callback URL. The desktop Connect button opens that provider, and the provider sends the browser back to the gateway.

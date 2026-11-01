@@ -273,6 +273,14 @@ ipcMain.handle(
   },
 );
 
+ipcMain.handle("gateway:updateToken", async (_event, token: string) => {
+  const cleaned = cleanToken(String(token ?? ""));
+  if (!cleaned) throw new Error("invalid token");
+  bearerToken = cleaned;
+  if (gatewayBase) await persistSession(gatewayBase, bearerToken);
+  return true;
+});
+
 ipcMain.handle("gateway:connect", async (_event, baseUrl: string, token: string) => {
   const base = new URL(baseUrl);
   if (!["http:", "https:"].includes(base.protocol)) throw new Error("invalid gateway URL");
