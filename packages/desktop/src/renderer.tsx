@@ -1,8 +1,27 @@
+import { ClerkProvider, SignIn, SignUp, useAuth, useClerk } from "@clerk/react";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { UpdateBanner } from "./UpdateBanner.tsx";
 import { RawVncSession } from "./rfb.ts";
 import "./style.css";
+
+type ClerkBridge = {
+  enabled: true;
+  loaded: boolean;
+  signedIn: boolean;
+  getToken: () => Promise<string | null>;
+  signOut: () => Promise<void>;
+};
+
+function clerkPublishableKey(): string {
+  const mock = import.meta.env.CLERK_MOCK ?? import.meta.env.VITE_CLERK_MOCK;
+  if (mock === "1") return "";
+  return (
+    import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ||
+    import.meta.env.CLERK_PUBLISHABLE_KEY ||
+    ""
+  ).trim();
+}
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_PROMPT_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -231,7 +250,7 @@ interface Frame {
   message?: string;
 }
 
-function App() {
+function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8787");
   const [token, setToken] = useState("");
   const [status, setStatus] = useState("disconnected");
@@ -302,6 +321,7 @@ function App() {
   const [sessionReady, setSessionReady] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const [authMode, setAuthMode] = useState<"create" | "token">("create");
+  const [clerkScreen, setClerkScreen] = useState<"in" | "up">("in");
   const [accountName, setAccountName] = useState("");
   const [accountEmail, setAccountEmail] = useState("");
   const [authError, setAuthError] = useState("");
@@ -423,6 +443,15 @@ function App() {
     });
     const stopStatus = window.agentOS.onStatus(setStatus);
     let active = true;
+    if (clerk?.enabled) {
+      setSessionReady(true);
+      return () => {
+        active = false;
+        stopFrame();
+        stopStatus();
+        void window.agentOS.disconnect();
+      };
+    }
     void window.agentOS.restoreSession().then(async (saved) => {
       try {
         if (!active || !saved?.baseUrl || !saved.token) return;
@@ -452,7 +481,27 @@ function App() {
       stopStatus();
       void window.agentOS.disconnect();
     };
-  }, []);
+  }, [clerk?.enabled]);
+
+  useEffect(() => {
+    if (!clerk?.enabled || !clerk.loaded || !clerk.signedIn) return;
+    let cancelled = false;
+    const sync = async (initial: boolean) => {
+      const sessionToken = await clerk.getToken();
+      if (cancelled || !sessionToken) return;
+      setToken(sessionToken);
+      await window.agentOS.updateToken(sessionToken).catch(() => undefined);
+      if (!initial) return;
+      const ok = await connect({ token: sessionToken });
+      if (!ok && !cancelled) setAuthError("Clerk signed in, but the gateway rejected the session.");
+    };
+    void sync(true);
+    const timer = setInterval(() => void sync(false), 45_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [clerk?.enabled, clerk?.loaded, clerk?.signedIn, clerk?.getToken]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the item list is the scroll trigger; the ref is stable.
   useEffect(() => {
@@ -1668,7 +1717,49 @@ function App() {
 
   return (
     <div className="app-shell">
-      {!signedIn && (
+      {!signedIn && clerk?.enabled && (
+        <section className="auth-gate" aria-label="Account">
+          <div className="auth-card">
+            <div className="auth-mark">A</div>
+            <h1>{clerk.signedIn ? "Signing in" : "Sign in"}</h1>
+            <p>
+              {clerk.loaded
+                ? "Sign in with Clerk. Gmail, Drive, and the other connectors stay separate and are connected later."
+                : "Loading sign-in…"}
+            </p>
+            {clerk.loaded && (
+              <label>
+                Gateway
+                <input
+                  value={baseUrl}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                  spellCheck={false}
+                  autoComplete="url"
+                />
+              </label>
+            )}
+            {clerk.loaded && !clerk.signedIn && (
+              <>
+                {clerkScreen === "in" ? <SignIn /> : <SignUp />}
+                <button
+                  type="button"
+                  className="auth-switch"
+                  onClick={() => setClerkScreen((current) => (current === "in" ? "up" : "in"))}
+                >
+                  {clerkScreen === "in" ? "Create a new account" : "I already have an account"}
+                </button>
+              </>
+            )}
+            {clerk.loaded && clerk.signedIn && <p>Checking the gateway session…</p>}
+            {authError && (
+              <p className="auth-error" role="alert">
+                {authError}
+              </p>
+            )}
+          </div>
+        </section>
+      )}
+      {!signedIn && !clerk?.enabled && (
         <section className="auth-gate" aria-label="Account">
           <form
             className="auth-card"
@@ -1952,6 +2043,7 @@ function App() {
                   type="button"
                   onClick={() => {
                     void window.agentOS.disconnect();
+                    if (clerk?.enabled) void clerk.signOut();
                     setSignedIn(false);
                     setAuthMode(token ? "token" : "create");
                     setAuthError("");
@@ -3222,10 +3314,36 @@ function DesktopRequired() {
   );
 }
 
+function ClerkApp() {
+  const { isLoaded, isSignedIn, getToken } = useAuth();
+  const { signOut } = useClerk();
+  return (
+    <App
+      clerk={{
+        enabled: true,
+        loaded: isLoaded,
+        signedIn: Boolean(isSignedIn),
+        getToken,
+        signOut: () => signOut(),
+      }}
+    />
+  );
+}
+
+function Root() {
+  const key = clerkPublishableKey();
+  if (!key) return <App />;
+  return (
+    <ClerkProvider publishableKey={key}>
+      <ClerkApp />
+    </ClerkProvider>
+  );
+}
+
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("root mount node is missing");
 createRoot(rootElement).render(
   <React.StrictMode>
-    {typeof window.agentOS?.onFrame === "function" ? <App /> : <DesktopRequired />}
+    {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
   </React.StrictMode>,
 );

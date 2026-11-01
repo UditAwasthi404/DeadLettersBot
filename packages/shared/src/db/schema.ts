@@ -17,6 +17,8 @@ import {
 export const accounts = pgTable("accounts", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: text("email").notNull().unique(),
+  /** Clerk user id (`user_...`). Null for accounts created by the local mock login. */
+  clerkUserId: text("clerk_user_id").unique(),
   displayName: text("display_name"),
   /** Provider preference order: primary → secondary → tertiary. */
   inferenceProviders: jsonb("inference_providers").$type<string[]>().default([]).notNull(),
