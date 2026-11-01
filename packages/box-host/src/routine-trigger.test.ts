@@ -15,18 +15,21 @@ describe("connector event triggers", () => {
       sender: "ada@example.com",
       subject: "Invoice",
     });
-    expect(normalizeConnectorEventTrigger({ service: "google-calendar", calendarId: "primary" }))
-      .toEqual({
-        type: "connector_event",
-        service: "google-calendar",
-        calendarId: "primary",
-      });
+    expect(
+      normalizeConnectorEventTrigger({ service: "google-calendar", calendarId: "primary" }),
+    ).toEqual({
+      type: "connector_event",
+      service: "google-calendar",
+      calendarId: "primary",
+    });
   });
 
   test("rejects unknown services, newlines, and unsafe calendar ids", () => {
     expect(normalizeConnectorEventTrigger({ service: "drive" })).toBeNull();
     expect(normalizeConnectorEventTrigger({ service: "gmail", query: "a\nb" })).toBeNull();
-    expect(normalizeConnectorEventTrigger({ service: "google-calendar", calendarId: "../x" })).toBeNull();
+    expect(
+      normalizeConnectorEventTrigger({ service: "google-calendar", calendarId: "../x" }),
+    ).toBeNull();
   });
 
   test("builds a bounded Gmail query", () => {

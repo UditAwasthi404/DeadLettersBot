@@ -66,36 +66,64 @@ function createMockDb(
   turnStore: TurnRow[],
   stepStore: unknown[],
 ) {
-  return {
+  const rowsFor = (table: unknown) => {
+    if (table === accountsTable) return [account];
+    if (table === botsTable) return [bot];
+    if (table === turnsTable) return turnStore;
+    return [];
+  };
+  const db = {
     select: () => ({
-      from: (table: unknown) => ({
-        where: (_cond: unknown) => ({
-          limit: async (n: number) => {
-            if (table === accountsTable) return [account].slice(0, n);
-            if (table === botsTable) return [bot].slice(0, n);
-            if (table === turnsTable) return turnStore.slice(-1).slice(0, n);
-            return [];
+      from: (table: unknown) => {
+        const load = () => rowsFor(table);
+        const chain = Object.assign(Promise.resolve().then(load), {
+          where() {
+            return chain;
           },
-        }),
-      }),
+          limit(n: number) {
+            return Promise.resolve(load().slice(0, n));
+          },
+          orderBy() {
+            return chain;
+          },
+          innerJoin() {
+            return chain;
+          },
+        });
+        return chain;
+      },
     }),
     insert: (table: unknown) => ({
-      values: async (v: Record<string, unknown>) => {
-        if (table === turnsTable) turnStore.push(v as TurnRow);
-        else if (table === stepsTable) stepStore.push(v);
+      values(v: Record<string, unknown> | Record<string, unknown>[]) {
+        const stored = Array.isArray(v) ? v : [v];
+        const done = Promise.resolve().then(() => {
+          if (table === turnsTable) {
+            for (const row of stored) turnStore.push(row as TurnRow);
+          } else if (table === stepsTable) {
+            for (const row of stored) stepStore.push(row);
+          }
+          return stored;
+        });
+        return Object.assign(done, {
+          returning: () => done,
+          onConflictDoNothing: () => done,
+        });
       },
     }),
     update: (table: unknown) => ({
       set: (patch: Partial<TurnRow>) => ({
-        where: async () => {
+        where() {
           if (table === turnsTable) {
             for (const t of turnStore) Object.assign(t, patch);
           }
+          return Promise.resolve([]);
         },
       }),
     }),
     execute: async () => [{ ok: 1 }],
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
   };
+  return db;
 }
 
 function createMockRedis() {
@@ -116,6 +144,36 @@ function createMockRedis() {
     },
     async publish() {
       return 0;
+    },
+    async hgetall() {
+      return {};
+    },
+    async hset() {
+      return 1;
+    },
+    async hdel() {
+      return 1;
+    },
+    async del() {
+      return 1;
+    },
+    async incr() {
+      return 1;
+    },
+    async expire() {
+      return 1;
+    },
+    async zcard() {
+      return 0;
+    },
+    async lpop() {
+      return null;
+    },
+    async rpush() {
+      return 1;
+    },
+    async getdel() {
+      return null;
     },
     async zadd(key: string, score: number, member: string) {
       const arr = zsets.get(key) ?? [];

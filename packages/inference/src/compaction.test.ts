@@ -97,7 +97,12 @@ describe("applyStepUsage", () => {
         {
           promptEstimate: 10,
           completionEstimate: 4,
-          provider: { promptTokens: 80, completionTokens: 20, totalTokens: 100, source: "provider" },
+          provider: {
+            promptTokens: 80,
+            completionTokens: 20,
+            totalTokens: 100,
+            source: "provider",
+          },
         },
       ),
     ).toEqual({ promptTokens: 80, completionTokens: 20, totalTokens: 100, source: "provider" });

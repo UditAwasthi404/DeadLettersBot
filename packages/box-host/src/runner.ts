@@ -720,11 +720,7 @@ ${server.cachedTools
       const compacted = await compactHistory(
         ctx,
         previousMessages,
-        [
-          { role: "system", content: systemPrompt },
-          userInfoMessage,
-          userTurnMessage,
-        ],
+        [{ role: "system", content: systemPrompt }, userInfoMessage, userTurnMessage],
         userInfoMessage.content,
         inferenceTools,
       );
@@ -881,7 +877,11 @@ ${server.cachedTools
       let providerUsage: TokenUsage | null = null;
       let completionEstimate = 0;
       try {
-        for await (const ev of observeInferenceStream(ctx.session, requestMessages, inferenceTools)) {
+        for await (const ev of observeInferenceStream(
+          ctx.session,
+          requestMessages,
+          inferenceTools,
+        )) {
           if (ev.type === "token") {
             assistantContent += ev.delta;
             ctx.send({

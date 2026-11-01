@@ -14,8 +14,11 @@ describe("automation sync", () => {
     const previous = process.env.BOX_HOSTED_FOR_AUTOMATION_SYNC;
     process.env.BOX_HOSTED_FOR_AUTOMATION_SYNC = "0";
     expect(isBoxHostedForAutomationSync()).toBe(false);
+    // process.env stores strings, so assigning undefined would leave the text "undefined".
+    // biome-ignore lint/performance/noDelete: env keys must be removed, not set to the string "undefined"
     delete process.env.BOX_HOSTED_FOR_AUTOMATION_SYNC;
     expect(isBoxHostedForAutomationSync()).toBe(true);
+    // biome-ignore lint/performance/noDelete: env keys must be removed, not set to the string "undefined"
     if (previous === undefined) delete process.env.BOX_HOSTED_FOR_AUTOMATION_SYNC;
     else process.env.BOX_HOSTED_FOR_AUTOMATION_SYNC = previous;
   });

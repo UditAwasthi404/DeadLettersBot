@@ -7,7 +7,10 @@ function fieldMatches(
   sunday = false,
 ): boolean {
   return field.split(",").some((part) => {
-    const [base, stepText] = part.split("/");
+    // An empty list item must not fall through to the whole range.
+    if (!part) return false;
+    const [base, stepText, extra] = part.split("/");
+    if (extra !== undefined) return false;
     const step = stepText === undefined ? 1 : Number(stepText);
     if (!Number.isInteger(step) || step < 1) return false;
     let start = min;
@@ -17,7 +20,7 @@ function fieldMatches(
         const [aText, bText] = base.split("-");
         const a = Number(aText);
         const b = Number(bText);
-        if (!Number.isInteger(a) || !Number.isInteger(b)) return false;
+        if (!Number.isInteger(a) || !Number.isInteger(b) || a > b) return false;
         start = a;
         end = b;
       } else {
@@ -52,17 +55,21 @@ export function isValidCron(expression: string): boolean {
       String(field)
         .split(",")
         .every((part) => {
-          const [base, step] = part.split("/");
+          const [base, step, extra] = part.split("/");
+          if (!part || extra !== undefined) return false;
           if (step !== undefined && (!/^\d+$/.test(step) || Number(step) < 1)) return false;
-          if (!base || base === "*") return true;
-          return base.split("-").length === 1
-            ? /^\d+$/.test(base) && Number(base) >= Number(min) && Number(base) <= Number(max)
-            : base.split("-").length === 2 &&
-                base
-                  .split("-")
-                  .every(
-                    (n) => /^\d+$/.test(n) && Number(n) >= Number(min) && Number(n) <= Number(max),
-                  );
+          if (base === "*") return true;
+          if (!base) return false;
+          const bounds = base.split("-");
+          if (bounds.length === 1)
+            return /^\d+$/.test(base) && Number(base) >= Number(min) && Number(base) <= Number(max);
+          if (bounds.length !== 2) return false;
+          const [startText, endText] = bounds;
+          if (!startText || !endText || !/^\d+$/.test(startText) || !/^\d+$/.test(endText))
+            return false;
+          const start = Number(startText);
+          const end = Number(endText);
+          return start <= end && start >= Number(min) && end <= Number(max);
         }),
     )
   );

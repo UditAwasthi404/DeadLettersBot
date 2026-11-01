@@ -7,13 +7,15 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "@agentOS/shared": "workspace:*",
     "drizzle-orm": "0.45.2"
   },
   "devDependencies": {
+    "@types/bun": "1.1.14",
     "typescript": "5.7.2"
   }
 }

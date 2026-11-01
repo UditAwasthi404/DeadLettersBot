@@ -24,7 +24,11 @@ export function subagentIsStalled(
   return now - mark.getTime() >= stallMs;
 }
 
-export function shouldRecordStall(events: Array<{ at: string }>, now: number, stallMs: number): boolean {
+export function shouldRecordStall(
+  events: Array<{ at: string }>,
+  now: number,
+  stallMs: number,
+): boolean {
   const last = events.at(-1);
   if (!last) return true;
   const at = Date.parse(last.at);

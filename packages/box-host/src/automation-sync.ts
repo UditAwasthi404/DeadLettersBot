@@ -4,12 +4,7 @@
  * Deleting a routine on a hosted box hides it locally; POST /v1/automation/sync removes the shadow.
  * Session boxes (BOX_HOSTED_FOR_AUTOMATION_SYNC=0) skip this path.
  */
-import {
-  type Database,
-  automationShadows,
-  routineRuns,
-  routines,
-} from "@agentOS/shared";
+import { type Database, automationShadows, routineRuns, routines } from "@agentOS/shared";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
 export function isBoxHostedForAutomationSync(): boolean {
@@ -72,10 +67,7 @@ export async function loadScheduleSources(db: Database): Promise<RoutineRow[]> {
       .from(routines)
       .where(and(eq(routines.enabled, true), isNull(routines.deletedAt)));
   }
-  const rows = await db
-    .select()
-    .from(automationShadows)
-    .where(eq(automationShadows.enabled, true));
+  const rows = await db.select().from(automationShadows).where(eq(automationShadows.enabled, true));
   return rows.map((shadow) => ({
     id: shadow.routineId,
     accountId: shadow.accountId,
