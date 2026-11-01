@@ -38,6 +38,7 @@ import {
   adjustGauge,
   auditLog,
   bots,
+  connectorAccounts,
   incrementCounter,
   mcpServers,
   memories,
@@ -53,6 +54,7 @@ import {
 import { BrowserSession } from "@agentOS/tools";
 import type { VMManager } from "@agentOS/vm-manager";
 import { and, desc, eq, notInArray } from "drizzle-orm";
+import { describeConnectedConnectors } from "./connector-availability.ts";
 import { TranscriptAppendAfterCheckpointError } from "./errors.ts";
 import { loggedError, logger } from "./logger.ts";
 import { deliverWebhookEvent } from "./webhooks.ts";
@@ -598,6 +600,15 @@ ${server.cachedTools
   )
   .join("\n")}`;
   }
+  const connectorRows =
+    ctx.bot.role === "subagent"
+      ? []
+      : await ctx.db
+          .select({ service: connectorAccounts.service })
+          .from(connectorAccounts)
+          .where(eq(connectorAccounts.accountId, ctx.accountId));
+  const connectorServices = connectorRows.map((row) => row.service);
+  sections.computer += `\n\n${describeConnectedConnectors(connectorServices)}`;
   const requestedSkills = new Set([
     ...ctx.bot.skills,
     ...(turnRow?.input.skillId ? [turnRow.input.skillId] : []),
@@ -664,7 +675,12 @@ ${server.cachedTools
   const activeToolCatalog = activeSkill
     ? toolCatalog
     : toolCatalog.filter((tool) => tool.name !== "CompleteSkillStep");
-  const inferenceTools = activeToolCatalog.map(toInferenceTool);
+  const connectorDescription = describeConnectedConnectors(connectorServices);
+  const inferenceTools = activeToolCatalog.map((tool) => {
+    const inferenceTool = toInferenceTool(tool);
+    if (tool.name !== "ConnectorCall") return inferenceTool;
+    return { ...inferenceTool, description: connectorDescription };
+  });
   let userInfoMessage = buildUserInfoMessage(inferenceTools);
   const userTurnMessage = assembleTurnAction(
     turnRow?.input?.prompt ?? "",

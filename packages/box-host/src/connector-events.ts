@@ -2,17 +2,11 @@
  * Poll Gmail and Google Calendar for new events and queue matching routines.
  * The first successful poll records the current ids and does not fire.
  */
-import {
-  GoogleConnector,
-  OAuthPkceClient,
-  connectorCredentialService,
-  decryptToken,
-  encryptConnectorSecret,
-} from "@agentOS/connectors";
+import { GoogleConnector, connectorCredentialService } from "@agentOS/connectors";
 import { connectorAccounts } from "@agentOS/shared";
 import { and, eq } from "drizzle-orm";
 import { loadScheduleSources } from "./automation-sync.ts";
-import { oauthConfigFromEnv } from "./connector-oauth.ts";
+import { accessTokenForConnection } from "./connector-token.ts";
 import type { GatewayDeps } from "./gateway.ts";
 import { loggedError, logger } from "./logger.ts";
 import { queueRoutine } from "./routine-queue.ts";
@@ -61,51 +55,7 @@ async function accessTokenFor(
     )
     .limit(1);
   if (!connection) return null;
-  const encryptionKey = process.env.CONNECTOR_ENCRYPTION_KEY;
-  if (!encryptionKey) throw new Error("connector encryption is not configured");
-  let accessToken = await decryptToken(
-    connection.accessTokenCiphertext,
-    encryptionKey,
-    process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
-    async (ciphertext) => {
-      await deps.db
-        .update(connectorAccounts)
-        .set({ accessTokenCiphertext: ciphertext, updatedAt: new Date() })
-        .where(eq(connectorAccounts.id, connection.id));
-    },
-  );
-  if (!connection.expiresAt || connection.expiresAt.getTime() >= Date.now() + 60_000)
-    return accessToken;
-  if (!connection.refreshTokenCiphertext)
-    throw new Error("connector token expired; reconnect this service");
-  const refreshToken = await decryptToken(
-    connection.refreshTokenCiphertext,
-    encryptionKey,
-    process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
-    async (ciphertext) => {
-      await deps.db
-        .update(connectorAccounts)
-        .set({ refreshTokenCiphertext: ciphertext, updatedAt: new Date() })
-        .where(eq(connectorAccounts.id, connection.id));
-    },
-  );
-  const tokens = await new OAuthPkceClient(oauthConfigFromEnv(credentialService)).refresh(
-    refreshToken,
-  );
-  accessToken = tokens.accessToken;
-  await deps.db
-    .update(connectorAccounts)
-    .set({
-      accessTokenCiphertext: await encryptConnectorSecret(accessToken, encryptionKey),
-      refreshTokenCiphertext: tokens.refreshToken
-        ? await encryptConnectorSecret(tokens.refreshToken, encryptionKey)
-        : connection.refreshTokenCiphertext,
-      expiresAt: tokens.expiresIn
-        ? new Date(Date.now() + tokens.expiresIn * 1000)
-        : connection.expiresAt,
-      updatedAt: new Date(),
-    })
-    .where(eq(connectorAccounts.id, connection.id));
+  const { accessToken } = await accessTokenForConnection(deps.db, connection, credentialService);
   return accessToken;
 }
 
