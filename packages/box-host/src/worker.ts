@@ -1,10 +1,8 @@
 import {
   GoogleConnector,
-  OAuthPkceClient,
   callConnector,
   connectorCredentialService,
   decryptToken,
-  encryptConnectorSecret,
 } from "@agentOS/connectors";
 import { type ProviderFactory, createFallbackSession } from "@agentOS/inference";
 import {
@@ -33,7 +31,7 @@ import {
 import { callMcpTool, discoverMcpTools } from "@agentOS/tools";
 import { NoopVMManager, type VMManager } from "@agentOS/vm-manager";
 import { and, asc, eq, inArray, lte, or, sql } from "drizzle-orm";
-import { oauthConfigFromEnv } from "./connector-oauth.ts";
+import { accessTokenForConnection } from "./connector-token.ts";
 import { loggedError, logger } from "./logger.ts";
 import { queueRoutine } from "./routine-queue.ts";
 import { createTurnRunShell } from "./runner.ts";
@@ -1170,54 +1168,11 @@ export async function drainAgent(
             )
             .limit(1);
           if (!connection) throw new Error(`${credentialService} is not connected`);
-          const encryptionKey = process.env.CONNECTOR_ENCRYPTION_KEY;
-          if (!encryptionKey) throw new Error("connector encryption is not configured");
-          let accessToken = await decryptToken(
-            connection.accessTokenCiphertext,
-            encryptionKey,
-            process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
-            async (ciphertext) => {
-              await deps.db
-                .update(connectorAccounts)
-                .set({ accessTokenCiphertext: ciphertext, updatedAt: new Date() })
-                .where(eq(connectorAccounts.id, connection.id));
-            },
+          const { accessToken, instanceUrl } = await accessTokenForConnection(
+            deps.db,
+            connection,
+            credentialService,
           );
-          if (connection.expiresAt && connection.expiresAt.getTime() < Date.now() + 60_000) {
-            const oauthConfig = oauthConfigFromEnv(credentialService);
-            if (!connection.refreshTokenCiphertext)
-              throw new Error("connector token expired; reconnect this service");
-            const refreshToken = await decryptToken(
-              connection.refreshTokenCiphertext,
-              encryptionKey,
-              process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS,
-              async (ciphertext) => {
-                await deps.db
-                  .update(connectorAccounts)
-                  .set({ refreshTokenCiphertext: ciphertext, updatedAt: new Date() })
-                  .where(eq(connectorAccounts.id, connection.id));
-              },
-            );
-            const tokens = await new OAuthPkceClient(oauthConfig).refresh(refreshToken);
-            accessToken = tokens.accessToken;
-            const encryptedAccess = await encryptConnectorSecret(accessToken, encryptionKey);
-            const encryptedRefresh = tokens.refreshToken
-              ? await encryptConnectorSecret(tokens.refreshToken, encryptionKey)
-              : connection.refreshTokenCiphertext;
-            await deps.db
-              .update(connectorAccounts)
-              .set({
-                accessTokenCiphertext: encryptedAccess,
-                refreshTokenCiphertext: encryptedRefresh,
-                expiresAt: tokens.expiresIn
-                  ? new Date(Date.now() + tokens.expiresIn * 1000)
-                  : connection.expiresAt,
-                ...(tokens.instanceUrl ? { providerUserId: tokens.instanceUrl } : {}),
-                updatedAt: new Date(),
-              })
-              .where(eq(connectorAccounts.id, connection.id));
-            if (tokens.instanceUrl) connection.providerUserId = tokens.instanceUrl;
-          }
           if (service === "gmail" || service === "google-calendar" || service === "google-drive") {
             return new GoogleConnector().call(
               service === "google-calendar"
@@ -1230,14 +1185,7 @@ export async function drainAgent(
               accessToken,
             );
           }
-          return callConnector(
-            service,
-            action,
-            params,
-            accessToken,
-            fetch,
-            connection.providerUserId,
-          );
+          return callConnector(service, action, params, accessToken, fetch, instanceUrl);
         },
         memoryCall: async (action, params) => {
           if (action === "ReadMemory") {
