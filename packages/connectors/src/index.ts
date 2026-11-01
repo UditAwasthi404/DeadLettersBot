@@ -56,11 +56,12 @@ function base64ToBytes(text: string): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 function encryptionKeyBytes(hex = ""): Uint8Array<ArrayBuffer> {
-  if (!/^[0-9a-f]{64}$/i.test(hex))
+  const normalized = hex.replaceAll("\r", "").trim();
+  if (!/^[0-9a-f]{64}$/i.test(normalized))
     throw new Error("CONNECTOR_ENCRYPTION_KEY must be 32 bytes encoded as 64 hex characters");
   const bytes = new Uint8Array(32);
   for (let i = 0; i < bytes.length; i += 1)
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    bytes[i] = Number.parseInt(normalized.slice(i * 2, i * 2 + 2), 16);
   return bytes;
 }
 
@@ -133,8 +134,17 @@ function headerValue(value: unknown): string {
     .slice(0, 500);
 }
 
+/** Allow a bare text or JSON type, or the same type with a single charset parameter. */
 export function isSafeUploadMime(mimeType: string): boolean {
-  return /^(?:text\/[a-z0-9][a-z0-9.+-]*|application\/json)$/i.test(mimeType);
+  const match = /^([^\s;]+)(?:\s*;\s*charset\s*=\s*([A-Za-z0-9._-]+))?$/.exec(mimeType.trim());
+  if (!match?.[1] || /[\r\n\0]/.test(mimeType)) return false;
+  const type = match[1].toLowerCase();
+  return type === "application/json" || /^text\/[a-z0-9][a-z0-9.+-]*$/.test(type);
+}
+
+export function uploadPartContentType(mimeType: string): string {
+  if (/charset\s*=/i.test(mimeType)) return mimeType.trim();
+  return `${mimeType.trim()}; charset=UTF-8`;
 }
 
 function base64Url(bytes: Uint8Array): string {
@@ -255,7 +265,8 @@ async function googleRequest(
       body = { raw: base64Url(new TextEncoder().encode(raw)) };
     } else throw new Error(`unsupported Gmail action: ${action}`);
   } else if (service === "calendar") {
-    const calendarId = encode(args.calendarId ?? "primary");
+    const calendarIdRaw = String(args.calendarId ?? "primary");
+    const calendarId = encode(calendarIdRaw);
     if (action === "ListEvents") {
       const timeMin = typeof args.timeMin === "string" ? `&timeMin=${encode(args.timeMin)}` : "";
       path = `/calendars/${calendarId}/events?maxResults=${Math.min(250, Number(args.maxResults ?? 50))}&singleEvents=true&orderBy=startTime${timeMin}`;
@@ -276,7 +287,7 @@ async function googleRequest(
       body = {
         timeMin: args.timeMin,
         timeMax: args.timeMax,
-        items: args.calendars ?? [{ id: calendarId }],
+        items: args.calendars ?? [{ id: calendarIdRaw }],
       };
     } else throw new Error(`unsupported Calendar action: ${action}`);
   } else if (service === "drive") {
@@ -330,7 +341,7 @@ async function googleRequest(
               `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`,
             ]
           : []),
-        `--${boundary}\r\nContent-Type: ${mimeType}; charset=UTF-8\r\n\r\n${content}\r\n`,
+        `--${boundary}\r\nContent-Type: ${uploadPartContentType(mimeType)}\r\n\r\n${content}\r\n`,
         `--${boundary}--`,
       ];
       const upload = args.fileId
@@ -457,6 +468,8 @@ export function oauthConfigFor(
     microsoftClientSecret?: string;
     salesforceClientId?: string;
     salesforceClientSecret?: string;
+    /** Extra delegated Graph scopes, such as Teams and SharePoint, for work accounts. */
+    microsoftExtraScopes?: string;
   },
 ): OAuthConfig {
   if (service === "gmail" || service === "google-calendar" || service === "google-drive") {
@@ -466,24 +479,27 @@ export function oauthConfigFor(
   if (service === "microsoft") {
     const clientId = env.microsoftClientId;
     if (!clientId) throw new Error("Microsoft OAuth is not configured");
+    // Teams and SharePoint scopes are rejected for personal Microsoft accounts and
+    // fail the entire consent, including OneDrive and Outlook. Ask for them only
+    // when MICROSOFT_OAUTH_EXTRA_SCOPES is set.
+    const personalScopes = [
+      "offline_access",
+      "User.Read",
+      "Files.ReadWrite",
+      "Mail.ReadWrite",
+      "Mail.Send",
+      "Calendars.ReadWrite",
+    ];
+    const extra = (env.microsoftExtraScopes ?? "")
+      .split(/[\s,]+/)
+      .map((scope) => scope.trim())
+      .filter((scope) => scope && !personalScopes.includes(scope));
     return {
       clientId,
       clientSecret: env.microsoftClientSecret,
       authorizationUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
       tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-      scopes: [
-        "offline_access",
-        "User.Read",
-        "Files.ReadWrite",
-        "Mail.ReadWrite",
-        "Mail.Send",
-        "Calendars.ReadWrite",
-        "Team.ReadBasic.All",
-        "Channel.ReadBasic.All",
-        "ChannelMessage.Read.All",
-        "ChannelMessage.Send",
-        "Sites.ReadWrite.All",
-      ],
+      scopes: [...personalScopes, ...extra],
       extraAuthorizationParams: { prompt: "select_account" },
     };
   }

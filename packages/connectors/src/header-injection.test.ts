@@ -48,4 +48,47 @@ describe("connector upload safety", () => {
       ),
     ).rejects.toThrow(/text and JSON/);
   });
+
+  test("Drive and OneDrive accept a charset parameter without adding a second one", async () => {
+    let driveBody = "";
+    const driveFetch = async (_url: string, init?: RequestInit) => {
+      driveBody = String(init?.body ?? "");
+      return new Response("{}", { status: 200 });
+    };
+    await new GoogleConnector(driveFetch as typeof fetch).call(
+      "drive",
+      "WriteFile",
+      { name: "notes.txt", content: "hello", mimeType: "text/plain; charset=utf-8" },
+      "token",
+    );
+    expect(driveBody).toContain("Content-Type: text/plain; charset=utf-8\r\n");
+    expect(driveBody).not.toContain("charset=utf-8; charset=");
+
+    let plainBody = "";
+    const plainFetch = async (_url: string, init?: RequestInit) => {
+      plainBody = String(init?.body ?? "");
+      return new Response("{}", { status: 200 });
+    };
+    await new GoogleConnector(plainFetch as typeof fetch).call(
+      "drive",
+      "WriteFile",
+      { name: "notes.txt", content: "hello", mimeType: "text/plain" },
+      "token",
+    );
+    expect(plainBody).toContain("Content-Type: text/plain; charset=UTF-8\r\n");
+
+    let onedriveType = "";
+    const oneFetch = async (_url: string, init?: RequestInit) => {
+      onedriveType = new Headers(init?.headers).get("content-type") ?? "";
+      return new Response("{}", { status: 200 });
+    };
+    await callConnector(
+      "onedrive",
+      "WriteFile",
+      { name: "notes.txt", content: "hello", mimeType: "text/plain; charset=utf-8" },
+      "token",
+      oneFetch as typeof fetch,
+    );
+    expect(onedriveType).toBe("text/plain; charset=utf-8");
+  });
 });

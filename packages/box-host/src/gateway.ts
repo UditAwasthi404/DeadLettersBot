@@ -62,7 +62,11 @@ import {
   syncAutomationShadows,
   upsertAutomationShadow,
 } from "./automation-sync.ts";
-import { oauthConfigFromEnv } from "./connector-oauth.ts";
+import {
+  configuredOAuthRedirectUri,
+  microsoftOAuthClient,
+  oauthConfigFromEnv,
+} from "./connector-oauth.ts";
 import { loggedError, logger } from "./logger.ts";
 import { openApiDocument } from "./openapi.ts";
 import { queueRoutine, queueSkillTest } from "./routine-queue.ts";
@@ -72,6 +76,18 @@ import { parseSkillDraft } from "./skill-draft.ts";
 import { deleteWebhookSubscription } from "./webhooks.ts";
 import { drainAgent } from "./worker.ts";
 import { botWorkspacePath } from "./workspace-path.ts";
+
+function htmlEscape(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function oauthResultPage(title: string, message: string): string {
+  return `<!doctype html><meta charset="utf-8"><title>${htmlEscape(title)}</title><p>${message}</p>`;
+}
 
 function isLocalMachineAccess(value: string): value is "never" | "always_confirm" | "always_allow" {
   return value === "never" || value === "always_confirm" || value === "always_allow";
@@ -756,9 +772,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 503);
     }
-    const redirectUri =
-      process.env.GOOGLE_OAUTH_REDIRECT_URI ??
-      `${new URL(c.req.url).origin}/v1/connectors/oauth/callback`;
+    const redirectUri = configuredOAuthRedirectUri(c.req.url);
     const oauth = new OAuthPkceClient(config);
     const request = await oauth.createAuthorizationRequest(redirectUri);
     await deps.redis.set(
@@ -778,11 +792,20 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
   app.get("/v1/connectors/oauth/callback", async (c) => {
     const state = c.req.query("state") ?? "";
     const code = c.req.query("code") ?? "";
+    const providerError = c.req.query("error");
     const pendingKey = `oauth:pending:${state}`;
+    if (providerError) {
+      if (state) await deps.redis.del(pendingKey);
+      const description = c.req.query("error_description") || providerError;
+      return c.html(oauthResultPage("Connection failed", htmlEscape(description)), 400);
+    }
     const pendingRaw = state ? await deps.redis.getdel(pendingKey) : null;
     if (!pendingRaw || !code)
       return c.html(
-        "<!doctype html><title>Connection failed</title><p>OAuth state is invalid or expired. Return to AgentOS and try again.</p>",
+        oauthResultPage(
+          "Connection failed",
+          "OAuth state is invalid or expired. Return to AgentOS and try again.",
+        ),
         400,
       );
     const pending = JSON.parse(pendingRaw) as {
@@ -791,48 +814,55 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       verifier: string;
       redirectUri: string;
     };
-    let config: ReturnType<typeof oauthConfigFromEnv>;
     try {
-      config = oauthConfigFromEnv(pending.service);
-    } catch (err) {
-      return c.text(err instanceof Error ? err.message : "OAuth is not configured", 503);
-    }
-    const tokens = await new OAuthPkceClient(config).exchangeCode(
-      code,
-      pending.verifier,
-      pending.redirectUri,
-    );
-    const key = process.env.CONNECTOR_ENCRYPTION_KEY;
-    if (!key) return c.text("CONNECTOR_ENCRYPTION_KEY is not configured", 503);
-    const accessTokenCiphertext = await encryptConnectorSecret(tokens.accessToken, key);
-    const refreshTokenCiphertext = tokens.refreshToken
-      ? await encryptConnectorSecret(tokens.refreshToken, key)
-      : undefined;
-    await deps.db
-      .insert(connectorAccounts)
-      .values({
-        accountId: pending.accountId,
-        service: pending.service,
-        accessTokenCiphertext,
-        refreshTokenCiphertext: refreshTokenCiphertext ?? null,
-        scopes: tokens.scope?.split(" ") ?? config.scopes,
-        expiresAt: tokens.expiresIn ? new Date(Date.now() + tokens.expiresIn * 1000) : null,
-        ...(tokens.instanceUrl ? { providerUserId: tokens.instanceUrl } : {}),
-      })
-      .onConflictDoUpdate({
-        target: [connectorAccounts.accountId, connectorAccounts.service],
-        set: {
+      const config = oauthConfigFromEnv(pending.service);
+      const tokens = await new OAuthPkceClient(config).exchangeCode(
+        code,
+        pending.verifier,
+        pending.redirectUri,
+      );
+      const key = process.env.CONNECTOR_ENCRYPTION_KEY?.replaceAll("\r", "").trim();
+      if (!key) return c.text("CONNECTOR_ENCRYPTION_KEY is not configured", 503);
+      const accessTokenCiphertext = await encryptConnectorSecret(tokens.accessToken, key);
+      const refreshTokenCiphertext = tokens.refreshToken
+        ? await encryptConnectorSecret(tokens.refreshToken, key)
+        : undefined;
+      const expiresAt = tokens.expiresIn ? new Date(Date.now() + tokens.expiresIn * 1000) : null;
+      const scopes = tokens.scope?.split(" ") ?? config.scopes;
+      await deps.db
+        .insert(connectorAccounts)
+        .values({
+          accountId: pending.accountId,
+          service: pending.service,
           accessTokenCiphertext,
           refreshTokenCiphertext: refreshTokenCiphertext ?? null,
-          scopes: tokens.scope?.split(" ") ?? config.scopes,
-          expiresAt: tokens.expiresIn ? new Date(Date.now() + tokens.expiresIn * 1000) : null,
+          scopes,
+          expiresAt,
           ...(tokens.instanceUrl ? { providerUserId: tokens.instanceUrl } : {}),
-          updatedAt: new Date(),
-        },
-      });
-    return c.html(
-      "<!doctype html><meta charset=utf-8><title>Connected</title><p>Service connected. You can close this window and return to AgentOS.</p>",
-    );
+        })
+        .onConflictDoUpdate({
+          target: [connectorAccounts.accountId, connectorAccounts.service],
+          set: {
+            accessTokenCiphertext,
+            refreshTokenCiphertext:
+              refreshTokenCiphertext ?? sql`${connectorAccounts.refreshTokenCiphertext}`,
+            scopes,
+            expiresAt,
+            ...(tokens.instanceUrl ? { providerUserId: tokens.instanceUrl } : {}),
+            updatedAt: new Date(),
+          },
+        });
+      return c.html(
+        oauthResultPage(
+          "Connected",
+          "Service connected. You can close this window and return to AgentOS.",
+        ),
+      );
+    } catch (err) {
+      logger.error(loggedError(err), "oauth callback failed");
+      const message = err instanceof Error ? err.message : "OAuth callback failed";
+      return c.html(oauthResultPage("Connection failed", htmlEscape(message)), 502);
+    }
   });
 
   app.delete("/v1/connectors/:service", async (c) => {
@@ -863,10 +893,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
           token,
           connection.providerUserId,
           fetch,
-          {
-            clientId: process.env.MICROSOFT_OAUTH_CLIENT_ID,
-            clientSecret: process.env.MICROSOFT_OAUTH_CLIENT_SECRET,
-          },
+          microsoftOAuthClient(),
         );
         providerRevocation = revoked ? "succeeded" : "failed";
       } catch (err) {

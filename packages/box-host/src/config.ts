@@ -1,9 +1,18 @@
 const PROVIDERS = new Set(["openai", "anthropic", "xai", "ollama", "mock"]);
 
+/** Trim Windows CR/LF and write the cleaned value back so later reads match validation. */
+function cleanedEnv(name: string): string {
+  const raw = process.env[name];
+  if (raw === undefined) return "";
+  const value = raw.replaceAll("\r", "").trim();
+  if (value !== raw) process.env[name] = value;
+  return value;
+}
+
 function requireValue(name: string, errors: string[]): string {
-  const value = process.env[name]?.trim();
+  const value = cleanedEnv(name);
   if (!value) errors.push(`${name} is required`);
-  return value ?? "";
+  return value;
 }
 
 function positiveInteger(name: string, fallback: number, errors: string[], max: number): void {
@@ -37,9 +46,25 @@ export function validateRuntimeConfig(): void {
   requireValue("S3_ACCESS_KEY", errors);
   requireValue("S3_SECRET_KEY", errors);
   const jwtSecret = requireValue("JWT_SECRET", errors);
-  const previousJwtSecret = process.env.JWT_SECRET_PREVIOUS?.trim();
+  const previousJwtSecret = cleanedEnv("JWT_SECRET_PREVIOUS");
   const encryptionKey = requireValue("CONNECTOR_ENCRYPTION_KEY", errors);
-  const previousEncryptionKey = process.env.CONNECTOR_ENCRYPTION_KEY_PREVIOUS?.trim();
+  const previousEncryptionKey = cleanedEnv("CONNECTOR_ENCRYPTION_KEY_PREVIOUS");
+  for (const name of [
+    "OAUTH_REDIRECT_URI",
+    "GOOGLE_OAUTH_REDIRECT_URI",
+    "GOOGLE_OAUTH_CLIENT_ID",
+    "GOOGLE_OAUTH_CLIENT_SECRET",
+    "MICROSOFT_OAUTH_CLIENT_ID",
+    "MICROSOFT_OAUTH_CLIENT_SECRET",
+    "MICROSOFT_CLIENT_ID",
+    "MICROSOFT_CLIENT_SECRET",
+    "MICROSOFT_OAUTH_EXTRA_SCOPES",
+    "SALESFORCE_OAUTH_CLIENT_ID",
+    "SALESFORCE_OAUTH_CLIENT_SECRET",
+    "SALESFORCE_CLIENT_ID",
+    "SALESFORCE_CLIENT_SECRET",
+  ])
+    cleanedEnv(name);
   const production = process.env.NODE_ENV === "production";
 
   if (databaseUrl && !/^postgres(?:ql)?:\/\//i.test(databaseUrl))
