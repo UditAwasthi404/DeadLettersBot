@@ -232,7 +232,7 @@ interface Frame {
 }
 
 function App() {
-  const [baseUrl, setBaseUrl] = useState("http://localhost:8787");
+  const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8787");
   const [token, setToken] = useState("");
   const [status, setStatus] = useState("disconnected");
   const [bots, setBots] = useState<Bot[]>([]);
@@ -663,7 +663,7 @@ function App() {
     try {
       gateway = new URL(baseUrl.trim());
     } catch {
-      setAuthError("Enter a gateway address such as http://localhost:8787.");
+      setAuthError("Enter a gateway address such as http://127.0.0.1:8787.");
       return;
     }
     if (gateway.protocol !== "http:" && gateway.protocol !== "https:") {

@@ -14,6 +14,13 @@ function encode(value: unknown): string {
   return encodeURIComponent(String(value ?? ""));
 }
 
+function isSafeUploadMime(mimeType: string): boolean {
+  const match = /^([^\s;]+)(?:\s*;\s*charset\s*=\s*([A-Za-z0-9._-]+))?$/.exec(mimeType.trim());
+  if (!match?.[1] || /[\r\n\0]/.test(mimeType)) return false;
+  const type = match[1].toLowerCase();
+  return type === "application/json" || /^text\/[a-z0-9][a-z0-9.+-]*$/.test(type);
+}
+
 function requireId(args: Record<string, unknown>, key: string): string {
   const value = String(args[key] ?? "").trim();
   if (!value) throw new Error(`${key} is required`);
@@ -121,8 +128,8 @@ async function microsoftCall(
       const content = String(args.content ?? "");
       if (new TextEncoder().encode(content).byteLength > FILE_BYTES)
         throw new Error("file content exceeds 1 MB");
-      const mimeType = String(args.mimeType ?? "text/plain");
-      if (!/^(?:text\/[a-z0-9][a-z0-9.+-]*|application\/json)$/i.test(mimeType))
+      const mimeType = String(args.mimeType ?? "text/plain").trim();
+      if (!isSafeUploadMime(mimeType))
         throw new Error("WriteFile supports text and JSON files only");
       const target = args.fileId
         ? `/me/drive/items/${encode(args.fileId)}/content`
