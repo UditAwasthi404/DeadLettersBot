@@ -771,17 +771,17 @@ export async function detectStalledSubagents(
     .where(or(eq(subagents.status, "queued"), eq(subagents.status, "running")));
   let stalled = 0;
   for (const row of rows) {
-    if (
-      !subagentIsStalled(row, now, stallMs) ||
-      !shouldRecordStall(row.stallEvents, now, stallMs)
-    )
+    if (!subagentIsStalled(row, now, stallMs) || !shouldRecordStall(row.stallEvents, now, stallMs))
       continue;
     stalled += 1;
     await deps.redis.set(`run:${row.childRunId}:stalled`, "1", "EX", 86400);
     await deps.redis.set(`run:${row.childRunId}:cancelled`, "1", "EX", 86400);
     const stallEvents = [
       ...row.stallEvents,
-      { at: new Date(now).toISOString(), reason: "no checkpoint progress before the stall deadline" },
+      {
+        at: new Date(now).toISOString(),
+        reason: "no checkpoint progress before the stall deadline",
+      },
     ].slice(-20);
     await deps.db
       .update(subagents)
@@ -1127,7 +1127,9 @@ export async function drainAgent(
               completedAt: record.completedAt,
             };
           if (action === "SteerSubagent") {
-            const message = String(params.message ?? "").trim().slice(0, 2000);
+            const message = String(params.message ?? "")
+              .trim()
+              .slice(0, 2000);
             if (!message) throw new Error("steering message is required");
             if (record.status !== "queued" && record.status !== "running")
               throw new Error(`subagent is already ${record.status}`);

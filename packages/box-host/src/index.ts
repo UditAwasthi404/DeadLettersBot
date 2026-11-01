@@ -7,8 +7,8 @@ import { BlobStore, createDb, createRedis } from "@agentOS/shared";
 import { createVMManager, gcIdleVMs } from "@agentOS/vm-manager";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
-import { validateRuntimeConfig } from "./config.ts";
 import { reconcileAutomationShadows } from "./automation-sync.ts";
+import { validateRuntimeConfig } from "./config.ts";
 import { pollConnectorEvents } from "./connector-events.ts";
 import { startFileChangeWatcher } from "./file-watch.ts";
 import { createGateway, runScheduledRoutines } from "./gateway.ts";
@@ -19,8 +19,8 @@ import { resolveProviders } from "./providers.ts";
 import { recoverInProgressTurns } from "./recovery.ts";
 import { processWebhookDeliveries } from "./webhooks.ts";
 import {
-  drainAgent,
   detectStalledSubagents,
+  drainAgent,
   processMemoryExtractionJobs,
   processMemorySynthesisJobs,
   reconcileSubagents,

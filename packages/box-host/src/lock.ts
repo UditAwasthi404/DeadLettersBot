@@ -8,10 +8,7 @@ export function lockPath(): string {
 
 function isBoxHostProcess(pid: number): boolean {
   try {
-    const args = readFileSync(`/proc/${pid}/cmdline`)
-      .toString("utf8")
-      .split("\0")
-      .filter(Boolean);
+    const args = readFileSync(`/proc/${pid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
     const executable = args[0] ?? "";
     return executable.includes("bun") && args.some((arg) => arg.includes("box-host"));
   } catch {
