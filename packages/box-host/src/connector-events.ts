@@ -2,8 +2,8 @@
  * Poll Gmail and Google Calendar for new events and queue matching routines.
  * The first successful poll records the current ids and does not fire.
  */
-import { GoogleConnector, connectorCredentialService } from "@agentOS/connectors";
-import { connectorAccounts } from "@agentOS/shared";
+import { GoogleConnector, connectorCredentialService } from "@agentos/connectors";
+import { connectorAccounts } from "@agentos/shared";
 import { and, eq } from "drizzle-orm";
 import { loadScheduleSources } from "./automation-sync.ts";
 import { accessTokenForConnection } from "./connector-token.ts";

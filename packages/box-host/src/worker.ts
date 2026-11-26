@@ -4,8 +4,8 @@ import {
   callConnector,
   connectorCredentialService,
   decryptToken,
-} from "@agentOS/connectors";
-import { type ProviderFactory, createFallbackSession } from "@agentOS/inference";
+} from "@agentos/connectors";
+import { type ProviderFactory, createFallbackSession } from "@agentos/inference";
 import {
   BUCKETS,
   type BlobStore,
@@ -29,9 +29,9 @@ import {
   skills,
   subagents,
   turns,
-} from "@agentOS/shared";
-import { callMcpTool, discoverMcpTools } from "@agentOS/tools";
-import { NoopVMManager, type VMManager } from "@agentOS/vm-manager";
+} from "@agentos/shared";
+import { callMcpTool, discoverMcpTools } from "@agentos/tools";
+import { NoopVMManager, type VMManager } from "@agentos/vm-manager";
 import { and, asc, eq, inArray, lte, or, sql } from "drizzle-orm";
 import { accessTokenForConnection } from "./connector-token.ts";
 import { loggedError, logger } from "./logger.ts";
@@ -130,7 +130,7 @@ function createMemoryExtractor(
       "Extract only durable, useful facts explicitly stated or confirmed in this latest conversation turn.",
       "Do not infer sensitive traits, credentials, temporary details, or facts merely proposed by the assistant.",
       `Only use these enabled scopes: ${enabledScopes.join(", ")}. user means a fact about the user; agent means a stable preference or instruction for this bot; project means a fact about the configured project.`,
-      'Return only JSON in this shape: {"facts":[{"scope":"user|agent|project","content":"short standalone fact"}],"conflicts":[{"scope":"user|agent|project","existingContent":"exact text copied from an existing fact","proposedContent":"replacement fact"}]}. Add a conflict only when the latest user explicitly corrects or updates a known fact; copy existingContent exactly. Never suggest deletions. Leave conflicts empty when there is no clear correction.',
+      'Return only JSON in this shape: {"facts":[{"scope":"user|agent|project","content":"short standalone fact"}],"conflicts":[{"scope":"user|agent|project","existingContent":"exact text copied from an existing fact","proposedContent":"replacement fact"}],"deletions":[{"scope":"user|agent|project","existingContent":"exact text copied from an existing fact","reason":"short explanation grounded in the latest user message"}]}. Add a conflict only when the latest user explicitly corrects or updates a known fact; copy existingContent exactly. Suggest deletion only when the latest user explicitly asks to forget a fact or clearly says it is no longer true without giving a replacement. Never infer deletion from silence, temporary changes, or assistant text. Leave conflicts and deletions empty when the user did not clearly request a change.',
       `Existing facts (for avoiding duplicates; never request changes to these): ${JSON.stringify(activeFacts)}`,
       `User message:\n${userMessage.content.slice(0, 8_000)}`,
       `Assistant reply:\n${assistantContent.slice(0, 8_000)}`,
@@ -155,8 +155,71 @@ function createMemoryExtractor(
     const parsed = JSON.parse(response.slice(start, end + 1)) as {
       facts?: Array<{ scope?: unknown; content?: unknown }>;
       conflicts?: Array<{ scope?: unknown; existingContent?: unknown; proposedContent?: unknown }>;
+      deletions?: Array<{ scope?: unknown; existingContent?: unknown; reason?: unknown }>;
     };
-    if (!Array.isArray(parsed.facts) && !Array.isArray(parsed.conflicts)) return false;
+    if (
+      !Array.isArray(parsed.facts) &&
+      !Array.isArray(parsed.conflicts) &&
+      !Array.isArray(parsed.deletions)
+    )
+      return false;
+    const deletionMemoryIds = new Set<string>();
+    for (const deletion of (Array.isArray(parsed.deletions) ? parsed.deletions : []).slice(0, 8)) {
+      if (
+        typeof deletion.scope !== "string" ||
+        typeof deletion.existingContent !== "string" ||
+        !enabledScopes.includes(deletion.scope as (typeof enabledScopes)[number])
+      )
+        continue;
+      const existingMemory = relevantFacts.find(
+        (memory) =>
+          memory.scope === deletion.scope &&
+          memory.content.trim() === deletion.existingContent.trim(),
+      );
+      if (!existingMemory) continue;
+      const reason =
+        typeof deletion.reason === "string"
+          ? deletion.reason.trim().replace(/\s+/g, " ").slice(0, 300)
+          : "The latest user message may indicate this fact should be forgotten or removed.";
+      const [existingSuggestion] = await deps.db
+        .select({ id: memoryReviewSuggestions.id, status: memoryReviewSuggestions.status })
+        .from(memoryReviewSuggestions)
+        .where(
+          and(
+            eq(memoryReviewSuggestions.turnId, turnId),
+            eq(memoryReviewSuggestions.memoryId, existingMemory.id),
+          ),
+        )
+        .limit(1);
+      if (!existingSuggestion) {
+        await deps.db.insert(memoryReviewSuggestions).values({
+          accountId,
+          botId: bot.id,
+          memoryId: existingMemory.id,
+          turnId,
+          action: "delete",
+          existingContent: existingMemory.content,
+          proposedContent: null,
+          reason,
+        });
+      } else if (existingSuggestion.status === "pending") {
+        await deps.db
+          .update(memoryReviewSuggestions)
+          .set({
+            action: "delete",
+            existingContent: existingMemory.content,
+            proposedContent: null,
+            reason,
+          })
+          .where(
+            and(
+              eq(memoryReviewSuggestions.id, existingSuggestion.id),
+              eq(memoryReviewSuggestions.status, "pending"),
+            ),
+          );
+      }
+      deletionMemoryIds.add(existingMemory.id);
+    }
     for (const conflict of (Array.isArray(parsed.conflicts) ? parsed.conflicts : []).slice(0, 8)) {
       if (
         typeof conflict.scope !== "string" ||
@@ -170,7 +233,7 @@ function createMemoryExtractor(
         (memory) =>
           memory.scope === conflict.scope && memory.content.trim() === existingContent.trim(),
       );
-      if (!existingMemory) continue;
+      if (!existingMemory || deletionMemoryIds.has(existingMemory.id)) continue;
       const proposedContent = conflict.proposedContent.trim().replace(/\s+/g, " ").slice(0, 500);
       if (
         proposedContent.length < 8 ||
@@ -184,7 +247,10 @@ function createMemoryExtractor(
           botId: bot.id,
           memoryId: existingMemory.id,
           turnId,
+          action: "update",
+          existingContent: existingMemory.content,
           proposedContent,
+          reason: null,
         })
         .onConflictDoNothing({
           target: [memoryReviewSuggestions.turnId, memoryReviewSuggestions.memoryId],
@@ -722,19 +788,30 @@ async function completeSubagent(
       .where(eq(turns.id, subagent.completionTurnId))
       .limit(1);
     if (completion?.state === "pending") {
-      await enqueue(deps.redis, subagent.parentBotId, "agent", {
-        turnId: subagent.completionTurnId,
-        runId: subagent.completionRunId,
-        botId: subagent.parentBotId,
-        accountId: subagent.accountId,
-      });
-      await deps.redis.set(
-        `run:${subagent.completionRunId}:agentId`,
-        subagent.parentBotId,
-        "EX",
-        86400,
-      );
-      void drainAgent(subagent.parentBotId, deps, send);
+      const claimed = await deps.db
+        .update(turns)
+        .set({ state: "running" })
+        .where(and(eq(turns.id, completion.id), eq(turns.state, "pending")))
+        .returning({ id: turns.id });
+      if (claimed.length) {
+        await enqueue(deps.redis, subagent.parentBotId, "agent", {
+          turnId: subagent.completionTurnId,
+          runId: subagent.completionRunId,
+          botId: subagent.parentBotId,
+          accountId: subagent.accountId,
+        });
+        await deps.redis.set(
+          `run:${subagent.completionRunId}:agentId`,
+          subagent.parentBotId,
+          "EX",
+          86400,
+        );
+        await deps.db
+          .update(turns)
+          .set({ state: "pending" })
+          .where(and(eq(turns.id, completion.id), eq(turns.state, "running")));
+        void drainAgent(subagent.parentBotId, deps, send);
+      }
     }
     return;
   }
@@ -818,7 +895,7 @@ export async function detectStalledSubagents(
         reason: "no checkpoint progress before the stall deadline",
       },
     ].slice(-20);
-    await deps.db
+    const [updated] = await deps.db
       .update(subagents)
       .set({ stallCount: row.stallCount + 1, stallEvents })
       .where(
@@ -826,7 +903,9 @@ export async function detectStalledSubagents(
           eq(subagents.id, row.id),
           or(eq(subagents.status, "queued"), eq(subagents.status, "running")),
         ),
-      );
+      )
+      .returning({ id: subagents.id });
+    if (!updated) continue;
     const [turn] = await deps.db.select().from(turns).where(eq(turns.id, row.childTurnId)).limit(1);
     if (turn?.state === "pending") {
       await deps.db
@@ -1331,7 +1410,7 @@ export async function drainAgent(
             .where(eq(mcpServers.id, server.id));
           return callMcpTool(server.url, token, toolName, args);
         },
-        onRoutineError: async (routineRunId, error, attempt) => {
+        onRoutineError: async (routineRunId, error, attempt, userNoticePersisted = false) => {
           const [routineRun] = await deps.db
             .select()
             .from(routineRuns)
@@ -1345,6 +1424,7 @@ export async function drainAgent(
             .limit(1);
           if (!routine) return;
           if (routine.onError === "notify_user") {
+            if (userNoticePersisted) return;
             // A websocket message alone is lost when the owner is offline. Queue a
             // durable bot turn so the failure notice is delivered through the
             // normal SendToUser/chat path and remains available after reconnect.

@@ -4,7 +4,7 @@
  * xAI includes the original system prompt and tool catalog (REQ-C04).
  * Anthropic and OpenAI use their own request and carrier shapes.
  */
-import type { ModelMessage, TokenUsage } from "@agentOS/shared";
+import type { ModelMessage, TokenUsage } from "@agentos/shared";
 import type { InferenceTool } from "./session.ts";
 
 export type CompactionStyle = "generic" | "xai" | "anthropic" | "openai";

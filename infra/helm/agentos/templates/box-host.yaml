@@ -1,6 +1,39 @@
 {{- if ne (int .Values.replicaCount) 1 }}
 {{- fail "AgentOS must run with exactly one replica until turn and VM routing are externalized" }}
 {{- end }}
+{{- if not (has .Values.agent.vmEgressPolicy (list "allow_all" "deny_all" "allowlist")) }}
+{{- fail "agent.vmEgressPolicy must be allow_all, deny_all, or allowlist" }}
+{{- end }}
+{{- if and (ne .Values.agent.vmEgressPolicy "allowlist") (gt (len .Values.agent.vmEgressAllowlist) 0) }}
+{{- fail "agent.vmEgressAllowlist requires agent.vmEgressPolicy=allowlist" }}
+{{- end }}
+{{- if eq .Values.agent.vmEgressPolicy "allowlist" }}
+{{- if eq (len .Values.agent.vmEgressAllowlist) 0 }}
+{{- fail "agent.vmEgressAllowlist must contain at least one CIDR rule when egress policy is allowlist" }}
+{{- end }}
+{{- range $rule := .Values.agent.vmEgressAllowlist }}
+{{- if not (regexMatch "^[0-9A-Fa-f:.]+/[0-9]{1,3}$" $rule.cidr) }}
+{{- fail (printf "invalid CIDR in agent.vmEgressAllowlist: %v" $rule.cidr) }}
+{{- end }}
+{{- if eq (len $rule.ports) 0 }}
+{{- fail (printf "CIDR %v must specify at least one egress port" $rule.cidr) }}
+{{- end }}
+{{- range $port := $rule.ports }}
+{{- if or (lt (int $port.port) 1) (gt (int $port.port) 65535) }}
+{{- fail (printf "invalid port in agent.vmEgressAllowlist for CIDR %v" $rule.cidr) }}
+{{- end }}
+{{- if not (has ($port.protocol | default "TCP") (list "TCP" "UDP" "SCTP")) }}
+{{- fail (printf "invalid protocol in agent.vmEgressAllowlist for CIDR %v" $rule.cidr) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if or (le (int64 .Values.agent.vmMemoryBytes) 0) (gt (int64 .Values.agent.vmMemoryBytes) 9007199254740991) }}
+{{- fail "agent.vmMemoryBytes must be a positive integer no greater than Number.MAX_SAFE_INTEGER" }}
+{{- end }}
+{{- if or (le (int64 .Values.agent.vmCpuNanos) 0) (gt (int64 .Values.agent.vmCpuNanos) 9007199254740991) }}
+{{- fail "agent.vmCpuNanos must be a positive integer no greater than Number.MAX_SAFE_INTEGER" }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -32,11 +65,13 @@ spec:
     metadata:
       labels:
         {{- include "agentos.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: box-host
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      serviceAccountName: {{ include "agentos.fullname" . }}-box-host
       containers:
         - name: box-host
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -60,6 +95,32 @@ spec:
               value: {{ .Values.agent.mcpStrictMode | ternary "1" "0" | quote }}
             - name: DYNAMIC_TOOL_OFFLOADING
               value: {{ .Values.agent.dynamicToolOffloading | ternary "1" "0" | quote }}
+            - name: VM_EGRESS_POLICY
+              value: {{ .Values.agent.vmEgressPolicy | quote }}
+            - name: VM_MEMORY_BYTES
+              value: {{ .Values.agent.vmMemoryBytes | quote }}
+            - name: VM_CPU_NANOS
+              value: {{ .Values.agent.vmCpuNanos | quote }}
+            - name: VM_BACKEND
+              value: kubernetes
+            - name: VM_IMAGE
+              value: "{{ .Values.vmManager.image.repository }}:{{ .Values.vmManager.image.tag }}"
+            - name: VM_IMAGE_PULL_POLICY
+              value: {{ .Values.vmManager.image.pullPolicy | quote }}
+            - name: VM_K8S_STORAGE_SIZE
+              value: {{ .Values.vmManager.storageSize | quote }}
+            - name: VM_K8S_STORAGE_CLASS
+              value: {{ .Values.vmManager.storageClassName | quote }}
+            - name: VM_K8S_INSTANCE
+              value: {{ .Release.Name | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with .Values.vmManager.image.pullSecret }}
+            - name: VM_IMAGE_PULL_SECRET
+              value: {{ . | quote }}
+            {{- end }}
             - name: DATABASE_URL
               value: "postgresql://{{ .Values.postgres.username | urlquery }}:{{ .Values.postgres.password | urlquery }}@{{ include "agentos.fullname" . }}-postgres:5432/{{ .Values.postgres.database | urlquery }}"
             - name: REDIS_URL

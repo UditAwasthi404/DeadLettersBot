@@ -2,9 +2,9 @@
  * Box Host entry — runHostMain (REQ-H01, H03, H04).
  * Startup order per task (stop on first failure).
  */
-import { inferenceReady } from "@agentOS/inference";
-import { BlobStore, adjustGauge, createDb, createRedis } from "@agentOS/shared";
-import { createVMManager, gcIdleVMs } from "@agentOS/vm-manager";
+import { inferenceReady } from "@agentos/inference";
+import { BlobStore, adjustGauge, createDb, createRedis } from "@agentos/shared";
+import { createVMManager, gcIdleVMs } from "@agentos/vm-manager";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { reconcileAutomationShadows } from "./automation-sync.ts";
@@ -70,7 +70,7 @@ export async function runHostMain(): Promise<void> {
   await blob.ensureBuckets();
 
   // 4b. VM manager
-  const vm = createVMManager();
+  const vm = await createVMManager();
   const accountVms = new Map<string, string>();
   const vmResources = new Map<
     string,

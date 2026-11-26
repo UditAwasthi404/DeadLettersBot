@@ -1,6 +1,6 @@
 /** Permission adapter (REQ-A10, A11). */
 
-import type { ApprovalPolicy, PermissionLevel } from "@agentOS/shared";
+import type { ApprovalPolicy, PermissionLevel } from "@agentos/shared";
 import type { CatalogTool } from "./tools/catalog.ts";
 
 export class PermissionDeniedError extends Error {
@@ -24,7 +24,9 @@ export function checkPermission(
       return false;
     }
   });
-  if (matching.some((rule) => rule.mode === "require")) return 3;
+  // Level 3 is reserved for SecureHandoff. An Auto Review "require" rule
+  // should force the ordinary per-action approval dialog instead.
+  if (matching.some((rule) => rule.mode === "require")) return 2;
   if (matching.some((rule) => rule.mode === "always_allow")) return 0;
 
   return Math.max(tool.permissionLevel, policy.defaultLevel) as PermissionLevel;

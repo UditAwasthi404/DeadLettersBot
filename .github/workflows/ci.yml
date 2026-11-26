@@ -20,7 +20,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.5
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
       - run: pnpm install --frozen-lockfile
+      - run: pnpm api:types
+      - run: git diff --exit-code -- packages/sdk/openapi.json packages/sdk/src/openapi.generated.ts
+      - run: helm lint ./infra/helm/agentos --values ./infra/helm/agentos/ci-values.yaml
+      - run: helm template agentos-ci ./infra/helm/agentos --values ./infra/helm/agentos/ci-values.yaml > /tmp/agentos-rendered.yaml
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm build

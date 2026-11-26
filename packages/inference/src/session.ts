@@ -1,6 +1,6 @@
 /** REQ-I01/I02: provider-agnostic InferenceSession (BUILD_PLAN Track B). */
 
-import { type ModelMessage, type TokenUsage, type ToolCall, observeMillis } from "@agentOS/shared";
+import { type ModelMessage, type TokenUsage, type ToolCall, observeMillis } from "@agentos/shared";
 import type { ZodTypeAny } from "zod";
 
 export type InferencePurpose = "main" | "summarization";

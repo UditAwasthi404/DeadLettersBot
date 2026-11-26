@@ -3,7 +3,7 @@
  * INFERENCE_MOCK via mockProvider; MockVMManager (no Docker / no real browser).
  */
 import { describe, expect, test } from "bun:test";
-import { mockProvider } from "@agentOS/inference";
+import { mockProvider } from "@agentos/inference";
 import {
   type BlobBucket,
   type ServerFrame,
@@ -11,8 +11,8 @@ import {
   bots as botsTable,
   steps as stepsTable,
   turns as turnsTable,
-} from "@agentOS/shared";
-import type { ExecResult, VMInfo, VMManager } from "@agentOS/vm-manager";
+} from "@agentos/shared";
+import type { ExecResult, VMInfo, VMManager } from "@agentos/vm-manager";
 import { Hono } from "hono";
 import { sign } from "hono/jwt";
 import { createGateway } from "./gateway.ts";

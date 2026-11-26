@@ -196,7 +196,7 @@ agentOS/
 
 #### Week 9
 - [ ] **`CreateSubagent` tool** — implemented as a bounded child turn in the background lane with an isolated conversation, restricted read/browser/search tools, and a step budget; richer task categories and runtime verification remain.
-- [ ] **TaskSubagent lifecycle** — durable completion metadata and parent revival turns are implemented; stall detection, restart/race verification, and lifecycle UX remain.
+- [ ] **TaskSubagent lifecycle** — durable completion metadata and parent revival turns are implemented; restart reconciliation now claims a pending revival turn before re-enqueueing it so multiple hosts do not duplicate the parent wake. Stall recovery, restart/race runtime verification, and lifecycle UX remain.
 - [ ] **Subagent tracking** — status, timestamps, result, usage, cancellation, steering, and stall events are exposed through account-scoped APIs. The desktop now has a live task view with progress, results, token usage, stall history, cancel, and steer controls; runtime lifecycle and token-accounting verification remain.
 - [x] **Less-fanout policy** — reuse an already queued/running executor for the same normalized task brief, tool set, and step budget before creating another child turn; differing tasks remain separate.
 
@@ -241,7 +241,7 @@ agentOS/
 - [x] **Browser recording ingest** — CDP navigation, click, type, and scroll events are recorded for at most 10 minutes. One inference call turns the log into draft `SkillStep[]` for review. Concurrent start requests for the same account/bot now share one in-flight recording session, and stop waits for startup to settle.
 - [x] **"Teach a task" flow** — desktop skills panel: Start Recording, Stop Recording, edit the draft, then save through the versioned skill API.
 - [ ] **Skill approval points** — routine-attached skills expose `CompleteSkillStep`, permit multiple tool calls within the current instruction, and pause before annotated steps. Turn checkpoints now restore skill progress and transcript context; in-flight tool action(s) may repeat if the process exits before their results are checkpointed, and runtime acceptance verification remains.
-- [ ] **Skill error handling** — runtime enforces `stop`, bounded configurable `retry` (1–10 failed actions, default 3), `skip`, `notify_user`, and bounded `custom_prompt` recovery, persisting retry counts in turn checkpoints; the desktop exposes policy, limit, and recovery text. Runtime acceptance verification remains.
+- [ ] **Skill error handling** — runtime enforces `stop`, bounded configurable `retry` (1–10 failed actions, default 3), `skip`, `notify_user`, and bounded `custom_prompt` recovery, persisting retry counts in turn checkpoints. A `notify_user` failure is written into the turn checkpoint and chat history before the failed turn settles, and duplicate routine-level notification is suppressed when that notice is persisted. The desktop exposes policy, limit, and recovery text. Runtime acceptance verification remains.
 
 #### Week 13
 - [x] **Skill test runner** — `POST /v1/skills/{skillId}/test` queues one routine turn for that skill and an account bot. The desktop requires confirmation because the run uses real tools.
@@ -333,12 +333,12 @@ agentOS/
 - [x] **Gateway client** — WebSocket client in Electron Main. Reconnect uses exponential backoff capped at 30 seconds and stops on user disconnect or quit. The gateway URL and bearer token are restored from the Electron session.
 - [x] **Bot roster sidebar** — list all bots. Create / rename / delete. Select active bot. (Rename/delete are limited by the API's history-protection rule.)
 - [x] **Chat view** — streaming message display, restored recent history from persisted turns, tool call visualization (show tool name + collapsible params/result), and inline approval UI.
-- [x] **Desktop component system** — Radix Themes provides the shared dark theme, consistent buttons, guided skill/routine/memory forms, and accessible confirmation dialogs across navigation, chat, and settings; Lucide supplies consistent icons. Failed prompt sends restore the draft and attachments and remove the optimistic chat row.
+- [x] **Desktop component system** — Radix Themes provides the shared dark theme, consistent buttons, guided skill/routine/memory forms, and accessible confirmation dialogs across navigation, chat, and settings; Lucide supplies consistent icons. Assistant replies render CommonMark and GFM safely with raw HTML disabled; HTTP(S) links open through a main-process allowlist. New-bot and local-execution prompts use Radix dialogs with focus containment and explicit approval. Failed prompt sends restore the draft and attachments and remove the optimistic chat row.
 
 #### Week 19 — Full Chat Features
 - [x] **File attachments** — drag-and-drop files into chat. Send as attachment in `sendPrompt`.
 - [x] **Interrupt button** — "Stop" button during active turn. Sends `interrupt` frame.
-- [x] **Approval dialogs** — inline Allow Once / Deny / Always Allow decision. Auto Review rule creation from UI. (Auto Review editor is API-only.)
+- [x] **Approval dialogs** — inline Allow Once / Deny / Always Allow decision. The Radix desktop Security screen edits per-tool Auto Review rules and default permission levels; `require` opens the normal approval dialog, while level 3 remains reserved for Secure Handoff.
 - [x] **Secure Handoff UI** — "Take Control" screen opens embedded VNC view of VM. "Return to Bot" button.
 - [x] **VM screen viewer** — "View Agent Screen" opens the same VNC session while the turn keeps running.
 
@@ -361,12 +361,12 @@ agentOS/
 ### Track B: REST API and SDK (Weeks 18–19)
 
 #### Week 18
-- [x] **OpenAPI spec** — `/openapi.json` is generated with Zod request and response schemas for health, bots (including recent chat history), memory, skills, routines, connectors, MCP, audit, API keys, and webhooks. Documented body and path-parameter schemas are now applied before gateway dispatch. Response validation and endpoint-level contract acceptance remain.
+- [x] **OpenAPI spec** — `/openapi.json` is generated with Zod request and response schemas for health, bots (including recent chat history), memory, skills, routines, connectors, MCP, audit, API keys, and webhooks. Documented request schemas are applied before dispatch, and JSON success and error responses are checked against their declared endpoint or default error schemas at the gateway boundary. Endpoint-level contract acceptance remains.
 - [x] **Rate limiting** — per-account fixed-window rate limits on authenticated API endpoints in Redis.
 - [x] **API key management** — create / revoke API keys for programmatic access. Scoped: read-only, read-write, admin.
 
 #### Week 19
-- [x] **TypeScript SDK** (`packages/sdk`) — `AgentOSClient` and `AgentOSError` cover bots (including recent chat history), memory, skills, routines, connectors, MCP, audit, and API keys, and accept either `(baseUrl, token)` or an options object. OpenAPI-generated types and npm publication remain.
+- [x] **TypeScript SDK** (`packages/sdk`) — `AgentOSClient` and `AgentOSError` cover bots (including recent chat history), memory, skills, routines, connectors, MCP, audit, and API keys, and accept either `(baseUrl, token)` or an options object. The SDK exports generated path/operation types from the checked-in OpenAPI spec; `pnpm api:types` regenerates the spec and declarations, and CI rejects stale generated output. npm publication remains.
 - [ ] **Webhook delivery** — signed POST events for turn settled, routine completed, and approval required use a durable queue with bounded retries, account-scoped history, configurable terminal-record retention, and manual retry. Desktop subscription and delivery management is implemented; end-to-end acceptance remains.
 - [x] **API docs** — `GET /docs` serves Scalar against `/openapi.json`.
 
@@ -381,7 +381,7 @@ agentOS/
 - [x] **Health check endpoints** — `GET /health` (liveness), `GET /ready` (readiness).
 
 #### Week 21
-- [ ] **Helm chart** (`infra/helm/`) — initial chart now provisions a single `box-host`, PostgreSQL, Redis, MinIO, PVCs, Secrets, and optional Ingress; optional cert-manager Certificate creation is configurable for ingress hostnames. Isolated `vm-manager`, HPA, and Kubernetes runtime acceptance remain; current Docker VM network/browser routing cannot run correctly inside this chart.
+- [ ] **Helm chart** (`infra/helm/`) — chart provisions `box-host`, PostgreSQL, Redis, MinIO, Secrets, optional Ingress/cert-manager TLS, and a Kubernetes VM backend. The backend gives each account a non-root VM pod and persistent PVC, disables service-account token mounts inside VM pods, waits for pod deletion before deleting a terminated VM's PVC, and provides namespaced RBAC, streamed `pods/exec`, browser/VNC ingress restrictions, and selectable deny-all/allow-all egress. `helm lint` and `helm template` pass with Helm 4.3.2; deployment acceptance on a fresh cluster remains because no Kubernetes context is configured. HPA and multi-host queue ownership are not implemented.
 - [x] **VM garbage collector** — `gcIdleVMs` terminates account VMs idle for 30 days and runs every 24 hours. `accounts.last_active_at` is updated when a turn starts. A 7-day warning is not sent yet.
 - [x] **Backup/restore** — `scripts/backup.sh`: dump PostgreSQL + export S3 blobs. `scripts/restore.sh`. Document frequency recommendations.
 
@@ -396,9 +396,9 @@ agentOS/
 
 #### Week 21
 - [x] **Secrets rotation** — JWTs that verify with `JWT_SECRET_PREVIOUS` are re-signed with `JWT_SECRET` and returned in `X-AgentOS-Refreshed-Token`. Connector, MCP, and webhook secrets decrypted with the previous key are re-encrypted on read. Runtime rotation acceptance remains.
-- [ ] **Network egress policy** — Compose and startup validation expose `VM_EGRESS_POLICY=deny_all`, which creates per-account Docker networks with `Internal: true`; the default `allow_all` preserves browser access. Existing networks refuse silent policy changes. A disposable internal-network container could not reach `1.1.1.1:443`. This is a global deny-all switch, not the planned per-account domain/CIDR/port allowlist or VM-level `iptables` enforcement; account provisioning and Helm VM isolation remain unverified/unsupported.
+- [ ] **Network egress policy** — Compose and startup validation expose `VM_EGRESS_POLICY=deny_all`, which creates per-account Docker networks with `Internal: true`. The Helm/Kubernetes backend now also supports `allowlist` rules for destination CIDRs and protocol/port pairs; Helm validates the rule structure and Docker rejects this mode instead of silently allowing traffic. DNS must be explicitly permitted by IP/port. Domain-aware rules, Docker CIDR/port enforcement, and account provisioning/CNI enforcement acceptance remain open.
 - [x] **Prompt injection hardening** — FetchURL pins resolved public addresses through the outbound connection, follows only revalidated redirects, classifies IPs with ipaddr.js, caps reads at 2 MiB and returned text at 8,000 characters, and uses parse5 to extract text while dropping hidden/executable elements. MCP, web, browser, file, shell, and connector results are wrapped in one `[UNTRUSTED_EXTERNAL_DATA]` envelope. Adversarial runtime checks remain.
-- [ ] **Shell sandboxing** — `RunShell` uses `setpriv`, a fail-closed Landlock filesystem policy, and a nested seccomp filter inside the account VM. The helper allows read/write access to `/home/agent` and `/tmp`, read/execute access to `/usr`, read-only access to `/etc`, and rejects IP socket creation, connection/bind, io_uring, process signaling, and process tracing syscalls. A disposable VM accepted workspace writes and runtime reads, rejected system writes and `/var` opens, and blocked an external TCP connection with all container capabilities dropped. Commands still share the account VM's PID namespace; per-command PID isolation and full `RunShell` dispatch acceptance remain open. Docker's default seccomp blocks nested `unshare` and this engine rejects namespace `clone()`, so namespace creation is not currently used.
+- [ ] **Shell sandboxing** — `RunShell` uses `setpriv`, a fail-closed Landlock filesystem policy, and a nested seccomp filter inside the account VM. The helper allows read/write access to `/home/agent` and `/tmp`, read/execute access to `/usr`, read-only access to `/etc`, and rejects IP socket creation, connection/bind, io_uring, process signaling, and process tracing syscalls. A disposable VM accepted workspace writes and runtime reads, rejected system writes and `/var` opens, and blocked an external TCP connection with all container capabilities dropped. The controlled-execution wrapper now waits for process-group startup, sends `SIGTERM`, then escalates to `SIGKILL` after a two-second grace period. Commands still share the account VM's PID namespace; per-command PID isolation and full `RunShell` dispatch acceptance remain open. Docker's default seccomp blocks nested `unshare` and this engine rejects namespace `clone()`, so namespace creation is not currently used.
 
 #### Week 22
 - [x] **Security audit** — `docs/SECURITY_AUDIT.md` records the SQL, path, Electron navigation, shell, secret rotation, untrusted-data, and MCP DNS-pinning source changes. Controlled DNS/Electron acceptance, a running penetration test, and complete source review remain.
@@ -437,7 +437,7 @@ agentOS/
 - [x] **LICENSE** — MIT license file present.
 - [ ] **GitHub release** — a tag-triggered workflow now packages a universal macOS DMG/ZIP and Windows NSIS installer, generates release notes, and attaches updater metadata. The workflow targets this repository; actual v1.0.0 release, signing/notarization, install acceptance, and public distribution remain.
 - [ ] **Docker Hub publish** — release workflow now builds and pushes `agentos/box-host` and `agentos/vm-manager` version/latest tags when Docker Hub credentials and namespace settings are configured; actual registry publication remains pending credentials and image acceptance.
-- [ ] **npm publish** — the SDK build and publish script exist, but `@agentOS/sdk` is marked private and uses uppercase letters, which npm disallows for new package names. Publishing requires selecting an owned, lowercase npm scope/name, removing the private-package flag, then running registry acceptance with credentials.
+- [ ] **npm publish** — the workspace now uses lowercase `@agentos/*` package names, and `@agentos/sdk` is configured for public scoped publishing. npm scope ownership, registry credentials, and publication acceptance remain pending.
 
 ---
 

@@ -10,13 +10,13 @@ pnpm typecheck
 pnpm lint
 pnpm test
 
-pnpm --filter @agentOS/sdk build
+pnpm --filter @agentos/sdk build
 if [ -n "${NPM_TOKEN:-}" ]; then
-  pnpm --filter @agentOS/sdk publish --access public --no-git-checks
+  pnpm --filter @agentos/sdk publish --access public --no-git-checks
 fi
 
 if [ -n "${CSC_LINK:-}" ] || [ -n "${CSC_NAME:-}" ]; then
-  pnpm --filter @agentOS/desktop exec electron-builder --mac --win --publish never
+  pnpm --filter @agentos/desktop exec electron-builder --mac --win --publish never
 fi
 
 if [ -f CHANGELOG.md ]; then

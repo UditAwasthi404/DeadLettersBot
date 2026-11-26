@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { decryptConnectorSecret } from "@agentOS/connectors";
-import { accounts, connectorAccounts } from "@agentOS/shared";
+import { decryptConnectorSecret } from "@agentos/connectors";
+import { accounts, connectorAccounts } from "@agentos/shared";
 import { Hono } from "hono";
 import { sign } from "hono/jwt";
 import { validateRuntimeConfig } from "./config.ts";

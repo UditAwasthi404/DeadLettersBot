@@ -1,4 +1,4 @@
-import { type Database, accounts } from "@agentOS/shared";
+import { type Database, accounts } from "@agentos/shared";
 import { lt } from "drizzle-orm";
 import type { VMManager } from "./interface.ts";
 

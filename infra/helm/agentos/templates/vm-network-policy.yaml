@@ -1,0 +1,47 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agentos.fullname" . }}-vm-isolation
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agentos-vm
+      app.kubernetes.io/component: vm
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "agentos.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: box-host
+      ports:
+        - protocol: TCP
+          port: 7000
+          endPort: 7799
+        - protocol: TCP
+          port: 9223
+          endPort: 9999
+{{- if eq .Values.agent.vmEgressPolicy "allow_all" }}
+  egress:
+    - {}
+{{- else if eq .Values.agent.vmEgressPolicy "allowlist" }}
+  egress:
+    {{- range $rule := .Values.agent.vmEgressAllowlist }}
+    - to:
+        - ipBlock:
+            cidr: {{ $rule.cidr | quote }}
+      ports:
+        {{- range $port := $rule.ports }}
+        - protocol: {{ $port.protocol | default "TCP" }}
+          port: {{ $port.port }}
+        {{- end }}
+    {{- end }}
+{{- else }}
+  egress: []
+{{- end }}

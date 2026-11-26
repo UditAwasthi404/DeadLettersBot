@@ -2,7 +2,7 @@
  * Provider fallback: primary → secondary → tertiary on rate limit / error
  * (ARCHITECTURE.md §6).
  */
-import type { ModelMessage } from "@agentOS/shared";
+import type { ModelMessage } from "@agentos/shared";
 import type {
   InferencePurpose,
   InferenceSession,

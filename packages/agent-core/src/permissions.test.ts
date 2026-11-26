@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ApprovalPolicy } from "@agentOS/shared";
+import type { ApprovalPolicy } from "@agentos/shared";
 import { PermissionDeniedError, checkPermission } from "./permissions.ts";
 import { STATIC_CATALOG } from "./tools/catalog.ts";
 
@@ -27,7 +27,7 @@ describe("checkPermission", () => {
         autoReviewRules: [{ actionPattern: "^ReadFile$", mode: "require" }],
       }),
     );
-    expect(level).toBe(3);
+    expect(level).toBe(2);
   });
 
   test('autoReviewRule "always_allow" returns 0', () => {

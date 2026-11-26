@@ -1,6 +1,6 @@
 /** Crash recovery: re-enqueue turns left in 'running' (REQ-H04). */
 
-import { type Database, type RedisClient, bots, turns } from "@agentOS/shared";
+import { type Database, type RedisClient, bots, turns } from "@agentos/shared";
 import { eq, or } from "drizzle-orm";
 import { logger } from "./logger.ts";
 import { enqueue } from "./scheduler.ts";

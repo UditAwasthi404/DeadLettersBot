@@ -5,19 +5,19 @@
  *   DATABASE_URL=postgresql://agentos:agentos@127.0.0.1:5432/agentos \
  *   REDIS_URL=redis://127.0.0.1:6379 \
  *   S3_ENDPOINT=http://127.0.0.1:9000 S3_ACCESS_KEY=minio S3_SECRET_KEY=minio12345 \
- *   pnpm --filter @agentOS/box-host test src/integration.test.ts
+ *   pnpm --filter @agentos/box-host test src/integration.test.ts
  * The database must have no accounts. Live runs are not part of the default test command.
  */
 import { describe, expect, test } from "bun:test";
-import type { InferenceSession, InferenceStreamEvent, ProviderFactory } from "@agentOS/inference";
+import type { InferenceSession, InferenceStreamEvent, ProviderFactory } from "@agentos/inference";
 import {
   BlobStore,
   type ModelMessage,
   type ServerFrame,
   createDb,
   createRedis,
-} from "@agentOS/shared";
-import { NoopVMManager } from "@agentOS/vm-manager";
+} from "@agentos/shared";
+import { NoopVMManager } from "@agentos/vm-manager";
 import { Hono } from "hono";
 import { createGateway } from "./gateway.ts";
 

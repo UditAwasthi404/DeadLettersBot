@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Bot } from "@agentOS/shared";
+import type { Bot } from "@agentos/shared";
 import {
   assembleTurnAction,
   buildDefaultSections,

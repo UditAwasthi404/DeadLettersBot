@@ -8,6 +8,8 @@ The Compose network defaults to `agentos`. Set a unique `AGENTOS_NETWORK_NAME` w
 
 For an outbound-network kill switch, set `VM_EGRESS_POLICY=deny_all`. Account VM networks are then created with Docker's `Internal` flag, which prevents external routing while retaining the host-to-VM connection needed for tool execution. This disables Internet access for browser and shell tools. The default is `allow_all`. Changing this setting does not mutate existing account networks; stop and remove each existing VM/network before it is recreated under the new policy. This is a global, deny-all/allow-all switch, not a domain or port allowlist.
 
+The Helm deployment also supports `agent.vmEgressPolicy: allowlist` with explicit destination CIDRs and protocol/port pairs. This is IP-based filtering: include the cluster DNS resolver address and its DNS port if VMs need hostname resolution, and include each destination network/port required by the workload. Domain names are not resolved into policy rules, and Compose/Docker rejects this mode because it cannot enforce the same allowlist.
+
 `RunShell` uses Linux Landlock to confine filesystem opens to `/home/agent` and `/tmp` for writes, `/usr` for runtime reads/execution, and `/etc` for read-only configuration. A nested seccomp filter blocks IP sockets, connection/bind, process signaling/tracing, and io_uring for the command. Both filters fail closed. Commands still share the account VM's PID namespace; `VM_EGRESS_POLICY=deny_all` also disables Internet routing for Chromium and other VM processes.
 
 1. Copy `.env.example` to `.env` and set `JWT_SECRET` to a random secret. For example, `openssl rand -hex 32`.
@@ -19,8 +21,12 @@ For an outbound-network kill switch, set `VM_EGRESS_POLICY=deny_all`. Account VM
    ```
 
    Compose starts PostgreSQL, Redis, MinIO, builds the `agentos/vm-manager` browser VM image (override with `VM_IMAGE`), runs database migrations, and starts the host. The VM image includes Node.js 22 and npm 10 for workspace scripts, plus Chromium, Xvfb, and shell tools. Each account VM uses a dedicated Docker bridge network; the host joins that network for browser and shell operations. A bot's Xvfb and Chromium browser are created on first browser-tool use with a dedicated display, CDP port, and persistent profile.
-4. Build the desktop client with `pnpm --filter @agentOS/desktop build`, or run it locally with `pnpm --filter @agentOS/desktop dev` and `pnpm --filter @agentOS/desktop electron` in separate terminals.
+4. Build the desktop client with `pnpm --filter @agentos/desktop build`, or run it locally with `pnpm --filter @agentos/desktop dev` and `pnpm --filter @agentos/desktop electron` in separate terminals.
 5. In the desktop window, enter a name and email and choose Create account. The app calls `POST /v1/auth/bootstrap` once, stores the session, and uses it for `/v1` and the `/ws` gateway. That route closes after the first account exists.
+
+## Kubernetes deployment
+
+The Helm chart selects `VM_BACKEND=kubernetes` and grants box-host namespaced access to VM pods, their `pods/exec` streams, and account PVCs. Each account VM runs as UID 1000 with dropped Linux capabilities, a RuntimeDefault seccomp profile, resource requests/limits, and a persistent home volume. VM NetworkPolicies restrict inbound CDP/VNC ports to box-host. Use a CNI that enforces NetworkPolicies. With `agent.vmEgressPolicy: deny_all`, VM DNS and internet access are blocked; `allow_all` restores outbound access. The chart currently requires one box-host replica until queue ownership moves to Redis. See [the Helm README](../infra/helm/agentos/README.md) for values and limitations.
 
 For long-lived integrations, create an API key through `POST /v1/api-keys` and store the returned secret in a password manager. The secret is only shown once. OAuth-backed Google connectors need the Google client ID, client secret, encryption key, and a redirect URI registered in the Google Cloud project. Enable the Gmail, Calendar, and Drive APIs that you plan to use. Google Drive currently requests the broad `drive` scope for list/read/write/share actions; complete Google's OAuth consent and scope verification requirements before using it with real account data. Set `OAUTH_REDIRECT_URI` (or `GOOGLE_OAUTH_REDIRECT_URI`) to the public HTTPS callback when the gateway is not on this PC. Locally that callback is `http://127.0.0.1:8787/v1/connectors/oauth/callback`, which matches the Compose loopback bind. Register that same callback on the Google, Microsoft, and Salesforce apps. Microsoft services share one connection. Personal Microsoft accounts use the OneDrive and Outlook scopes only; set `MICROSOFT_OAUTH_EXTRA_SCOPES` for Teams and SharePoint on a work account. Salesforce stores its instance URL with the encrypted tokens and must allow PKCE. See the README section "Setting up connectors" for the console steps.
 
@@ -61,10 +67,12 @@ The host validates required store credentials, endpoint formats, secret formats,
 | `MEMORY_SYNTHESIS_ENABLED` | Enable evidence-based memory synthesis worker; defaults to `0` because edits are automatic, and may be enabled after reviewing the security and data-retention behavior |
 | `MCP_STRICT_MODE` | Reject MCP servers whose advertised tool names or descriptions match known prompt-injection patterns; defaults to `0` (warning-only) |
 | `DYNAMIC_TOOL_OFFLOADING` | Offload MCP tool catalogs from each prompt and expose `GetDynamicTools`/`CallDynamicTool`; defaults to `1`. Set to `0` to use the static `MCPCall` prompt path |
+| `VM_BACKEND` | `docker` (default), `kubernetes`, or `noop`; Helm selects `kubernetes` |
 | `VM_IDLE_TIMEOUT_MS` | Idle delay before suspending an account VM |
-| `VM_EGRESS_POLICY` | `allow_all` (default) or `deny_all` for internal Docker account networks; changing policy requires recreating existing VM networks |
-| `VM_MEMORY_BYTES`, `VM_CPU_NANOS`, `VM_PIDS_LIMIT` | Per-account container resource limits; defaults to 2 GiB RAM, 2 CPUs, and 512 processes |
-| `VM_IMAGE` | Docker image used for account VMs; Compose builds `agentos/vm-manager` locally by default |
+| `VM_EGRESS_POLICY` | `allow_all` (default) or `deny_all`; `allowlist` is available only with Helm/Kubernetes CIDR and port rules |
+| `VM_MEMORY_BYTES`, `VM_CPU_NANOS`, `VM_PIDS_LIMIT` | Per-account Docker container limits. Kubernetes sets CPU and memory from the first two; its Pod API has no per-pod PID limit field |
+| `VM_IMAGE` | Image used for account VMs; Compose builds `agentos/vm-manager` locally by default |
+| `VM_K8S_NAMESPACE`, `VM_K8S_STORAGE_SIZE`, `VM_K8S_STORAGE_CLASS` | Kubernetes namespace and account home-volume configuration |
 | `CONNECTOR_ENCRYPTION_KEY` | 32-byte hex key used to encrypt OAuth credentials at rest |
 | `CONNECTOR_ENCRYPTION_KEY_PREVIOUS` | Temporary previous key while decrypting and rotating existing connector secrets |
 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | Google OAuth application credentials |

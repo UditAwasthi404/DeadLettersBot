@@ -58,7 +58,7 @@ call pnpm install
 if errorlevel 1 exit /b 1
 
 echo Starting the desktop app...
-start "AgentOS Vite" /D "%~dp0" cmd /k "pnpm --filter @agentOS/desktop dev"
+start "AgentOS Vite" /D "%~dp0" cmd /k "pnpm --filter @agentos/desktop dev"
 
 set TRIES=0
 :wait_vite
@@ -73,7 +73,7 @@ timeout /t 2 /nobreak >nul
 goto wait_vite
 
 :vite_ok
-start "AgentOS Electron" /D "%~dp0" cmd /k "pnpm --filter @agentOS/desktop electron"
+start "AgentOS Electron" /D "%~dp0" cmd /k "pnpm --filter @agentos/desktop electron"
 echo.
 echo Gateway: http://localhost:8787
 echo In the app, enter your name and email, then choose Create account.

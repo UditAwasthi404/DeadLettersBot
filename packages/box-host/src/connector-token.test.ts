@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { encryptConnectorSecret } from "@agentOS/connectors";
-import type { Database } from "@agentOS/shared";
+import { encryptConnectorSecret } from "@agentos/connectors";
+import type { Database } from "@agentos/shared";
 import { describeConnectedConnectors } from "./connector-availability.ts";
 import { accessTokenForConnection, connectorNeedsRefresh } from "./connector-token.ts";
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { RedisClient } from "@agentOS/shared";
+import type { RedisClient } from "@agentos/shared";
 import { type QueuePayload, dequeue, enqueue } from "./scheduler.ts";
 
 function memoryRedis() {

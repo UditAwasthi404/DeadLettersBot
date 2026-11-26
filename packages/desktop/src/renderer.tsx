@@ -1,20 +1,36 @@
 import { ClerkProvider, SignIn, SignUp, useAuth, useClerk } from "@clerk/react";
-import { AlertDialog, Button, Dialog, Theme } from "@radix-ui/themes";
+import {
+  AlertDialog,
+  Badge,
+  Button,
+  Dialog,
+  Popover,
+  Select,
+  TextField,
+  Theme,
+} from "@radix-ui/themes";
 import {
   ArrowRight,
   Bookmark,
   Computer,
+  Copy,
   GitFork,
   Link2,
   ListChecks,
   MessageSquare,
+  Monitor,
   Paperclip,
   Plus,
   Settings2,
+  ShieldCheck,
   Sparkles,
+  Square,
+  Trash2,
 } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { UpdateBanner } from "./UpdateBanner.tsx";
 import { RawVncSession } from "./rfb.ts";
 import "@radix-ui/themes/styles.css";
@@ -56,6 +72,12 @@ function AppButton({ className, variant, size, ...props }: AppButtonProps) {
 }
 
 type LocalPolicy = "never" | "always_confirm" | "always_allow";
+type PermissionLevel = 0 | 1 | 2 | 3;
+type AutoReviewRule = { actionPattern: string; mode: "require" | "always_allow" };
+
+function exactToolPattern(toolName: string): string {
+  return `^${toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+}
 
 interface Bot {
   id: string;
@@ -64,6 +86,7 @@ interface Bot {
   inferenceSettings?: { providerId?: string; model?: string };
   localMachineAccess?: LocalPolicy;
   retainData?: boolean;
+  approvalSettings?: { autoReviewRules: AutoReviewRule[]; defaultLevel: PermissionLevel };
 }
 
 function isLocalPolicy(value: string | null | undefined): value is LocalPolicy {
@@ -87,8 +110,10 @@ interface MemoryReviewSuggestion {
   id: string;
   memoryId: string;
   turnId: string;
+  action: "update" | "delete";
   existingContent: string;
-  proposedContent: string;
+  proposedContent: string | null;
+  reason: string | null;
   createdAt: string;
 }
 interface SkillItem {
@@ -443,6 +468,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const [sendingPrompt, setSendingPrompt] = useState(false);
   const [localOpen, setLocalOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [securityOpen, setSecurityOpen] = useState(false);
+  const [approvalRules, setApprovalRules] = useState<AutoReviewRule[]>([]);
+  const [approvalDefaultLevel, setApprovalDefaultLevel] = useState<PermissionLevel>(0);
+  const [approvalToolName, setApprovalToolName] = useState("");
+  const [approvalRuleMode, setApprovalRuleMode] = useState<AutoReviewRule["mode"]>("require");
+  const [approvalSaving, setApprovalSaving] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
@@ -460,7 +491,6 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const [notice, setNotice] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const botNameRef = useRef<HTMLInputElement>(null);
   const confirmationResolver = useRef<((confirmed: boolean) => void) | null>(null);
   const [localAccess, setLocalAccess] = useState<LocalPolicy>("always_confirm");
   const [pendingLocal, setPendingLocal] = useState<{
@@ -724,10 +754,6 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     const timer = window.setTimeout(() => setNotice(""), 3200);
     return () => window.clearTimeout(timer);
   }, [notice]);
-
-  useEffect(() => {
-    if (botDraftOpen) botNameRef.current?.focus();
-  }, [botDraftOpen]);
 
   useEffect(() => {
     if (sessionReady && !signedIn && authMode === "create") accountNameRef.current?.focus();
@@ -1008,6 +1034,65 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function loadSecuritySettings() {
+    if (!botId || !token) return;
+    try {
+      const bot = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${botId}`,
+      })) as Bot;
+      setApprovalRules(bot.approvalSettings?.autoReviewRules ?? []);
+      setApprovalDefaultLevel(bot.approvalSettings?.defaultLevel ?? 0);
+      setApprovalToolName("");
+      showWorkspace("security");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function saveApprovalSettings() {
+    if (!botId || approvalSaving) return;
+    setApprovalSaving(true);
+    try {
+      const approvalSettings = {
+        autoReviewRules: approvalRules,
+        defaultLevel: approvalDefaultLevel,
+      };
+      await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${botId}`,
+        method: "PATCH",
+        body: { approvalSettings },
+      });
+      setBots((current) =>
+        current.map((bot) => (bot.id === botId ? { ...bot, approvalSettings } : bot)),
+      );
+      setNotice("Approval settings saved. They apply to new tool calls.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApprovalSaving(false);
+    }
+  }
+
+  function addApprovalRule(event: React.FormEvent) {
+    event.preventDefault();
+    const toolName = approvalToolName.trim();
+    if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(toolName)) {
+      setError("Enter a tool name using letters, numbers, dots, underscores, colons, or hyphens.");
+      return;
+    }
+    const actionPattern = exactToolPattern(toolName);
+    setApprovalRules((current) => [
+      ...current.filter((rule) => rule.actionPattern !== actionPattern),
+      { actionPattern, mode: approvalRuleMode },
+    ]);
+    setApprovalToolName("");
+    setError("");
   }
 
   async function saveInferenceSettings() {
@@ -1956,6 +2041,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       await loadMemories();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      await loadMemories();
     }
   }
 
@@ -2140,6 +2226,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     next:
       | "chat"
       | "memory"
+      | "security"
       | "automation"
       | "connectors"
       | "webhooks"
@@ -2148,6 +2235,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       | "model",
   ) {
     setMemoryOpen(next === "memory");
+    setSecurityOpen(next === "security");
     setAutomationOpen(next === "automation");
     setConnectorOpen(next === "connectors");
     setWebhookOpen(next === "webhooks");
@@ -2166,33 +2254,37 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     ? "webhooks"
     : subagentOpen
       ? "subagents"
-      : connectorOpen
-        ? "connectors"
-        : automationOpen
-          ? "automation"
-          : memoryOpen
-            ? "memory"
-            : localOpen
-              ? "local"
-              : modelOpen
-                ? "model"
-                : "chat";
+      : securityOpen
+        ? "security"
+        : connectorOpen
+          ? "connectors"
+          : automationOpen
+            ? "automation"
+            : memoryOpen
+              ? "memory"
+              : localOpen
+                ? "local"
+                : modelOpen
+                  ? "model"
+                  : "chat";
   const workspaceTitle =
     workspace === "memory"
       ? "Memory"
-      : workspace === "automation"
-        ? "Skills & routines"
-        : workspace === "connectors"
-          ? "Connectors"
-          : workspace === "webhooks"
-            ? "Webhooks"
-            : workspace === "subagents"
-              ? "Subagents"
-              : workspace === "local"
-                ? "This computer"
-                : workspace === "model"
-                  ? "Model & privacy"
-                  : (selectedBot?.name ?? "Choose a bot");
+      : workspace === "security"
+        ? "Security & approvals"
+        : workspace === "automation"
+          ? "Skills & routines"
+          : workspace === "connectors"
+            ? "Connectors"
+            : workspace === "webhooks"
+              ? "Webhooks"
+              : workspace === "subagents"
+                ? "Subagents"
+                : workspace === "local"
+                  ? "This computer"
+                  : workspace === "model"
+                    ? "Model & privacy"
+                    : (selectedBot?.name ?? "Choose a bot");
   const workspaceSubtitle =
     workspace === "chat"
       ? activeRun
@@ -2398,6 +2490,18 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           <Button
             type="button"
             variant="ghost"
+            className={`nav-item ${workspace === "security" ? "active" : ""}`}
+            title="Security & approvals"
+            aria-current={workspace === "security" ? "page" : undefined}
+            disabled={!botId || !token}
+            onClick={() => void loadSecuritySettings()}
+          >
+            <ShieldCheck className="glyph" aria-hidden="true" />
+            Security
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
             className={`nav-item ${workspace === "automation" ? "active" : ""}`}
             title="Automations"
             aria-current={workspace === "automation" ? "page" : undefined}
@@ -2474,13 +2578,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             type="button"
             className="icon-button"
             title="New bot (Ctrl+N)"
+            aria-label="Create a new bot"
             onClick={() => {
               setBotDraftName("");
               setBotDraftOpen(true);
             }}
             disabled={!token}
           >
-            +
+            <Plus aria-hidden="true" size={16} />
           </AppButton>
         </div>
         <input
@@ -2517,64 +2622,69 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           )}
         </div>
         <div className="sidebar-footer">
-          {connectOpen && (
-            <form
-              className="connect-popover"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void connect();
-              }}
-            >
-              <label>
-                Gateway URL
-                <input
-                  value={baseUrl}
-                  onChange={(event) => setBaseUrl(event.target.value)}
-                  spellCheck={false}
-                />
-              </label>
-              <label>
-                Bearer token
-                <input
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
-                  type="password"
-                  placeholder="Account token"
-                  autoComplete="current-password"
-                />
-              </label>
-              <div className="popover-actions">
-                <AppButton type="submit" className="primary">
-                  Connect
-                </AppButton>
-                <AppButton
-                  type="button"
-                  onClick={() => {
-                    void window.agentOS.disconnect();
-                    if (clerk?.enabled) void clerk.signOut();
-                    setSignedIn(false);
-                    setAuthMode(token ? "token" : "create");
-                    setAuthError("");
-                  }}
-                  disabled={status !== "connected"}
-                >
-                  Disconnect
-                </AppButton>
-              </div>
-            </form>
-          )}
-          <AppButton
-            type="button"
-            className="account-row"
-            onClick={() => setConnectOpen((open) => !open)}
-            aria-expanded={connectOpen}
-          >
-            <i className={status === "connected" ? "online" : ""} />
-            <span>
-              <strong>{status === "connected" ? "Connected" : "Not connected"}</strong>
-              <small>{gatewayHost(baseUrl)}</small>
-            </span>
-          </AppButton>
+          <Popover.Root open={connectOpen} onOpenChange={setConnectOpen}>
+            <Popover.Trigger>
+              <AppButton
+                type="button"
+                className="account-row"
+                variant="ghost"
+                aria-label={`Connection settings: ${status === "connected" ? "connected" : "not connected"} to ${gatewayHost(baseUrl)}`}
+                title={`Connection settings · ${status === "connected" ? "Connected" : "Not connected"} · ${gatewayHost(baseUrl)}`}
+              >
+                <i className={status === "connected" ? "online" : ""} />
+                <span>
+                  <strong>{status === "connected" ? "Connected" : "Not connected"}</strong>
+                  <small>{gatewayHost(baseUrl)}</small>
+                </span>
+              </AppButton>
+            </Popover.Trigger>
+            <Popover.Content className="connect-popover" side="top" align="start" sideOffset={8}>
+              <form
+                className="connect-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void connect();
+                }}
+              >
+                <label>
+                  Gateway URL
+                  <input
+                    value={baseUrl}
+                    onChange={(event) => setBaseUrl(event.target.value)}
+                    spellCheck={false}
+                  />
+                </label>
+                <label>
+                  Bearer token
+                  <input
+                    value={token}
+                    onChange={(event) => setToken(event.target.value)}
+                    type="password"
+                    placeholder="Account token"
+                    autoComplete="current-password"
+                  />
+                </label>
+                <div className="popover-actions">
+                  <AppButton type="submit" className="primary">
+                    Connect
+                  </AppButton>
+                  <AppButton
+                    type="button"
+                    onClick={() => {
+                      void window.agentOS.disconnect();
+                      if (clerk?.enabled) void clerk.signOut();
+                      setSignedIn(false);
+                      setAuthMode(token ? "token" : "create");
+                      setAuthError("");
+                    }}
+                    disabled={status !== "connected"}
+                  >
+                    Disconnect
+                  </AppButton>
+                </div>
+              </form>
+            </Popover.Content>
+          </Popover.Root>
         </div>
       </aside>
       <main className="chat-panel">
@@ -2596,6 +2706,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   void window.agentOS.send({ type: "interrupt", agentId: botId, runId: activeRun })
                 }
               >
+                <Square size={11} fill="currentColor" aria-hidden="true" />
                 Stop
               </AppButton>
             )}
@@ -2605,36 +2716,38 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               onClick={() => setScreenMode((mode) => (mode === "view" ? null : "view"))}
               disabled={!botId || screenMode === "handoff"}
             >
+              <Monitor className="glyph" aria-hidden="true" />
               {screenMode === "view" ? "Hide screen" : "Agent screen"}
             </AppButton>
           </div>
         </header>
-        {botDraftOpen && (
-          <form
-            className="sheet-backdrop"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void createBot(botDraftName);
-            }}
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget) setBotDraftOpen(false);
-            }}
-          >
-            <div className="sheet">
-              <h2>New bot</h2>
-              <p>Give this agent a name. You can change its model after it is created.</p>
-              <input
-                ref={botNameRef}
-                value={botDraftName}
-                onChange={(event) => setBotDraftName(event.target.value)}
-                placeholder="Name"
-                maxLength={80}
-                aria-label="Bot name"
-              />
-              <div className="popover-actions">
-                <AppButton type="button" onClick={() => setBotDraftOpen(false)}>
-                  Cancel
-                </AppButton>
+        <Dialog.Root open={botDraftOpen} onOpenChange={setBotDraftOpen}>
+          <Dialog.Content maxWidth="460px">
+            <Dialog.Title>New bot</Dialog.Title>
+            <Dialog.Description>
+              Give this agent a name. You can change its model after it is created.
+            </Dialog.Description>
+            <form
+              className="skill-editor"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createBot(botDraftName);
+              }}
+            >
+              <label>
+                Name
+                <input
+                  value={botDraftName}
+                  onChange={(event) => setBotDraftName(event.target.value)}
+                  placeholder="Name"
+                  maxLength={80}
+                  required
+                />
+              </label>
+              <div className="memory-actions">
+                <Dialog.Close>
+                  <AppButton type="button">Cancel</AppButton>
+                </Dialog.Close>
                 <AppButton
                   type="submit"
                   className="primary"
@@ -2643,8 +2756,118 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   Create
                 </AppButton>
               </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Root>
+        {workspace === "security" && (
+          <section className="messages memory-view security-view">
+            <div className="memory-toolbar">
+              <div>
+                <h2>Security & approvals</h2>
+                <p className="empty-note">
+                  Choose how this bot handles tool permissions and exceptions.
+                </p>
+              </div>
+              <AppButton type="button" onClick={() => showWorkspace("chat")}>
+                Back to chat
+              </AppButton>
             </div>
-          </form>
+            <article className="memory-entry security-policy-card">
+              <h3>Default permission level</h3>
+              <div className="approval-default-field">
+                <span>For tools without an Auto Review rule</span>
+                <Select.Root
+                  value={String(approvalDefaultLevel)}
+                  onValueChange={(value) =>
+                    setApprovalDefaultLevel(Number(value) as PermissionLevel)
+                  }
+                >
+                  <Select.Trigger aria-label="Default permission level" />
+                  <Select.Content position="popper">
+                    <Select.Item value="0">Use each tool's default</Select.Item>
+                    <Select.Item value="1">Ask once per tool</Select.Item>
+                    <Select.Item value="2">Ask every time</Select.Item>
+                    <Select.Item value="3">Require screen handoff</Select.Item>
+                  </Select.Content>
+                </Select.Root>
+              </div>
+              <p>
+                Higher levels add more review. Screen handoff pauses the bot and gives you control
+                of its browser session.
+              </p>
+            </article>
+            <article className="memory-entry security-policy-card">
+              <h3>Auto Review rules</h3>
+              <p>
+                Match an exact tool name. “Ask every time” opens the approval dialog for each call;
+                “Always allow” skips approval for that tool. If several rules match, “Ask every
+                time” takes precedence.
+              </p>
+              <form className="approval-rule-form" onSubmit={addApprovalRule}>
+                <div className="approval-rule-field">
+                  <span>Tool name</span>
+                  <TextField.Root
+                    value={approvalToolName}
+                    onChange={(event) => setApprovalToolName(event.target.value)}
+                    placeholder="RunShell or BrowserNavigate"
+                    maxLength={128}
+                    aria-label="Exact tool name"
+                  />
+                </div>
+                <div className="approval-rule-field">
+                  <span>Rule</span>
+                  <Select.Root
+                    value={approvalRuleMode}
+                    onValueChange={(value) => setApprovalRuleMode(value as AutoReviewRule["mode"])}
+                  >
+                    <Select.Trigger aria-label="Auto Review action" />
+                    <Select.Content position="popper">
+                      <Select.Item value="require">Ask every time</Select.Item>
+                      <Select.Item value="always_allow">Always allow</Select.Item>
+                    </Select.Content>
+                  </Select.Root>
+                </div>
+                <AppButton type="submit" disabled={!approvalToolName.trim()}>
+                  <Plus size={15} aria-hidden="true" />
+                  Add rule
+                </AppButton>
+              </form>
+              {approvalRules.length ? (
+                <div className="approval-rule-list">
+                  {approvalRules.map((rule, index) => (
+                    <div className="approval-rule-row" key={`${rule.actionPattern}-${index}`}>
+                      <code>{rule.actionPattern}</code>
+                      <Badge color={rule.mode === "require" ? "amber" : "green"} variant="soft">
+                        {rule.mode === "require" ? "Ask every time" : "Always allow"}
+                      </Badge>
+                      <AppButton
+                        type="button"
+                        aria-label={`Remove rule ${rule.actionPattern}`}
+                        title="Remove rule"
+                        onClick={() =>
+                          setApprovalRules((current) => current.filter((_, item) => item !== index))
+                        }
+                      >
+                        <Trash2 size={15} aria-hidden="true" />
+                      </AppButton>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-note">No custom rules. The tool defaults will apply.</p>
+              )}
+              <div className="memory-actions">
+                <AppButton
+                  type="button"
+                  className="primary"
+                  disabled={!token || approvalSaving}
+                  onClick={() => void saveApprovalSettings()}
+                >
+                  {approvalSaving ? "Saving…" : "Save approval settings"}
+                </AppButton>
+              </div>
+            </article>
+          </section>
         )}
         {workspace === "local" && (
           <section className="messages memory-view">
@@ -2671,10 +2894,25 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             </AppButton>
           </section>
         )}
-        {pendingLocal && (
-          <div className="sheet-backdrop">
-            <section className="local-exec-dialog">
-              <h2>Run on this computer?</h2>
+        <Dialog.Root
+          open={pendingLocal !== null}
+          onOpenChange={(open) => {
+            // Keep the approval request visible until the user explicitly allows or blocks it.
+            if (open) return;
+          }}
+        >
+          {pendingLocal && (
+            <Dialog.Content
+              className="local-exec-dialog"
+              maxWidth="460px"
+              onEscapeKeyDown={(event) => event.preventDefault()}
+              onPointerDownOutside={(event) => event.preventDefault()}
+              onInteractOutside={(event) => event.preventDefault()}
+            >
+              <Dialog.Title>Run on this computer?</Dialog.Title>
+              <Dialog.Description>
+                The agent is asking to run this command on your desktop. Review it before allowing.
+              </Dialog.Description>
               <pre>{pendingLocal.command}</pre>
               <p>{pendingLocal.cwd || "The desktop's default directory"}</p>
               <label className="skill-approval-toggle">
@@ -2688,6 +2926,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               <div className="approval-actions">
                 <AppButton
                   type="button"
+                  className="primary"
                   onClick={() => void replyLocal(allowLocalSession ? "allow_session" : "allow")}
                 >
                   Run
@@ -2696,9 +2935,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   Block
                 </AppButton>
               </div>
-            </section>
-          </div>
-        )}
+            </Dialog.Content>
+          )}
+        </Dialog.Root>
         {screenMode && screenBotId && (
           <section className="screen-view">
             <p>
@@ -3878,6 +4117,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             <div className="memory-toolbar">
               <h2>Memory</h2>
               <div>
+                <AppButton type="button" onClick={() => void loadMemories()}>
+                  Refresh
+                </AppButton>
                 <AppButton type="button" onClick={() => void exportMemories()}>
                   Export JSON
                 </AppButton>
@@ -3888,32 +4130,41 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             </div>
             {!!memoryReviewSuggestions.length && (
               <section aria-labelledby="memory-review-heading">
-                <h3 id="memory-review-heading">Suggested updates</h3>
+                <h3 id="memory-review-heading">Suggested memory changes</h3>
                 <p className="empty-note">
-                  The agent found possible corrections. Existing memory changes only when you
-                  accept.
+                  Review each change. Updates and deletions are applied only after you accept.
                 </p>
                 {memoryReviewSuggestions.map((suggestion) => (
                   <article className="memory-entry" key={suggestion.id}>
                     <small>
-                      Possible correction · {new Date(suggestion.createdAt).toLocaleString()}
+                      {suggestion.action === "delete" ? "Possible removal" : "Possible correction"} ·{" "}
+                      {new Date(suggestion.createdAt).toLocaleString()}
                     </small>
                     <p>
-                      <strong>Current</strong>
+                      <strong>Saved memory</strong>
                       <br />
                       {suggestion.existingContent}
                     </p>
-                    <p>
-                      <strong>Suggested</strong>
-                      <br />
-                      {suggestion.proposedContent}
-                    </p>
+                    {suggestion.action === "update" && suggestion.proposedContent && (
+                      <p>
+                        <strong>Suggested replacement</strong>
+                        <br />
+                        {suggestion.proposedContent}
+                      </p>
+                    )}
+                    {suggestion.action === "delete" && (
+                      <p>
+                        <strong>Why it was suggested</strong>
+                        <br />
+                        {suggestion.reason || "The latest conversation may indicate this fact is no longer valid."}
+                      </p>
+                    )}
                     <div className="memory-actions">
                       <AppButton
                         type="button"
                         onClick={() => void resolveMemoryReview(suggestion, "accept")}
                       >
-                        Accept update
+                        {suggestion.action === "delete" ? "Delete memory" : "Accept update"}
                       </AppButton>
                       <AppButton
                         type="button"
@@ -3969,7 +4220,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           <div className="messages" ref={scrollRef}>
             {!items.length && (
               <div className="welcome">
-                <div className="welcome-icon">✦</div>
+                <div className="welcome-icon">
+                  <Sparkles className="glyph" aria-hidden="true" />
+                </div>
                 <h1>{selectedBot ? `Message ${selectedBot.name}` : "What can I help with?"}</h1>
                 <p>
                   Send a task to the selected agent. Tool activity, files, and approval requests
@@ -4030,11 +4283,44 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                           className="copy-button"
                           onClick={() => void navigator.clipboard.writeText(item.content)}
                         >
+                          <Copy size={12} aria-hidden="true" />
                           Copy
                         </AppButton>
                       )}
                     </div>
-                    <div className="message-content">{item.content}</div>
+                    <div
+                      className={`message-content${item.role === "assistant" ? " markdown-content" : ""}`}
+                    >
+                      {item.role === "assistant" ? (
+                        <ReactMarkdown
+                          skipHtml
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            a: ({ href, children }) => (
+                              <a
+                                href={href}
+                                rel="noreferrer noopener"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  if (href && /^https?:\/\//i.test(href))
+                                    void window.agentOS
+                                      .openExternal(href)
+                                      .catch((err: unknown) =>
+                                        setError(err instanceof Error ? err.message : String(err)),
+                                      );
+                                }}
+                              >
+                                {children}
+                              </a>
+                            ),
+                          }}
+                        >
+                          {item.content}
+                        </ReactMarkdown>
+                      ) : (
+                        item.content
+                      )}
+                    </div>
                   </div>
                 )}
               </article>
@@ -4384,7 +4670,7 @@ function DesktopRequired() {
     <div className="app-shell">
       <p className="desktop-required">
         The chat UI runs in the Electron window. Keep this Vite server running, then start Electron
-        from the repository root with <code>pnpm --filter @agentOS/desktop electron</code>.
+        from the repository root with <code>pnpm --filter @agentos/desktop electron</code>.
       </p>
     </div>
   );
@@ -4420,7 +4706,7 @@ const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("root mount node is missing");
 createRoot(rootElement).render(
   <React.StrictMode>
-    <Theme appearance="dark" accentColor="blue" grayColor="slate" radius="large">
+    <Theme appearance="dark" accentColor="green" grayColor="slate" radius="large">
       {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
     </Theme>
   </React.StrictMode>,

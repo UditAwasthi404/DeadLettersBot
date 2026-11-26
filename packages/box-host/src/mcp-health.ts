@@ -1,6 +1,6 @@
-import { decryptToken } from "@agentOS/connectors";
-import { mcpServers } from "@agentOS/shared";
-import { discoverMcpTools } from "@agentOS/tools";
+import { decryptToken } from "@agentos/connectors";
+import { mcpServers } from "@agentos/shared";
+import { discoverMcpTools } from "@agentos/tools";
 import { and, eq } from "drizzle-orm";
 import type { GatewayDeps } from "./gateway.ts";
 import { loggedError, logger } from "./logger.ts";

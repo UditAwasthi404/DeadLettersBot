@@ -1,5 +1,5 @@
-import type { Database } from "@agentOS/shared";
-import { memories } from "@agentOS/shared";
+import type { Database } from "@agentos/shared";
+import { memories } from "@agentos/shared";
 import { and, asc, eq, isNull, or } from "drizzle-orm";
 
 export type MemoryScope = "agent" | "user" | "project";

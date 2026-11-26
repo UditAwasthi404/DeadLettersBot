@@ -1,6 +1,6 @@
 /** Dev/mock provider for INFERENCE_MOCK=1 (BUILD_PLAN credential-check mock mode). */
 
-import type { ModelMessage } from "@agentOS/shared";
+import type { ModelMessage } from "@agentos/shared";
 import type {
   InferencePurpose,
   InferenceSession,

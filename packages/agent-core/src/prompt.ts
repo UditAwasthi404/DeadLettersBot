@@ -1,8 +1,8 @@
 /** Context assembly (REQ-P01–P10). Section order from AGENTS.md §2.4. */
 
 import { createHash } from "node:crypto";
-import type { InferenceTool } from "@agentOS/inference";
-import type { Attachment, Bot, ModelMessage } from "@agentOS/shared";
+import type { InferenceTool } from "@agentos/inference";
+import type { Attachment, Bot, ModelMessage } from "@agentos/shared";
 
 export interface PromptSections {
   base: string;

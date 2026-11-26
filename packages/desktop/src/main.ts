@@ -45,7 +45,7 @@ function createWindow(): void {
     height: 840,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: "#1c1c1e",
+    backgroundColor: "#07070b",
     ...(darwin
       ? {
           titleBarStyle: "hiddenInset" as const,
@@ -53,7 +53,7 @@ function createWindow(): void {
         }
       : {
           titleBarStyle: "hidden" as const,
-          titleBarOverlay: { color: "#1c1c1e", symbolColor: "#f5f5f7", height: 52 },
+          titleBarOverlay: { color: "#07070b", symbolColor: "#f5f5f7", height: 52 },
         }),
     webPreferences: {
       preload: join(__dirname, "preload.js"),
@@ -90,7 +90,7 @@ function createWindow(): void {
               minHeight: 600,
               resizable: true,
               autoHideMenuBar: true,
-              backgroundColor: "#1c1c1e",
+              backgroundColor: "#07070b",
               parent: windowRef ?? undefined,
               modal: false,
               webPreferences: {
@@ -440,6 +440,17 @@ ipcMain.handle("vnc:close", () => {
 
 ipcMain.handle("app:restart", () => {
   autoUpdater.quitAndInstall();
+});
+
+ipcMain.handle("app:open-external", async (event, value: unknown) => {
+  if (event.sender !== windowRef?.webContents)
+    throw new Error("external links are unavailable here");
+  const url = String(value ?? "");
+  if (url.length > 2048) throw new Error("external link is too long");
+  const target = new URL(url);
+  if (!["http:", "https:"].includes(target.protocol) || target.username || target.password)
+    throw new Error("only public web links can be opened");
+  await shell.openExternal(target.toString());
 });
 
 ipcMain.handle("local:setPolicy", (_event, botId: string, policy: LocalMachineAccess) => {

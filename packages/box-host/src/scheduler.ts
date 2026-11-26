@@ -1,6 +1,6 @@
 /** 3-lane run scheduler via Redis sorted sets (REQ-H10, H11, H12). */
 
-import type { RedisClient } from "@agentOS/shared";
+import type { RedisClient } from "@agentos/shared";
 
 export type SchedulerLane = "user" | "agent" | "background";
 

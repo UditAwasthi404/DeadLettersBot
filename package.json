@@ -17,8 +17,9 @@
     "lint:fix": "biome check --write .",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "db:generate": "pnpm --filter @agentOS/shared db:generate",
-    "db:migrate": "pnpm --filter @agentOS/shared db:migrate"
+    "api:types": "pnpm --filter @agentos/sdk generate:api-types",
+    "db:generate": "pnpm --filter @agentos/shared db:generate",
+    "db:migrate": "pnpm --filter @agentos/shared db:migrate"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

@@ -1,6 +1,6 @@
 /** Anthropic provider — claude-sonnet-4, same InferenceSession interface. */
 
-import type { ModelMessage } from "@agentOS/shared";
+import type { ModelMessage } from "@agentos/shared";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { stepCountIs, streamText } from "ai";
 import { toCoreMessages, toToolSet } from "../convert.ts";

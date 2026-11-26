@@ -1,5 +1,5 @@
 {
-  "name": "@agentOS/box-host",
+  "name": "@agentos/box-host",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -9,13 +9,13 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@agentOS/agent-core": "workspace:*",
-    "@agentOS/connectors": "workspace:*",
-    "@agentOS/inference": "workspace:*",
-    "@agentOS/routines": "workspace:*",
-    "@agentOS/shared": "workspace:*",
-    "@agentOS/tools": "workspace:*",
-    "@agentOS/vm-manager": "workspace:*",
+    "@agentos/agent-core": "workspace:*",
+    "@agentos/connectors": "workspace:*",
+    "@agentos/inference": "workspace:*",
+    "@agentos/routines": "workspace:*",
+    "@agentos/shared": "workspace:*",
+    "@agentos/tools": "workspace:*",
+    "@agentos/vm-manager": "workspace:*",
     "@clerk/backend": "3.26.5",
     "@hono/zod-openapi": "1.6.3",
     "@opentelemetry/api": "1.10.0",

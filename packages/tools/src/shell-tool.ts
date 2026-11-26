@@ -1,4 +1,4 @@
-import type { VMManager } from "@agentOS/vm-manager";
+import type { VMManager } from "@agentos/vm-manager";
 import { shellEscape } from "./shell-escape.ts";
 
 const DEFAULT_SHELL_TIMEOUT_MS = 120_000;

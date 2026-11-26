@@ -141,6 +141,18 @@ export function validateRuntimeConfig(): void {
   positiveInteger("VM_CPU_NANOS", 2_000_000_000, errors, Number.MAX_SAFE_INTEGER);
   positiveInteger("VM_PIDS_LIMIT", 512, errors, 1_000_000);
   positiveInteger("VM_IDLE_TIMEOUT_MS", 600_000, errors, Number.MAX_SAFE_INTEGER);
+  const vmBackend = cleanedEnv("VM_BACKEND");
+  if (vmBackend && !["docker", "kubernetes", "noop"].includes(vmBackend))
+    errors.push("VM_BACKEND must be docker, kubernetes, or noop (default docker)");
+  if (production && !vmBackend)
+    errors.push("VM_BACKEND must be set to docker or kubernetes in production");
+  if (production && vmBackend === "noop")
+    errors.push("VM_BACKEND=noop cannot be used in production");
+  if (
+    process.env.VM_K8S_STORAGE_SIZE &&
+    !/^[1-9]\d*(?:Ki|Mi|Gi|Ti|K|M|G|T)?$/.test(process.env.VM_K8S_STORAGE_SIZE)
+  )
+    errors.push("VM_K8S_STORAGE_SIZE must be a positive Kubernetes storage quantity");
   positiveInteger("WEBHOOK_MAX_ATTEMPTS", 6, errors, 10);
   nonNegativeInteger("WEBHOOK_DELIVERY_RETENTION_DAYS", 30, errors, 3650);
   booleanValue("INFERENCE_MOCK", errors);
@@ -153,8 +165,15 @@ export function validateRuntimeConfig(): void {
   booleanValue("BOX_HOSTED_FOR_AUTOMATION_SYNC", errors);
   booleanValue("CLERK_MOCK", errors);
   const vmEgressPolicy = cleanedEnv("VM_EGRESS_POLICY");
-  if (vmEgressPolicy && vmEgressPolicy !== "allow_all" && vmEgressPolicy !== "deny_all")
-    errors.push("VM_EGRESS_POLICY must be allow_all or deny_all (default allow_all)");
+  if (
+    vmEgressPolicy &&
+    vmEgressPolicy !== "allow_all" &&
+    vmEgressPolicy !== "deny_all" &&
+    vmEgressPolicy !== "allowlist"
+  )
+    errors.push("VM_EGRESS_POLICY must be allow_all, deny_all, or allowlist (default allow_all)");
+  if (vmEgressPolicy === "allowlist" && vmBackend !== "kubernetes")
+    errors.push("VM_EGRESS_POLICY=allowlist is supported only by the Kubernetes backend");
   if (process.env.SUBAGENT_STALL_MS !== undefined && process.env.SUBAGENT_STALL_MS !== "") {
     const stallMs = Number(process.env.SUBAGENT_STALL_MS);
     if (!Number.isInteger(stallMs) || stallMs < 1_000 || stallMs > 86_400_000)

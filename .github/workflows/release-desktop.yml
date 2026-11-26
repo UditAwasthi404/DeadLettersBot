@@ -34,15 +34,15 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node scripts/set-desktop-version.mjs
-      - run: pnpm --filter @agentOS/desktop build
+      - run: pnpm --filter @agentos/desktop build
       - name: Package universal macOS installer
         if: runner.os == 'macOS'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: pnpm --filter @agentOS/desktop exec electron-builder --mac dmg zip --universal --publish never
+        run: pnpm --filter @agentos/desktop exec electron-builder --mac dmg zip --universal --publish never
       - name: Package Windows installer
         if: runner.os == 'Windows'
-        run: pnpm --filter @agentOS/desktop exec electron-builder --win nsis --x64 --publish never
+        run: pnpm --filter @agentos/desktop exec electron-builder --win nsis --x64 --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

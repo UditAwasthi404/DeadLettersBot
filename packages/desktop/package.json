@@ -1,5 +1,5 @@
 {
-  "name": "@agentOS/desktop",
+  "name": "@agentos/desktop",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -21,6 +21,8 @@
     "lucide-react": "1.79.0",
     "react": "19.0.3",
     "react-dom": "19.0.3",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "ws": "8.21.0"
   },
   "devDependencies": {
@@ -41,12 +43,20 @@
     "directories": {
       "output": "release"
     },
-    "files": ["dist/**", "dist-electron/**", "package.json"],
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
     "mac": {
-      "target": ["dmg"]
+      "target": [
+        "dmg"
+      ]
     },
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     },
     "nsis": {
       "oneClick": false,

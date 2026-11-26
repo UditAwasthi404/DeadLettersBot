@@ -1,6 +1,6 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { decryptToken } from "@agentOS/connectors";
-import { type Database, webhookDeliveries, webhookSubscriptions } from "@agentOS/shared";
+import { decryptToken } from "@agentos/connectors";
+import { type Database, webhookDeliveries, webhookSubscriptions } from "@agentos/shared";
 import { and, asc, eq, lte, or, sql } from "drizzle-orm";
 import { loggedError, logger } from "./logger.ts";
 

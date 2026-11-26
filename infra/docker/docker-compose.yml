@@ -31,6 +31,7 @@ services:
       VM_MEMORY_BYTES: ${VM_MEMORY_BYTES:-2147483648}
       VM_CPU_NANOS: ${VM_CPU_NANOS:-2000000000}
       VM_PIDS_LIMIT: ${VM_PIDS_LIMIT:-512}
+      VM_BACKEND: ${VM_BACKEND:-docker}
       VM_EGRESS_POLICY: ${VM_EGRESS_POLICY:-allow_all}
       VM_IMAGE: ${VM_IMAGE:-agentos/vm-manager}
       VM_HOST_IN_DOCKER: "1"

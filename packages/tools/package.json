@@ -1,5 +1,5 @@
 {
-  "name": "@agentOS/tools",
+  "name": "@agentos/tools",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -11,8 +11,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@agentOS/shared": "workspace:*",
-    "@agentOS/vm-manager": "workspace:*",
+    "@agentos/shared": "workspace:*",
+    "@agentos/vm-manager": "workspace:*",
     "ipaddr.js": "2.5.0",
     "parse5": "8.1.1",
     "playwright": "1.55.1",

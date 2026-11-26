@@ -213,7 +213,7 @@ export const memoryEvidence = pgTable(
   ],
 );
 
-/** Conflicting automatic facts are queued for an explicit user decision. */
+/** Proposed memory updates/deletions are queued for an explicit user decision. */
 export const memoryReviewSuggestions = pgTable(
   "memory_review_suggestions",
   {
@@ -230,7 +230,10 @@ export const memoryReviewSuggestions = pgTable(
     turnId: uuid("turn_id")
       .notNull()
       .references(() => turns.id),
-    proposedContent: text("proposed_content").notNull(),
+    action: text("action").$type<"update" | "delete">().notNull().default("update"),
+    existingContent: text("existing_content").notNull(),
+    proposedContent: text("proposed_content"),
+    reason: text("reason"),
     status: text("status")
       .$type<"pending" | "accepted" | "rejected">()
       .notNull()

@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import Docker from "dockerode";
 import type { ExecResult, VMInfo, VMManager, VMStats, VMStatus } from "./interface.ts";
+import { KubernetesVMManager } from "./kubernetes.ts";
 
 const IMAGE = process.env.VM_IMAGE ?? "agentos/vm-manager";
 const MAX_EXEC_OUTPUT_BYTES = 1_048_576;
@@ -103,6 +104,8 @@ export class DockerVMManager implements VMManager {
   }
 
   private async ensureAccountNetwork(accountId: string): Promise<string> {
+    if (process.env.VM_EGRESS_POLICY === "allowlist")
+      throw new Error("VM_EGRESS_POLICY=allowlist is only supported by the Kubernetes backend");
     const name = this.accountNetworkName(accountId);
     const isolated = process.env.VM_EGRESS_POLICY === "deny_all";
     let network: Docker.Network;
@@ -459,19 +462,37 @@ export class DockerVMManager implements VMManager {
   }
 }
 
-/** Prefer Docker when the socket looks available; otherwise NoopVMManager. */
-export function createVMManager(): VMManager {
-  try {
-    if (process.platform !== "win32") {
-      const raw = process.env.DOCKER_HOST ?? "unix:///var/run/docker.sock";
-      const sock = raw.startsWith("unix://") ? raw.slice("unix://".length) : raw;
-      if (!existsSync(sock)) {
-        console.warn("[vm-manager] Docker socket unavailable; using NoopVMManager");
-        return new NoopVMManager();
-      }
+/** Verify the selected runtime before serving requests; only development may use NoopVMManager. */
+export async function createVMManager(): Promise<VMManager> {
+  const backend = process.env.VM_BACKEND ?? "docker";
+  if (backend === "kubernetes") {
+    const manager = new KubernetesVMManager();
+    try {
+      await manager.listVMs();
+      return manager;
+    } catch (err) {
+      throw new Error(
+        `Kubernetes VM backend is unavailable: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
     }
-    return new DockerVMManager(new Docker());
+  }
+  if (backend === "noop") {
+    if (process.env.NODE_ENV === "production")
+      throw new Error("VM_BACKEND=noop cannot be used in production");
+    return new NoopVMManager();
+  }
+  if (backend !== "docker") throw new Error("VM_BACKEND must be docker, kubernetes, or noop");
+  const docker = new Docker();
+  try {
+    await docker.ping();
+    return new DockerVMManager(docker);
   } catch (err) {
+    if (process.env.NODE_ENV === "production")
+      throw new Error(
+        `Docker VM backend is unavailable: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
     console.warn(
       "[vm-manager] Docker socket unavailable; using NoopVMManager",
       err instanceof Error ? err.message : err,

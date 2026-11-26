@@ -12,12 +12,30 @@ service:
   type: ClusterIP
   port: 8787
 
+networkPolicy:
+  enabled: false
+  # Namespace labels for the ingress controller allowed to reach box-host.
+  ingressNamespaceSelector: {}
+
 agent:
   stepBudget: 50
   contextTokens: 128000
   memorySynthesisEnabled: false
   mcpStrictMode: false
   dynamicToolOffloading: true
+  vmEgressPolicy: deny_all
+  vmEgressAllowlist: []
+  vmMemoryBytes: 2147483648
+  vmCpuNanos: 2000000000
+
+vmManager:
+  image:
+    repository: agentos/vm-manager
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+    pullSecret: ""
+  storageSize: 20Gi
+  storageClassName: ""
 
 ingress:
   enabled: false

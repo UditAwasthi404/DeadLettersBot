@@ -2,7 +2,7 @@
 
 ## Development setup
 
-Install Node.js 22, pnpm 9.15.0, and Bun 1.1 or newer. Run `pnpm install`, then use `pnpm typecheck` and `pnpm lint` before opening a pull request. Local infrastructure services are provided by `infra/docker/docker-compose.yml`.
+Install Node.js 22, pnpm 9.15.0, and Bun 1.1 or newer. Run `pnpm install`, then use `pnpm typecheck` and `pnpm lint` before opening a pull request. When changing API routes, run `pnpm api:types` to refresh the OpenAPI document and generated SDK operation types; CI checks for stale output. Local infrastructure services are provided by `infra/docker/docker-compose.yml`.
 
 ## Changes
 

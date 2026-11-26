@@ -1,5 +1,5 @@
 {
-  "name": "@agentOS/vm-manager",
+  "name": "@agentos/vm-manager",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -11,7 +11,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@agentOS/shared": "workspace:*",
+    "@agentos/shared": "workspace:*",
+    "@kubernetes/client-node": "1.4.0",
     "dockerode": "4.0.12",
     "drizzle-orm": "0.45.2"
   },

@@ -1,20 +1,38 @@
-export interface BotSummary {
-  id: string;
-  name: string;
-  role: "main" | "peer" | "chief_of_staff" | "subagent";
+export type {
+  operations as AgentOSApiOperations,
+  paths as AgentOSApiPaths,
+} from "./openapi.generated.js";
+
+import type { operations as ApiOperations } from "./openapi.generated.js";
+
+type OperationResponses<Operation> = Operation extends { responses: infer Responses }
+  ? Responses
+  : never;
+type JsonBody<Content> = Content extends { "application/json": infer Body } ? Body : never;
+type OperationRequest<Operation> = Operation extends {
+  requestBody: { content: infer Content };
 }
-export interface BotRecord extends BotSummary {
-  accountId: string;
-  systemPrompt: string;
-  profileText: string;
-  skills: string[];
-  tools: string[];
-  memorySettings: Record<string, unknown>;
-  approvalSettings: Record<string, unknown>;
-  inferenceSettings: { providerId?: string; model?: string };
-  createdAt: string;
-  updatedAt: string;
-}
+  ? JsonBody<Content>
+  : never;
+type OperationResponse<
+  Operation,
+  Status extends keyof OperationResponses<Operation>,
+> = OperationResponses<Operation>[Status] extends { content: infer Content }
+  ? JsonBody<Content>
+  : never;
+
+/** Operation IDs and bodies generated from the host's OpenAPI contract. */
+export type AgentOSApiOperationId = keyof ApiOperations;
+export type AgentOSApiRequestBody<OperationId extends AgentOSApiOperationId> = OperationRequest<
+  ApiOperations[OperationId]
+>;
+export type AgentOSApiResponseBody<
+  OperationId extends AgentOSApiOperationId,
+  Status extends keyof OperationResponses<ApiOperations[OperationId]>,
+> = OperationResponse<ApiOperations[OperationId], Status>;
+
+export type BotRecord = AgentOSApiResponseBody<"postV1Bots", 201>;
+export type BotSummary = Pick<BotRecord, "id" | "name" | "role">;
 export interface ChatHistoryItem {
   id: string;
   runId: string;
@@ -128,6 +146,8 @@ export interface WebhookSubscription {
   url: string;
   events: Array<"turn.settled" | "routine.completed" | "approval.required">;
   createdAt: string;
+  lastUsedAt?: string | null;
+  revokedAt?: string | null;
 }
 export interface WebhookDeliveryRecord {
   id: string;
@@ -206,9 +226,14 @@ export interface BootstrapResult {
   expiresInSeconds: number;
 }
 export type ApiKeyScope = "read-only" | "read-write" | "admin";
-export interface SessionResult extends BootstrapResult {
-  scopes: ApiKeyScope[];
-}
+export type SessionResult =
+  | (BootstrapResult & { scopes: ApiKeyScope[] })
+  | {
+      accountId: string;
+      scopes: ApiKeyScope[];
+      provider: string;
+      expiresInSeconds: number | null;
+    };
 export interface GatewayFrame {
   type: string;
   [key: string]: unknown;
@@ -310,7 +335,7 @@ export class AgentOSClient {
     return this.request("/v1/inference/providers");
   }
 
-  getBot(botId: string): Promise<BotRecord> {
+  getBot(botId: string): Promise<AgentOSApiResponseBody<"getV1BotsByBotId", 200>> {
     return this.request(`/v1/bots/${encodeURIComponent(botId)}`);
   }
 
@@ -328,31 +353,16 @@ export class AgentOSClient {
     });
   }
 
-  createBot(input: {
-    name: string;
-    role?: "main" | "peer";
-    systemPrompt?: string;
-    profileText?: string;
-  }): Promise<BotRecord> {
+  createBot(
+    input: AgentOSApiRequestBody<"postV1Bots">,
+  ): Promise<AgentOSApiResponseBody<"postV1Bots", 201>> {
     return this.request("/v1/bots", { method: "POST", body: input });
   }
 
   updateBot(
     botId: string,
-    input: Partial<
-      Pick<
-        BotRecord,
-        | "name"
-        | "systemPrompt"
-        | "profileText"
-        | "tools"
-        | "skills"
-        | "memorySettings"
-        | "approvalSettings"
-        | "inferenceSettings"
-      >
-    >,
-  ): Promise<BotRecord> {
+    input: AgentOSApiRequestBody<"patchV1BotsByBotId">,
+  ): Promise<AgentOSApiResponseBody<"patchV1BotsByBotId", 200>> {
     return this.request(`/v1/bots/${encodeURIComponent(botId)}`, { method: "PATCH", body: input });
   }
 
@@ -464,7 +474,10 @@ export class AgentOSClient {
     );
   }
 
-  assignSkill(skillId: string, botId: string): Promise<SkillRecord> {
+  assignSkill(
+    skillId: string,
+    botId: string,
+  ): Promise<SkillRecord & { copiedFromSkillId: string }> {
     return this.request(`/v1/skills/${encodeURIComponent(skillId)}/assign`, {
       method: "POST",
       body: { botId },
@@ -539,8 +552,12 @@ export class AgentOSClient {
     return this.request("/v1/automation/sync", { method: "POST" });
   }
 
-  listAuditLog(limit = 100): Promise<AuditLogRecord[]> {
-    return this.request(`/v1/audit-log?limit=${encodeURIComponent(String(limit))}`);
+  listAuditLog(params: { limit?: number; offset?: number } = {}): Promise<AuditLogRecord[]> {
+    const query = new URLSearchParams();
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.offset !== undefined) query.set("offset", String(params.offset));
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.request(`/v1/audit-log${suffix}`);
   }
 
   listApiKeys(): Promise<ApiKeyRecord[]> {

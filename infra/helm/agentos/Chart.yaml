@@ -2,6 +2,7 @@ apiVersion: v2
 name: agentos
 description: Self-hosted AgentOS gateway with PostgreSQL, Redis, and S3-compatible blob storage
 type: application
+kubeVersion: ">=1.25.0-0"
 version: 0.1.0
 appVersion: "0.1.0"
 keywords:

@@ -36,6 +36,8 @@ const Bot = z.object({
   approvalSettings: ApprovalSettings,
   localMachineAccess: LocalMachineAccess,
   retainData: z.boolean(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
 });
 const ChatHistoryItem = z.object({
   id: z.string(),
@@ -127,6 +129,7 @@ const RoutineTrigger = z.union([
 ]);
 const Routine = z.object({
   id: z.string(),
+  accountId: z.string(),
   botId: z.string(),
   skillId: z.string(),
   name: z.string(),
@@ -135,11 +138,14 @@ const Routine = z.object({
   onError: z.enum(["notify_user", "retry", "pause"]),
   lastTriggeredAt: z.string().nullable(),
   nextRunAt: z.string().nullable().optional(),
+  cronTimezone: z.string().nullable().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
 });
 const CreateRoutine = z.object({
   botId: z.string(),
   skillId: z.string(),
-  name: z.string(),
+  name: z.string().trim().min(1).max(120),
   trigger: RoutineTrigger,
   enabled: z.boolean().optional(),
   onError: z.enum(["notify_user", "retry", "pause"]).optional(),
@@ -184,6 +190,8 @@ const ApiKey = z.object({
   keyPrefix: z.string(),
   scopes: z.array(z.string()),
   createdAt: z.string(),
+  lastUsedAt: z.string().nullable().optional(),
+  revokedAt: z.string().nullable().optional(),
 });
 const CreateApiKey = z.object({
   name: z.string(),
@@ -206,10 +214,25 @@ type ApiRouteSpec = {
   status?: number;
   security?: Array<Record<string, string[]>>;
   params?: z.ZodType;
+  query?: z.ZodType;
   body?: z.ZodType;
 };
 
 const apiRouteSpecs: ApiRouteSpec[] = [];
+
+function routeOperationId(method: ApiRouteSpec["method"], path: string): string {
+  const segments = path
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => {
+      if (segment.startsWith("{") && segment.endsWith("}")) {
+        const parameter = segment.slice(1, -1);
+        return `By${parameter.charAt(0).toUpperCase()}${parameter.slice(1)}`;
+      }
+      return segment.replace(/-([a-z0-9])/g, (_match, letter: string) => letter.toUpperCase());
+    });
+  return `${method}${segments.map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1)).join("")}`;
+}
 
 function add(spec: ApiRouteSpec) {
   apiRouteSpecs.push(spec);
@@ -217,10 +240,12 @@ function add(spec: ApiRouteSpec) {
   const route = createRoute({
     method: spec.method,
     path: spec.path,
+    operationId: routeOperationId(spec.method, spec.path),
     summary: spec.summary,
     security: spec.security ?? [{ bearerAuth: [] }],
     request: {
       ...(spec.params ? { params: spec.params } : {}),
+      ...(spec.query ? { query: spec.query } : {}),
       ...(spec.body
         ? { body: { content: { "application/json": { schema: spec.body } }, required: true } }
         : {}),
@@ -236,6 +261,10 @@ function add(spec: ApiRouteSpec) {
       },
       401: {
         description: "Unauthorized",
+        content: { "application/json": { schema: ErrorBody } },
+      },
+      default: {
+        description: "Request failed",
         content: { "application/json": { schema: ErrorBody } },
       },
     },
@@ -272,11 +301,33 @@ export function openApiRequestBodyRequired(method: string, path: string): boolea
   return Boolean(findApiRoute(method, path)?.body);
 }
 
+/** Validate documented success responses without exposing payload details to API clients. */
+export function validateOpenApiResponse(
+  method: string,
+  path: string,
+  status: number,
+  body: unknown,
+): { matched: boolean; error?: string } {
+  const route = findApiRoute(method, path);
+  if (!route) return { matched: false };
+  const schema =
+    status >= 400 ? ErrorBody : status === (route.status ?? 200) ? route.response : null;
+  if (!schema) return { matched: false };
+  const result = schema.safeParse(body);
+  if (result.success) return { matched: true };
+  const issues = result.error.issues.slice(0, 8).map((issue) => {
+    const field = issue.path.map(String).join(".");
+    return field ? `${field}: ${issue.message}` : issue.message;
+  });
+  return { matched: true, error: issues.join("; ") };
+}
+
 /** Validate documented request parameters and bodies before gateway dispatch. */
 export function validateOpenApiRequest(
   method: string,
   path: string,
   body: unknown,
+  query: URLSearchParams,
 ): { matched: boolean; error?: string } {
   const route = findApiRoute(method, path);
   if (!route) return { matched: false };
@@ -285,6 +336,27 @@ export function validateOpenApiRequest(
   if (route.params) {
     const parsedParams = route.params.safeParse(Object.fromEntries(parameters));
     if (!parsedParams.success) return { matched: true, error: "path parameters are invalid" };
+  }
+  if (route.query) {
+    const queryValues: Record<string, string> = {};
+    for (const key of new Set(query.keys())) {
+      const values = query.getAll(key);
+      if (values.length > 1)
+        return { matched: true, error: `query.${key} must be provided only once` };
+      const value = values[0];
+      if (value !== undefined) queryValues[key] = value;
+    }
+    const parsedQuery = route.query.safeParse(queryValues);
+    if (!parsedQuery.success) {
+      const issue = parsedQuery.error.issues[0];
+      const field = issue?.path.map(String).join(".");
+      return {
+        matched: true,
+        error: field
+          ? `query.${field} ${issue?.message ?? "is invalid"}`
+          : (issue?.message ?? "query parameters are invalid"),
+      };
+    }
   }
   if (route.body) {
     const parsedBody = route.body.safeParse(body);
@@ -417,15 +489,17 @@ add({
 add({
   method: "get",
   path: "/v1/bots/{botId}/memory/reviews",
-  summary: "List pending memory conflict suggestions",
+  summary: "List pending memory update or deletion suggestions",
   params: botId,
   response: z.array(
     z.object({
       id: z.string(),
       memoryId: z.string(),
       turnId: z.string(),
+      action: z.enum(["update", "delete"]),
       existingContent: z.string(),
-      proposedContent: z.string(),
+      proposedContent: z.string().nullable(),
+      reason: z.string().nullable(),
       createdAt: z.string(),
     }),
   ),
@@ -433,7 +507,7 @@ add({
 add({
   method: "post",
   path: "/v1/bots/{botId}/memory/reviews/{reviewId}",
-  summary: "Accept or reject a memory conflict suggestion",
+  summary: "Accept or reject a memory change suggestion",
   params: memoryReviewId,
   body: z.object({ action: z.enum(["accept", "reject"]) }),
   response: z.object({ resolved: z.boolean(), action: z.enum(["accept", "reject"]) }),
@@ -556,6 +630,14 @@ add({
   method: "get",
   path: "/v1/connectors/oauth/callback",
   summary: "Complete an OAuth callback",
+  query: z
+    .object({
+      state: z.string().optional(),
+      code: z.string().optional(),
+      error: z.string().optional(),
+      error_description: z.string().optional(),
+    })
+    .passthrough(),
   response: z.object({}),
   security: publicRoute,
 });
@@ -584,6 +666,10 @@ add({
   method: "get",
   path: "/v1/audit-log",
   summary: "Read the audit log",
+  query: z.object({
+    limit: z.string().regex(/^\d+$/).optional(),
+    offset: z.string().regex(/^\d+$/).optional(),
+  }),
   response: z.array(AuditEntry),
 });
 add({ method: "get", path: "/v1/api-keys", summary: "List API keys", response: z.array(ApiKey) });
@@ -624,7 +710,13 @@ add({
   method: "post",
   path: "/v1/auth/session",
   summary: "Mint a replacement JWT",
-  response: z.object({ token: z.string(), scopes: z.array(z.string()) }),
+  response: z.object({
+    accountId: z.string(),
+    token: z.string().optional(),
+    scopes: z.array(z.string()),
+    provider: z.string().optional(),
+    expiresInSeconds: z.number().nullable().optional(),
+  }),
 });
 add({
   method: "post",
@@ -693,6 +785,7 @@ add({
   method: "get",
   path: "/v1/webhook-deliveries",
   summary: "List outbound webhook deliveries",
+  query: z.object({ limit: z.string().regex(/^\d+$/).optional() }),
   response: z.array(z.object({ id: z.string(), status: z.string() })),
 });
 add({
@@ -714,7 +807,7 @@ add({
   summary: "Copy a skill onto a bot",
   params: skillId,
   body: z.object({ botId: z.string() }),
-  response: Skill,
+  response: Skill.extend({ copiedFromSkillId: z.string() }),
   status: 201,
 });
 add({

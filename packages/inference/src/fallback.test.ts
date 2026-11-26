@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ModelMessage } from "@agentOS/shared";
+import type { ModelMessage } from "@agentos/shared";
 import { FallbackSession, isRetryableInferenceError } from "./fallback.ts";
 import type { InferenceSession, InferenceStreamEvent } from "./session.ts";
 

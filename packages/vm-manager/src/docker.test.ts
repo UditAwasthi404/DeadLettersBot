@@ -3,7 +3,7 @@ import { NoopVMManager, createVMManager } from "./docker.ts";
 
 describe("createVMManager", () => {
   test("returns a VMManager (Docker or Noop)", async () => {
-    const mgr = createVMManager();
+    const mgr = await createVMManager();
     const info = await mgr.getVMStatus("missing");
     expect(info.status).toBe("terminated");
   });

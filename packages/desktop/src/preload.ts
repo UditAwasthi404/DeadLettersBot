@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("agentOS", {
     ipcRenderer.invoke("gateway:restore") as Promise<{ baseUrl: string; token: string } | null>,
   send: (frame: unknown) => ipcRenderer.invoke("gateway:send", frame),
   disconnect: () => ipcRenderer.invoke("gateway:disconnect"),
+  openExternal: (url: string) => ipcRenderer.invoke("app:open-external", url),
   openVnc: (botId: string) => ipcRenderer.invoke("vnc:open", botId),
   sendVnc: (bytes: Uint8Array) => ipcRenderer.invoke("vnc:send", bytes),
   closeVnc: () => ipcRenderer.invoke("vnc:close"),

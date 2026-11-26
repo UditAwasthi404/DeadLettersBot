@@ -5,7 +5,7 @@
  * keeps the local JWT_SECRET tokens the tests and the desktop fallback use.
  */
 
-import { type Database, accounts } from "@agentOS/shared";
+import { type Database, accounts } from "@agentos/shared";
 import { createClerkClient, verifyToken } from "@clerk/backend";
 import { eq } from "drizzle-orm";
 import { sign, verify } from "hono/jwt";

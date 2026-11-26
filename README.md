@@ -38,11 +38,11 @@ The chat UI is the Electron desktop app. Install dependencies, then run these in
 
 ```sh
 pnpm install
-pnpm --filter @agentOS/desktop dev
+pnpm --filter @agentos/desktop dev
 ```
 
 ```sh
-pnpm --filter @agentOS/desktop electron
+pnpm --filter @agentos/desktop electron
 ```
 
 In the app, enter your name and email and choose Create account. That creates the first account on the gateway, signs you in, and keeps the session on this computer. The route closes after the first account exists; a later setup uses **I already have a token**. Use ＋ to create a bot. The same session authorizes the `/v1` API and the `/ws` WebSocket.
@@ -87,12 +87,12 @@ Then start the desktop app in two PowerShell windows:
 ```powershell
 Set-Location D:\CODE\DeadLettersBot
 pnpm install
-pnpm --filter @agentOS/desktop dev
+pnpm --filter @agentos/desktop dev
 ```
 
 ```powershell
 Set-Location D:\CODE\DeadLettersBot
-pnpm --filter @agentOS/desktop electron
+pnpm --filter @agentos/desktop electron
 ```
 
 The gateway field in the app should stay `http://127.0.0.1:8787`. The first Clerk sign-in creates the local account and keeps that user's connectors and bots.

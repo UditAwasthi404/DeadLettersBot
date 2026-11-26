@@ -10,7 +10,7 @@ import {
   ollamaProvider,
   openaiProvider,
   xaiProvider,
-} from "@agentOS/inference";
+} from "@agentos/inference";
 
 const REGISTRY: Record<string, ProviderFactory> = {
   openai: openaiProvider,

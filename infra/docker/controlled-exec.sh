@@ -13,13 +13,32 @@ child_pid=""
 
 stop_process_group() {
   trap - TERM INT HUP
+  if [[ ! -s "$pid_file" && "$child_pid" =~ ^[0-9]+$ ]]; then
+    for _ in $(seq 1 20); do
+      [[ -s "$pid_file" ]] && break
+      kill -0 "$child_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+
+  local process_group=""
   if [[ -s "$pid_file" ]]; then
     read -r process_group < "$pid_file" || true
-    if [[ "$process_group" =~ ^[0-9]+$ ]]; then
-      kill -TERM -- "-$process_group" 2>/dev/null || true
-    fi
+  fi
+  if [[ "$process_group" =~ ^[0-9]+$ ]]; then
+    kill -TERM -- "-$process_group" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 -- "-$process_group" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL -- "-$process_group" 2>/dev/null || true
   elif [[ "$child_pid" =~ ^[0-9]+$ ]]; then
     kill -TERM "$child_pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$child_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$child_pid" 2>/dev/null || true
   fi
   if [[ "$child_pid" =~ ^[0-9]+$ ]]; then wait "$child_pid" 2>/dev/null || true; fi
   rm -f "$pid_file"

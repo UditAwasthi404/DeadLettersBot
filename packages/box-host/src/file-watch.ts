@@ -1,4 +1,4 @@
-import { routines } from "@agentOS/shared";
+import { routines } from "@agentos/shared";
 import { eq } from "drizzle-orm";
 import { createDebouncer } from "./debounce.ts";
 import type { GatewayDeps } from "./gateway.ts";

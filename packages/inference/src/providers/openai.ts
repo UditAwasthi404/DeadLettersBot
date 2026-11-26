@@ -1,6 +1,6 @@
 /** OpenAI provider — gpt-4o, streaming + tool calls (REQ-I01/I02). */
 
-import type { ModelMessage } from "@agentOS/shared";
+import type { ModelMessage } from "@agentos/shared";
 import { createOpenAI } from "@ai-sdk/openai";
 import { stepCountIs, streamText } from "ai";
 import { toCoreMessages, toToolSet } from "../convert.ts";

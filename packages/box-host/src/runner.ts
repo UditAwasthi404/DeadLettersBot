@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 /**
  * Turn shell + step loop (REQ-H14–H19, REQ-A01/A02, REQ-H13).
- * Context assembly + tool dispatch via @agentOS/agent-core.
+ * Context assembly + tool dispatch via @agentos/agent-core.
  */
 import {
   STATIC_CATALOG,
@@ -13,7 +13,7 @@ import {
   renderSystemPrompt,
   toInferenceTool,
   wrapUntrusted,
-} from "@agentOS/agent-core";
+} from "@agentos/agent-core";
 import {
   type InferenceSession,
   type InferenceTool,
@@ -22,7 +22,7 @@ import {
   buildSummaryCarrier,
   compactionStyleForProvider,
   observeInferenceStream,
-} from "@agentOS/inference";
+} from "@agentos/inference";
 import {
   type Attachment,
   BUCKETS,
@@ -50,9 +50,9 @@ import {
   steps,
   subagents,
   turns,
-} from "@agentOS/shared";
-import { BrowserSession } from "@agentOS/tools";
-import type { VMManager } from "@agentOS/vm-manager";
+} from "@agentos/shared";
+import { BrowserSession } from "@agentos/tools";
+import type { VMManager } from "@agentos/vm-manager";
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import { and, desc, eq, notInArray } from "drizzle-orm";
 import { describeConnectedConnectors } from "./connector-availability.ts";
@@ -127,7 +127,12 @@ export interface RunContext {
     action: string,
     params: Record<string, unknown>,
   ) => Promise<unknown>;
-  onRoutineError?: (routineRunId: string, error: string, attempt: number) => Promise<void>;
+  onRoutineError?: (
+    routineRunId: string,
+    error: string,
+    attempt: number,
+    userNoticePersisted?: boolean,
+  ) => Promise<void>;
   memoryCall?: (
     action: "ReadMemory" | "WriteMemory" | "DeleteMemory",
     params: Record<string, unknown>,
@@ -765,6 +770,8 @@ ${server.cachedTools
   const skillStepFailures = new Map<number, number>();
   const stepBudget = Math.max(1, Math.min(ctx.stepBudget ?? BOT_STEP_BUDGET, BOT_STEP_BUDGET));
   let endTurnFlag = false;
+  let skillFailureNotice: string | null = null;
+  let skillFailureNoticePersisted = false;
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   const takenSteps: Array<{
     index: number;
@@ -1412,13 +1419,7 @@ ${server.cachedTools
               ctx.subagentResult = content;
               await ctx.reportSubagentResult?.(content);
             } else {
-              ctx.send({
-                type: "message",
-                agentId: ctx.agentId,
-                runId: ctx.runId,
-                content,
-                endTurn: true,
-              });
+              skillFailureNotice = content;
             }
             stopAfterCheckpoint = `skill step ${skillProgressIndex + 1} failed and was reported to the user`;
           } else if (policy === "skip") {
@@ -1471,6 +1472,10 @@ ${server.cachedTools
           toolName: tc.name,
           result: tr.result,
         });
+      }
+
+      if (skillFailureNotice) {
+        exchangeMessages.push({ role: "assistant", content: skillFailureNotice });
       }
 
       const checkpointBlobId = stepCheckpointKey(ctx, stepIndex);
@@ -1530,6 +1535,15 @@ ${server.cachedTools
         toolResults,
         checkpointBlobId,
       });
+      if (skillFailureNotice) {
+        ctx.send({
+          type: "message",
+          agentId: ctx.agentId,
+          runId: ctx.runId,
+          content: skillFailureNotice,
+          endTurn: true,
+        });
+      }
       observeHistogram("agentos_step_duration_seconds", (performance.now() - stepStartedAt) / 1000);
       observeMillis("step_duration_ms", performance.now() - stepStartedAt);
 
@@ -1576,12 +1590,68 @@ ${server.cachedTools
         );
       }
     }
+    if (skillFailureNotice) {
+      try {
+        await ctx.blob.put(
+          BUCKETS.conversationBlobs,
+          conversationBlobKey(ctx),
+          JSON.stringify(exchangeMessages),
+          "application/json",
+        );
+        const noticeSnapshotExists = takenSteps.some((step) =>
+          step.modelMessages.some(
+            (message) => message.role === "assistant" && message.content === skillFailureNotice,
+          ),
+        );
+        const historySteps: Array<typeof steps.$inferInsert> = takenSteps.map((step) => ({
+          turnId: ctx.turnId,
+          index: step.index,
+          modelMessages: step.modelMessages,
+          toolCalls: step.toolCalls,
+          toolResults: step.toolResults,
+          checkpointBlobId: step.checkpointBlobId,
+        }));
+        if (!noticeSnapshotExists) {
+          historySteps.push({
+            turnId: ctx.turnId,
+            index: stepIndex,
+            modelMessages: exchangeMessages.slice(),
+            toolCalls: [],
+            toolResults: [],
+            checkpointBlobId: null,
+          });
+        }
+        if (historySteps.length) {
+          const existing = await ctx.db
+            .select({ index: steps.index })
+            .from(steps)
+            .where(eq(steps.turnId, ctx.turnId));
+          const existingIndices = new Set(existing.map((step) => step.index));
+          const missingHistorySteps = historySteps.filter(
+            (step) => !existingIndices.has(step.index),
+          );
+          if (missingHistorySteps.length) await ctx.db.insert(steps).values(missingHistorySteps);
+        }
+        skillFailureNoticePersisted = true;
+      } catch (persistError) {
+        logger.error(
+          loggedError(persistError),
+          "failed to persist skill failure notice to conversation history",
+        );
+      }
+    }
     incrementCounter("agentos_turns_total", { status: "error" });
     observeHistogram("agentos_turn_duration_seconds", (Date.now() - startedAt) / 1000, {
       status: "error",
     });
     observeMillis("turn_duration_ms", Date.now() - startedAt, { status: "error" });
-    await ctx.db.update(turns).set({ state: "error" }).where(eq(turns.id, ctx.turnId));
+    await ctx.db
+      .update(turns)
+      .set({
+        state: "error",
+        ...(skillFailureNoticePersisted ? { checkpointRootId: conversationBlobKey(ctx) } : {}),
+      })
+      .where(eq(turns.id, ctx.turnId));
     if (routineRunId)
       await ctx.db
         .update(routineRuns)
@@ -1607,6 +1677,7 @@ ${server.cachedTools
           routineRunId,
           err instanceof Error ? err.message : String(err),
           turnRow?.input.retryAttempt ?? 0,
+          skillFailureNoticePersisted,
         );
       } catch (notifyError) {
         logger.error(loggedError(notifyError), "routine error policy failed");

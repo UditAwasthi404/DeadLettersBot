@@ -1,4 +1,4 @@
-import { incrementCounter } from "@agentOS/shared";
+import { incrementCounter } from "@agentos/shared";
 import type { OutputInterface, StreamTextResult, ToolSet } from "ai";
 import type { InferenceStreamEvent } from "./session.ts";
 

@@ -1,0 +1,15 @@
+# Non-secret values used only for Helm chart validation in CI.
+secrets:
+  jwtSecret: "ci-only-not-a-secret-ci-only-not-a-secret"
+  connectorEncryptionKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+postgres:
+  password: "ci-only-password"
+minio:
+  rootPassword: "ci-only-password"
+inference:
+  providers: xai
+  xaiApiKey: "ci-only-placeholder"
+networkPolicy:
+  enabled: true
+  ingressNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx

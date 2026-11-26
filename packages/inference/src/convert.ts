@@ -1,4 +1,4 @@
-import type { ModelMessage } from "@agentOS/shared";
+import type { ModelMessage } from "@agentos/shared";
 import type { ModelMessage as AIModelMessage, Tool, ToolSet } from "ai";
 import { tool } from "ai";
 import type { InferenceTool } from "./session.ts";

@@ -7,13 +7,13 @@ import {
   decryptConnectorSecretWithKeyring,
   encryptConnectorSecret,
   revokeConnectorToken,
-} from "@agentOS/connectors";
+} from "@agentos/connectors";
 /**
  * WebSocket gateway + send pipeline (REQ-H06–H09).
  * Auth on Upgrade; frames from packages/shared protocol.ts.
  */
-import { type ProviderFactory, createFallbackSession } from "@agentOS/inference";
-import { isValidCron, matchesCron, nextCronOccurrence } from "@agentOS/routines";
+import { type ProviderFactory, createFallbackSession } from "@agentos/inference";
+import { isValidCron, matchesCron, nextCronOccurrence } from "@agentos/routines";
 import {
   BUCKETS,
   type BlobStore,
@@ -43,9 +43,9 @@ import {
   turns,
   webhookDeliveries,
   webhookSubscriptions,
-} from "@agentOS/shared";
-import { BrowserSession, discoverMcpTools, validateMcpEndpoint } from "@agentOS/tools";
-import type { VMManager } from "@agentOS/vm-manager";
+} from "@agentos/shared";
+import { BrowserSession, discoverMcpTools, validateMcpEndpoint } from "@agentos/tools";
+import type { VMManager } from "@agentos/vm-manager";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { apiReference } from "@scalar/hono-api-reference";
 import { and, asc, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
@@ -72,7 +72,12 @@ import {
   oauthConfigFromEnv,
 } from "./connector-oauth.ts";
 import { loggedError, logger, withLogContext } from "./logger.ts";
-import { openApiDocument, openApiRequestBodyRequired, validateOpenApiRequest } from "./openapi.ts";
+import {
+  openApiDocument,
+  openApiRequestBodyRequired,
+  validateOpenApiRequest,
+  validateOpenApiResponse,
+} from "./openapi.ts";
 import { queueRoutine, queueSkillTest } from "./routine-queue.ts";
 import { normalizeConnectorEventTrigger } from "./routine-trigger.ts";
 import { enqueue } from "./scheduler.ts";
@@ -313,9 +318,50 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
         return c.json({ error: "request body must contain valid JSON" }, 400);
       }
     }
-    const validation = validateOpenApiRequest(c.req.method, requestPath, body);
+    const validation = validateOpenApiRequest(
+      c.req.method,
+      requestPath,
+      body,
+      new URL(c.req.url).searchParams,
+    );
     if (validation.error) return c.json({ error: validation.error }, 400);
     await next();
+  });
+
+  app.use("*", async (c, next) => {
+    await next();
+    const contentType = c.res.headers.get("content-type")?.toLowerCase() ?? "";
+    if (!contentType.includes("json")) return;
+    const response = c.res;
+    let body: unknown;
+    try {
+      body = await response.clone().json();
+    } catch (err) {
+      const validation = validateOpenApiResponse(
+        c.req.method,
+        c.req.path,
+        response.status,
+        undefined,
+      );
+      if (!validation.matched) return;
+      logger.error(
+        { ...loggedError(err), method: c.req.method, path: c.req.path, status: response.status },
+        "documented API response was not valid JSON",
+      );
+      return c.json({ error: "internal API response did not match its documented contract" }, 500);
+    }
+    const validation = validateOpenApiResponse(c.req.method, c.req.path, response.status, body);
+    if (!validation.matched || !validation.error) return;
+    logger.error(
+      {
+        method: c.req.method,
+        path: c.req.path,
+        status: response.status,
+        schemaIssues: validation.error,
+      },
+      "API response failed its documented schema",
+    );
+    return c.json({ error: "internal API response did not match its documented contract" }, 500);
   });
 
   app.get("/openapi.json", (c) => c.json(openApiDocument()));
@@ -2242,12 +2288,20 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
         id: memoryReviewSuggestions.id,
         memoryId: memoryReviewSuggestions.memoryId,
         turnId: memoryReviewSuggestions.turnId,
-        existingContent: memories.content,
+        action: memoryReviewSuggestions.action,
+        existingContent: memoryReviewSuggestions.existingContent,
         proposedContent: memoryReviewSuggestions.proposedContent,
+        reason: memoryReviewSuggestions.reason,
         createdAt: memoryReviewSuggestions.createdAt,
       })
       .from(memoryReviewSuggestions)
-      .innerJoin(memories, eq(memories.id, memoryReviewSuggestions.memoryId))
+      .innerJoin(
+        memories,
+        and(
+          eq(memories.id, memoryReviewSuggestions.memoryId),
+          eq(memories.content, memoryReviewSuggestions.existingContent),
+        ),
+      )
       .where(
         and(
           eq(memoryReviewSuggestions.accountId, auth.accountId),
@@ -2268,46 +2322,77 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     const body = await c.req.json<{ action?: string }>();
     if (body.action !== "accept" && body.action !== "reject")
       return c.json({ error: "action must be accept or reject" }, 400);
-    const result = await deps.db.transaction(async (tx) => {
-      const [suggestion] = await tx
-        .update(memoryReviewSuggestions)
-        .set({ status: body.action === "accept" ? "accepted" : "rejected", resolvedAt: new Date() })
-        .where(
-          and(
-            eq(memoryReviewSuggestions.id, c.req.param("reviewId")),
-            eq(memoryReviewSuggestions.accountId, auth.accountId),
-            eq(memoryReviewSuggestions.botId, botId),
-            eq(memoryReviewSuggestions.status, "pending"),
-          ),
-        )
-        .returning({
-          memoryId: memoryReviewSuggestions.memoryId,
-          proposedContent: memoryReviewSuggestions.proposedContent,
-          turnId: memoryReviewSuggestions.turnId,
-        });
-      if (!suggestion) return false;
-      if (body.action === "accept") {
-        await tx
-          .update(memories)
-          .set({
-            content: suggestion.proposedContent,
-            source: "user_reviewed_update",
-            sourceTurnId: suggestion.turnId,
-            isUserAuthored: true,
-            updatedAt: new Date(),
-          })
-          .where(and(eq(memories.id, suggestion.memoryId), eq(memories.accountId, auth.accountId)));
-        await tx
-          .insert(memoryEvidence)
-          .values({
-            accountId: auth.accountId,
-            memoryId: suggestion.memoryId,
-            turnId: suggestion.turnId,
-          })
-          .onConflictDoNothing();
-      }
-      return true;
-    });
+    let result: boolean;
+    try {
+      result = await deps.db.transaction(async (tx) => {
+        const [suggestion] = await tx
+          .update(memoryReviewSuggestions)
+          .set({ status: body.action === "accept" ? "accepted" : "rejected", resolvedAt: new Date() })
+          .where(
+            and(
+              eq(memoryReviewSuggestions.id, c.req.param("reviewId")),
+              eq(memoryReviewSuggestions.accountId, auth.accountId),
+              eq(memoryReviewSuggestions.botId, botId),
+              eq(memoryReviewSuggestions.status, "pending"),
+            ),
+          )
+          .returning({
+            memoryId: memoryReviewSuggestions.memoryId,
+            action: memoryReviewSuggestions.action,
+            existingContent: memoryReviewSuggestions.existingContent,
+            proposedContent: memoryReviewSuggestions.proposedContent,
+            turnId: memoryReviewSuggestions.turnId,
+          });
+        if (!suggestion) return false;
+        if (body.action === "accept" && suggestion.action === "delete") {
+          const [deleted] = await tx
+            .delete(memories)
+            .where(
+              and(
+                eq(memories.id, suggestion.memoryId),
+                eq(memories.accountId, auth.accountId),
+                eq(memories.content, suggestion.existingContent),
+              ),
+            )
+            .returning({ id: memories.id });
+          if (!deleted) throw new Error("memory review suggestion is stale");
+        } else if (body.action === "accept") {
+          if (suggestion.proposedContent === null)
+            throw new Error("memory review suggestion is invalid");
+          const [updated] = await tx
+            .update(memories)
+            .set({
+              content: suggestion.proposedContent,
+              source: "user_reviewed_update",
+              sourceTurnId: suggestion.turnId,
+              isUserAuthored: true,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(memories.id, suggestion.memoryId),
+                eq(memories.accountId, auth.accountId),
+                eq(memories.content, suggestion.existingContent),
+              ),
+            )
+            .returning({ id: memories.id });
+          if (!updated) throw new Error("memory review suggestion is stale");
+          await tx
+            .insert(memoryEvidence)
+            .values({
+              accountId: auth.accountId,
+              memoryId: suggestion.memoryId,
+              turnId: suggestion.turnId,
+            })
+            .onConflictDoNothing();
+        }
+        return true;
+      });
+    } catch (err) {
+      if (err instanceof Error && err.message === "memory review suggestion is stale")
+        return c.json({ error: "memory changed after this suggestion; refresh before reviewing" }, 409);
+      throw err;
+    }
     return result
       ? c.json({ resolved: true, action: body.action })
       : c.json({ error: "review suggestion not found or already resolved" }, 409);

@@ -6,7 +6,7 @@ import {
   routines,
   skills,
   turns,
-} from "@agentOS/shared";
+} from "@agentos/shared";
 import { and, eq } from "drizzle-orm";
 import { enqueue } from "./scheduler.ts";
 

@@ -1,4 +1,4 @@
-import type { InferenceTool } from "@agentOS/inference";
+import type { InferenceTool } from "@agentos/inference";
 import { z } from "zod";
 
 export const SendToUserTool: InferenceTool = {

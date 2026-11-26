@@ -1,14 +1,25 @@
 {
-  "name": "@agentOS/sdk",
+  "name": "@agentos/sdk",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "generate:api-types": "bun ../../scripts/export-openapi.ts && biome format --write openapi.json && openapi-typescript openapi.json --output src/openapi.generated.ts && biome format --write src/openapi.generated.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "publish:public": "pnpm build && npm publish --access public"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0"
   }
 }

@@ -1,5 +1,5 @@
-import { OAuthPkceClient, decryptToken, encryptConnectorSecret } from "@agentOS/connectors";
-import { type Database, connectorAccounts } from "@agentOS/shared";
+import { OAuthPkceClient, decryptToken, encryptConnectorSecret } from "@agentos/connectors";
+import { type Database, connectorAccounts } from "@agentos/shared";
 import { eq } from "drizzle-orm";
 import { oauthConfigFromEnv } from "./connector-oauth.ts";
 

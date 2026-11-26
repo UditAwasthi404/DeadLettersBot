@@ -1,6 +1,6 @@
 /** xAI provider — OpenAI-compatible API, xAI compaction carrier via providerId. */
 
-import type { ModelMessage } from "@agentOS/shared";
+import type { ModelMessage } from "@agentos/shared";
 import { createOpenAI } from "@ai-sdk/openai";
 import { stepCountIs, streamText } from "ai";
 import { toCoreMessages, toToolSet } from "../convert.ts";

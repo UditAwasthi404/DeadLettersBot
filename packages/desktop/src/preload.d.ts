@@ -16,6 +16,7 @@ declare global {
       restoreSession(): Promise<{ baseUrl: string; token: string } | null>;
       send(frame: unknown): Promise<void>;
       disconnect(): Promise<void>;
+      openExternal(url: string): Promise<void>;
       openVnc(botId: string): Promise<boolean>;
       sendVnc(bytes: Uint8Array): Promise<void>;
       closeVnc(): Promise<void>;

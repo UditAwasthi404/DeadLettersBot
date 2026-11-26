@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { callConnector } from "@agentOS/connectors";
-import { recordingAccepts } from "@agentOS/tools";
+import { callConnector } from "@agentos/connectors";
+import { recordingAccepts } from "@agentos/tools";
 import { createDebouncer } from "./debounce.ts";
 import { parseSkillDraft } from "./skill-draft.ts";
 import { botWorkspacePath } from "./workspace-path.ts";

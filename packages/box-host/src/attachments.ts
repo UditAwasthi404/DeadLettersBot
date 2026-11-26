@@ -1,4 +1,4 @@
-import type { Attachment } from "@agentOS/shared";
+import type { Attachment } from "@agentos/shared";
 
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_PROMPT_ATTACHMENT_BYTES = 25 * 1024 * 1024;

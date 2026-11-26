@@ -4,7 +4,7 @@
  * Deleting a routine on a hosted box hides it locally; POST /v1/automation/sync removes the shadow.
  * Session boxes (BOX_HOSTED_FOR_AUTOMATION_SYNC=0) skip this path.
  */
-import { type Database, automationShadows, routineRuns, routines } from "@agentOS/shared";
+import { type Database, automationShadows, routineRuns, routines } from "@agentos/shared";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
 export function isBoxHostedForAutomationSync(): boolean {

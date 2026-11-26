@@ -1,5 +1,5 @@
 {
-  "name": "@agentOS/routines",
+  "name": "@agentos/routines",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@agentOS/shared": "workspace:*",
+    "@agentos/shared": "workspace:*",
     "drizzle-orm": "0.45.2"
   },
   "devDependencies": {

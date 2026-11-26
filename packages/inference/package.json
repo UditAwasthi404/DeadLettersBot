@@ -1,5 +1,5 @@
 {
-  "name": "@agentOS/inference",
+  "name": "@agentos/inference",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@agentOS/shared": "workspace:*",
+    "@agentos/shared": "workspace:*",
     "@ai-sdk/anthropic": "4.0.91",
     "@ai-sdk/openai": "4.0.104",
     "ai": "7.0.156",

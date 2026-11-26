@@ -1,6 +1,6 @@
 /** Ollama provider — local HTTP API at OLLAMA_BASE_URL (no extra deps). */
 
-import type { ModelMessage } from "@agentOS/shared";
+import type { ModelMessage } from "@agentos/shared";
 import type {
   InferencePurpose,
   InferenceSession,

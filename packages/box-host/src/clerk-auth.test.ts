@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { Database } from "@agentOS/shared";
+import type { Database } from "@agentos/shared";
 import { Hono } from "hono";
 import { sign } from "hono/jwt";
 import {

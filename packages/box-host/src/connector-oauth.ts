@@ -1,4 +1,4 @@
-import { type OAuthConfig, oauthConfigFor } from "@agentOS/connectors";
+import { type OAuthConfig, oauthConfigFor } from "@agentos/connectors";
 
 function clean(value: string | undefined): string | undefined {
   const cleaned = value?.replaceAll("\r", "").trim();

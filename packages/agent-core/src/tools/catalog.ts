@@ -1,7 +1,7 @@
 /** Static tool catalog (REQ-A07, TRD §2.9) and MCP dynamic catalog offloading (REQ-A08). */
 
-import type { InferenceTool } from "@agentOS/inference";
-import type { PermissionLevel } from "@agentOS/shared";
+import type { InferenceTool } from "@agentos/inference";
+import type { PermissionLevel } from "@agentos/shared";
 import { type ZodTypeAny, z } from "zod";
 
 export type CatalogTool = {

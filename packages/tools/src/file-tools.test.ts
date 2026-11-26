@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExecResult, VMInfo, VMManager } from "@agentOS/vm-manager";
+import type { ExecResult, VMInfo, VMManager } from "@agentos/vm-manager";
 import { listDirectory, readFile, writeFile } from "./file-tools.ts";
 import { shellEscape } from "./shell-escape.ts";
 import { runShell } from "./shell-tool.ts";

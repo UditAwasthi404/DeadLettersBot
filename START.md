@@ -51,12 +51,12 @@ Run each command in its own PowerShell window.
 
 ```powershell
 Set-Location D:\CODE\DeadLettersBot
-pnpm --filter @agentOS/desktop dev
+pnpm --filter @agentos/desktop dev
 ```
 
 ```powershell
 Set-Location D:\CODE\DeadLettersBot
-pnpm --filter @agentOS/desktop electron
+pnpm --filter @agentos/desktop electron
 ```
 
 ## 8. Create your account

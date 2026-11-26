@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import type { VMManager } from "@agentOS/vm-manager";
+import type { VMManager } from "@agentos/vm-manager";
 
 const WORKSPACE_ROOT = "/home/agent";
 
