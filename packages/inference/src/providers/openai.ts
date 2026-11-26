@@ -7,6 +7,7 @@ import { toCoreMessages, toToolSet } from "../convert.ts";
 import type {
   InferencePurpose,
   InferenceSession,
+  InferenceSessionOptions,
   InferenceStreamEvent,
   InferenceTool,
   ProviderFactory,
@@ -21,11 +22,18 @@ export class OpenAISession implements InferenceSession {
   readonly purpose: InferencePurpose;
   private readonly modelId: string;
   private readonly client: ReturnType<typeof createOpenAI>;
+  private readonly options?: InferenceSessionOptions;
 
-  constructor(purpose: InferencePurpose, modelId?: string, apiKey = process.env.OPENAI_API_KEY) {
+  constructor(
+    purpose: InferencePurpose,
+    modelId?: string,
+    apiKey = process.env.OPENAI_API_KEY,
+    options?: InferenceSessionOptions,
+  ) {
     this.purpose = purpose;
     this.modelId = modelId ?? (purpose === "summarization" ? DEFAULT_SUMMARY : DEFAULT_MAIN);
     this.client = createOpenAI({ apiKey });
+    this.options = options;
   }
 
   async *streamComplete(
@@ -44,15 +52,18 @@ export class OpenAISession implements InferenceSession {
       allowSystemInMessages: true,
       messages: toCoreMessages(messages),
       tools: toToolSet(tools),
+      ...(this.options?.promptCacheKey
+        ? { providerOptions: { openai: { promptCacheKey: this.options.promptCacheKey } } }
+        : {}),
       stopWhen: stepCountIs(1),
     });
-    yield* mapFullStream(result);
+    yield* mapFullStream(result, this.providerId);
   }
 }
 
 export const openaiProvider: ProviderFactory = {
   id: "openai",
-  createSession(purpose, model) {
-    return new OpenAISession(purpose, model);
+  createSession(purpose, model, options) {
+    return new OpenAISession(purpose, model, process.env.OPENAI_API_KEY, options);
   },
 };

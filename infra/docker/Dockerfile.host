@@ -5,7 +5,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json turbo.js
 COPY packages ./packages
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
-FROM oven/bun:1.1.38 AS runtime
+FROM oven/bun:1.4.5 AS runtime
 WORKDIR /app
 COPY --from=deps /app /app
 ENV NODE_ENV=production

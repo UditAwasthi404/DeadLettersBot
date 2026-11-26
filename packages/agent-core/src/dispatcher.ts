@@ -23,6 +23,8 @@ export interface DispatcherDeps {
   vmId: string | null;
   browser: BrowserSession | null;
   signal?: AbortSignal;
+  dynamicTools?: (serverId?: string, offset?: number) => Promise<unknown>;
+  mcpCall?: (serverId: string, toolName: string, args: Record<string, unknown>) => Promise<unknown>;
   localExec?: (
     command: string,
     cwd?: string,
@@ -49,6 +51,8 @@ const UNTRUSTED_TOOL_SOURCES: Record<string, string> = {
   BrowserScreenshot: "browser_screenshot",
   SearchWeb: "web_search",
   FetchURL: "fetched_web_document",
+  GetDynamicTools: "mcp_tool_catalog",
+  CallDynamicTool: "mcp_server",
 };
 
 export function wrapUntrusted(
@@ -189,9 +193,30 @@ export async function dispatchTool(
         break;
 
       case "GetDynamicTools":
-      case "CallDynamicTool":
-        raw = { error: "dynamic tools not yet implemented" };
+        raw = deps.dynamicTools
+          ? await deps.dynamicTools(
+              tc.args.serverId === undefined ? undefined : String(tc.args.serverId),
+              Number(tc.args.offset ?? 0),
+            )
+          : { error: "dynamic tool discovery is unavailable" };
         break;
+
+      case "CallDynamicTool": {
+        if (!deps.mcpCall) {
+          raw = { error: "dynamic MCP calls are unavailable" };
+          break;
+        }
+        const args =
+          typeof tc.args.args === "object" && tc.args.args !== null
+            ? (tc.args.args as Record<string, unknown>)
+            : {};
+        raw = await deps.mcpCall(
+          String(tc.args.serverId ?? ""),
+          String(tc.args.toolName ?? ""),
+          args,
+        );
+        break;
+      }
 
       default:
         throw new PermissionDeniedError("unadvertised tool");

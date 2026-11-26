@@ -58,6 +58,8 @@ spec:
               value: {{ .Values.agent.memorySynthesisEnabled | ternary "1" "0" | quote }}
             - name: MCP_STRICT_MODE
               value: {{ .Values.agent.mcpStrictMode | ternary "1" "0" | quote }}
+            - name: DYNAMIC_TOOL_OFFLOADING
+              value: {{ .Values.agent.dynamicToolOffloading | ternary "1" "0" | quote }}
             - name: DATABASE_URL
               value: "postgresql://{{ .Values.postgres.username | urlquery }}:{{ .Values.postgres.password | urlquery }}@{{ include "agentos.fullname" . }}-postgres:5432/{{ .Values.postgres.database | urlquery }}"
             - name: REDIS_URL

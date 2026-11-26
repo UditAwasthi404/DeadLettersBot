@@ -141,6 +141,20 @@
       "when": 1793320000000,
       "tag": "0019_clerk_user",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "breakpoints": true,
+      "when": 1795500000000,
+      "tag": "0020_mcp_health_error"
+    },
+    {
+      "idx": 21,
+      "breakpoints": true,
+      "when": 1795500001000,
+      "version": "7",
+      "tag": "0021_memory_review_suggestions"
     }
   ]
 }

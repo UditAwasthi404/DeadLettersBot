@@ -3,7 +3,7 @@
  * Startup order per task (stop on first failure).
  */
 import { inferenceReady } from "@agentOS/inference";
-import { BlobStore, createDb, createRedis } from "@agentOS/shared";
+import { BlobStore, adjustGauge, createDb, createRedis } from "@agentOS/shared";
 import { createVMManager, gcIdleVMs } from "@agentOS/vm-manager";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -17,6 +17,7 @@ import { loggedError, logger } from "./logger.ts";
 import { processMcpHealthChecks } from "./mcp-health.ts";
 import { resolveProviders } from "./providers.ts";
 import { recoverInProgressTurns } from "./recovery.ts";
+import { shutdownTelemetry, startTelemetry } from "./telemetry.ts";
 import { processWebhookDeliveries } from "./webhooks.ts";
 import {
   detectStalledSubagents,
@@ -31,26 +32,27 @@ const PORT = Number(process.env.PORT ?? 8787);
 function installCrashHandlers(): void {
   process.on("uncaughtException", (err) => {
     logger.fatal(loggedError(err), "uncaughtException");
-    process.exit(1);
+    void shutdownTelemetry().finally(() => process.exit(1));
   });
   process.on("unhandledRejection", (reason) => {
     logger.fatal(loggedError(reason), "unhandledRejection");
-    process.exit(1);
+    void shutdownTelemetry().finally(() => process.exit(1));
   });
 }
 
 export async function runHostMain(): Promise<void> {
   validateRuntimeConfig();
   installCrashHandlers();
+  const telemetryEnabled = startTelemetry();
   const releaseLock = acquireProcessLock();
   process.on("exit", releaseLock);
   process.on("SIGINT", () => {
     releaseLock();
-    process.exit(0);
+    void shutdownTelemetry().finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
     releaseLock();
-    process.exit(0);
+    void shutdownTelemetry().finally(() => process.exit(0));
   });
 
   const providers = resolveProviders();
@@ -70,6 +72,63 @@ export async function runHostMain(): Promise<void> {
   // 4b. VM manager
   const vm = createVMManager();
   const accountVms = new Map<string, string>();
+  const vmResources = new Map<
+    string,
+    { cpuPercent: number; memoryUsedBytes: number; memoryLimitBytes: number }
+  >();
+  const vmStatuses = ["running", "sleeping", "starting", "terminated"] as const;
+  const knownVmCounts = new Map<(typeof vmStatuses)[number], number>();
+  let knownCpuPercent = 0;
+  let knownMemoryUsedBytes = 0;
+  let knownMemoryLimitBytes = 0;
+  const refreshVmMetrics = async () => {
+    const vms = await vm.listVMs();
+    const counts = new Map<(typeof vmStatuses)[number], number>(vmStatuses.map((s) => [s, 0]));
+    for (const info of vms) counts.set(info.status, (counts.get(info.status) ?? 0) + 1);
+    for (const status of vmStatuses) {
+      const next = counts.get(status) ?? 0;
+      const previous = knownVmCounts.get(status) ?? 0;
+      adjustGauge("agentos_vm_containers", next - previous, { status });
+      knownVmCounts.set(status, next);
+    }
+
+    const runningVms = vms.filter((info) => info.status === "running");
+    const runningIds = new Set(runningVms.map((info) => info.vmId));
+    for (const vmId of vmResources.keys()) if (!runningIds.has(vmId)) vmResources.delete(vmId);
+    let nextVm = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(4, runningVms.length) }, async () => {
+        while (nextVm < runningVms.length) {
+          const info = runningVms[nextVm++];
+          if (!info) continue;
+          try {
+            const stats = await vm.getVMStats(info.vmId);
+            if (stats) vmResources.set(info.vmId, stats);
+          } catch (err) {
+            logger.warn({ ...loggedError(err), vmId: info.vmId }, "vm stats refresh failed");
+          }
+        }
+      }),
+    );
+    const cpuPercent = [...vmResources.values()].reduce(
+      (total, stats) => total + stats.cpuPercent,
+      0,
+    );
+    const memoryUsedBytes = [...vmResources.values()].reduce(
+      (total, stats) => total + stats.memoryUsedBytes,
+      0,
+    );
+    const memoryLimitBytes = [...vmResources.values()].reduce(
+      (total, stats) => total + stats.memoryLimitBytes,
+      0,
+    );
+    adjustGauge("agentos_vm_cpu_usage_percent", cpuPercent - knownCpuPercent);
+    adjustGauge("agentos_vm_memory_usage_bytes", memoryUsedBytes - knownMemoryUsedBytes);
+    adjustGauge("agentos_vm_memory_limit_bytes", memoryLimitBytes - knownMemoryLimitBytes);
+    knownCpuPercent = cpuPercent;
+    knownMemoryUsedBytes = memoryUsedBytes;
+    knownMemoryLimitBytes = memoryLimitBytes;
+  };
 
   // 5. Crash recovery
   const recovered = await recoverInProgressTurns(db, redis);
@@ -168,18 +227,28 @@ export async function runHostMain(): Promise<void> {
   }, 86_400_000);
   gcTimer.unref();
 
+  void refreshVmMetrics().catch((err) =>
+    logger.error(loggedError(err), "vm metrics refresh failed"),
+  );
+  const vmMetricsTimer = setInterval(() => {
+    void refreshVmMetrics().catch((err) =>
+      logger.error(loggedError(err), "vm metrics refresh failed"),
+    );
+  }, 30_000);
+  vmMetricsTimer.unref();
+
   // 7. Listen
   Bun.serve({
     port: PORT,
     fetch: app.fetch,
     websocket,
   });
-  logger.info({ port: PORT }, "box-host ready");
+  logger.info({ port: PORT, telemetryEnabled }, "box-host ready");
 }
 
 if (import.meta.main) {
   runHostMain().catch((err) => {
     logger.fatal(loggedError(err), "startup failed");
-    process.exit(1);
+    void shutdownTelemetry().finally(() => process.exit(1));
   });
 }

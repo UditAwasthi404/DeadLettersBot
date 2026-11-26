@@ -66,6 +66,11 @@ export function validateRuntimeConfig(): void {
     "CLERK_PUBLISHABLE_KEY",
     "CLERK_SECRET_KEY",
     "CLERK_AUTHORIZED_PARTIES",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_TRACES_EXPORTER",
+    "OTEL_SERVICE_NAME",
+    "OTEL_SDK_DISABLED",
   ])
     cleanedEnv(name);
   const production = process.env.NODE_ENV === "production";
@@ -81,6 +86,17 @@ export function validateRuntimeConfig(): void {
         errors.push("S3_ENDPOINT must use http:// or https://");
     } catch {
       errors.push("S3_ENDPOINT must be a valid URL");
+    }
+  }
+  for (const name of ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]) {
+    const endpoint = cleanedEnv(name);
+    if (!endpoint) continue;
+    try {
+      const url = new URL(endpoint);
+      if (url.protocol !== "http:" && url.protocol !== "https:")
+        errors.push(`${name} must use http:// or https://`);
+    } catch {
+      errors.push(`${name} must be a valid URL`);
     }
   }
   if (!/^[\da-fA-F]{64}$/.test(encryptionKey))
@@ -116,6 +132,7 @@ export function validateRuntimeConfig(): void {
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     errors.push("PORT must be an integer from 1 to 65535");
   positiveInteger("BOT_STEP_BUDGET", 50, errors, 500);
+  positiveInteger("RUN_SHELL_TIMEOUT_MS", 120_000, errors, 3_600_000);
   const contextTokens = Number(process.env.MODEL_CONTEXT_TOKENS ?? 128_000);
   if (!Number.isInteger(contextTokens) || contextTokens < 8_000 || contextTokens > 2_000_000)
     errors.push("MODEL_CONTEXT_TOKENS must be an integer from 8000 to 2000000 (default 128000)");
@@ -129,10 +146,15 @@ export function validateRuntimeConfig(): void {
   booleanValue("INFERENCE_MOCK", errors);
   booleanValue("S3_FORCE_PATH_STYLE", errors, ["0", "1", "false", "true"]);
   booleanValue("METRICS_ENABLED", errors);
+  booleanValue("OTEL_SDK_DISABLED", errors, ["true", "false"]);
   booleanValue("MEMORY_SYNTHESIS_ENABLED", errors);
   booleanValue("MCP_STRICT_MODE", errors);
+  booleanValue("DYNAMIC_TOOL_OFFLOADING", errors);
   booleanValue("BOX_HOSTED_FOR_AUTOMATION_SYNC", errors);
   booleanValue("CLERK_MOCK", errors);
+  const vmEgressPolicy = cleanedEnv("VM_EGRESS_POLICY");
+  if (vmEgressPolicy && vmEgressPolicy !== "allow_all" && vmEgressPolicy !== "deny_all")
+    errors.push("VM_EGRESS_POLICY must be allow_all or deny_all (default allow_all)");
   if (process.env.SUBAGENT_STALL_MS !== undefined && process.env.SUBAGENT_STALL_MS !== "") {
     const stallMs = Number(process.env.SUBAGENT_STALL_MS);
     if (!Number.isInteger(stallMs) || stallMs < 1_000 || stallMs > 86_400_000)

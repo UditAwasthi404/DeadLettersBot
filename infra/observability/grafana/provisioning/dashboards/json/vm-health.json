@@ -1,5 +1,5 @@
 {
-  "title": "AgentOS VM and Tool Activity",
+  "title": "AgentOS VM Health and Tool Activity",
   "uid": "agentos-vm-health",
   "schemaVersion": 39,
   "version": 1,
@@ -8,10 +8,22 @@
   "panels": [
     {
       "id": 1,
+      "title": "VM containers by lifecycle status",
+      "type": "timeseries",
+      "description": "Account VM containers currently known to this host, grouped by lifecycle status.",
+      "gridPos": { "h": 10, "w": 8, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (status) (agentos_vm_containers)",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
       "title": "Browser / VM tool calls per minute",
       "type": "timeseries",
-      "description": "Proxy measure of browser and VM-related tool activity; container CPU, memory, and lifecycle gauges are not exported yet.",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 10, "w": 16, "x": 8, "y": 0 },
       "targets": [
         {
           "expr": "sum by (tool, outcome) (rate(agentos_tool_calls_total{tool=~\"Browser.*|RunShell|ReadFile|WriteFile|AppendFile|ListDirectory|DeleteFile\"}[5m])) * 60",
@@ -20,10 +32,34 @@
       ]
     },
     {
+      "id": 4,
+      "title": "VM CPU usage (percent of one core)",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 10 },
+      "targets": [
+        {
+          "expr": "agentos_vm_cpu_usage_percent",
+          "legendFormat": "aggregate CPU %"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "VM memory utilization",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 10 },
+      "targets": [
+        {
+          "expr": "100 * agentos_vm_memory_usage_bytes / clamp_min(agentos_vm_memory_limit_bytes, 1)",
+          "legendFormat": "aggregate memory %"
+        }
+      ]
+    },
+    {
       "id": 2,
       "title": "Tool execution p95 (seconds)",
       "type": "timeseries",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 20 },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum by (le, tool) (rate(agentos_tool_execution_duration_seconds_bucket[5m])))",

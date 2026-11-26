@@ -33,6 +33,9 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Provider reported prompt cache tokens. */
+  cachedPromptTokens?: number;
+  cacheWritePromptTokens?: number;
   /** Provider-reported totals, or a local estimate when the provider sent none. */
   source?: "provider" | "estimate";
 }

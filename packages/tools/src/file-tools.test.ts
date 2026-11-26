@@ -21,6 +21,9 @@ class StubVM implements VMManager {
   async listVMs(): Promise<VMInfo[]> {
     return [];
   }
+  async getVMStats() {
+    return undefined;
+  }
   async execInContainer(_vmId: string, cmd: string[], input?: string): Promise<ExecResult> {
     this.lastCmd = cmd;
     this.lastInput = input;

@@ -125,6 +125,9 @@ export function applyStepUsage(
     promptTokens,
     completionTokens,
     totalTokens: promptTokens + completionTokens,
+    cachedPromptTokens: (total.cachedPromptTokens ?? 0) + (provider?.cachedPromptTokens ?? 0),
+    cacheWritePromptTokens:
+      (total.cacheWritePromptTokens ?? 0) + (provider?.cacheWritePromptTokens ?? 0),
     source,
   };
 }

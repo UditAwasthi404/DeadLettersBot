@@ -1,3 +1,4 @@
+import { incrementCounter } from "@agentOS/shared";
 import type { OutputInterface, StreamTextResult, ToolSet } from "ai";
 import type { InferenceStreamEvent } from "./session.ts";
 
@@ -8,6 +9,7 @@ export async function* mapFullStream(
     Record<string, unknown>,
     OutputInterface<string, string, never>
   >,
+  providerId: string,
 ): AsyncIterable<InferenceStreamEvent> {
   for await (const part of result.fullStream) {
     if (part.type === "error") {
@@ -33,12 +35,31 @@ export async function* mapFullStream(
     const usage = await result.usage;
     const promptTokens = usage.inputTokens ?? 0;
     const completionTokens = usage.outputTokens ?? 0;
+    const cachedPromptTokens = usage.inputTokenDetails.cacheReadTokens ?? 0;
+    const cacheWritePromptTokens = usage.inputTokenDetails.cacheWriteTokens ?? 0;
+    incrementCounter("agentos_prompt_input_tokens_total", { provider: providerId }, promptTokens);
+    if (cachedPromptTokens) {
+      incrementCounter(
+        "agentos_prompt_cache_read_tokens_total",
+        { provider: providerId },
+        cachedPromptTokens,
+      );
+    }
+    if (cacheWritePromptTokens) {
+      incrementCounter(
+        "agentos_prompt_cache_write_tokens_total",
+        { provider: providerId },
+        cacheWritePromptTokens,
+      );
+    }
     yield {
       type: "usage",
       usage: {
         promptTokens,
         completionTokens,
         totalTokens: usage.totalTokens ?? promptTokens + completionTokens,
+        ...(cachedPromptTokens ? { cachedPromptTokens } : {}),
+        ...(cacheWritePromptTokens ? { cacheWritePromptTokens } : {}),
         source: "provider",
       },
     };

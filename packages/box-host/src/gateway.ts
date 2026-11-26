@@ -30,6 +30,7 @@ import {
   mcpServers,
   memories,
   memoryEvidence,
+  memoryReviewSuggestions,
   observeHistogram,
   observeMillis,
   renderPrometheusMetrics,
@@ -37,6 +38,7 @@ import {
   routines,
   skillVersions,
   skills,
+  steps,
   subagents,
   turns,
   webhookDeliveries,
@@ -44,9 +46,11 @@ import {
 } from "@agentOS/shared";
 import { BrowserSession, discoverMcpTools, validateMcpEndpoint } from "@agentOS/tools";
 import type { VMManager } from "@agentOS/vm-manager";
+import { SpanStatusCode } from "@opentelemetry/api";
 import { apiReference } from "@scalar/hono-api-reference";
-import { and, desc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { createBunWebSocket } from "hono/bun";
 import { sign } from "hono/jwt";
 import {
@@ -67,12 +71,13 @@ import {
   microsoftOAuthClient,
   oauthConfigFromEnv,
 } from "./connector-oauth.ts";
-import { loggedError, logger } from "./logger.ts";
-import { openApiDocument } from "./openapi.ts";
+import { loggedError, logger, withLogContext } from "./logger.ts";
+import { openApiDocument, openApiRequestBodyRequired, validateOpenApiRequest } from "./openapi.ts";
 import { queueRoutine, queueSkillTest } from "./routine-queue.ts";
 import { normalizeConnectorEventTrigger } from "./routine-trigger.ts";
 import { enqueue } from "./scheduler.ts";
 import { parseSkillDraft } from "./skill-draft.ts";
+import { currentTraceParent, withSpan } from "./telemetry.ts";
 import { deleteWebhookSubscription } from "./webhooks.ts";
 import { drainAgent } from "./worker.ts";
 import { botWorkspacePath } from "./workspace-path.ts";
@@ -86,7 +91,31 @@ function htmlEscape(value: string): string {
 }
 
 function oauthResultPage(title: string, message: string): string {
-  return `<!doctype html><meta charset="utf-8"><title>${htmlEscape(title)}</title><p>${message}</p>`;
+  const safeTitle = htmlEscape(title);
+  const safeMessage = htmlEscape(message);
+  const isSuccess = title === "Connected";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>${safeTitle} · AgentOS</title>
+  <style>
+    :root{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:light dark}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:#101318;color:#edf0f5}
+    main{width:min(100%,440px);padding:32px;border:1px solid #303640;border-radius:18px;background:#191e25;box-shadow:0 24px 80px #0006}
+    .mark{width:42px;height:42px;display:grid;place-items:center;border-radius:13px;background:${isSuccess ? "#123b2b" : "#402522"};color:${isSuccess ? "#63dfa2" : "#ff958a"};font-size:22px;font-weight:700}
+    h1{margin:22px 0 8px;font-size:22px;letter-spacing:-.4px}p{margin:0;color:#b7c0cc;line-height:1.6;overflow-wrap:anywhere}
+    .hint{margin-top:24px;padding-top:18px;border-top:1px solid #303640;font-size:13px;color:#8994a3}
+    @media(prefers-color-scheme:light){body{background:#f3f5f8;color:#18202b}main{background:#fff;border-color:#dfe4eb;box-shadow:0 24px 70px #24324a1c}p{color:#49576a}.hint{border-color:#e5e9ef;color:#68778a}}
+  </style>
+</head>
+<body><main role="status" aria-live="polite">
+  <div class="mark" aria-hidden="true">${isSuccess ? "✓" : "!"}</div>
+  <h1>${safeTitle}</h1><p>${safeMessage}</p>
+  <p class="hint">${isSuccess ? "You can close this window and return to AgentOS." : "Return to AgentOS and try connecting again."}</p>
+</main></body></html>`;
 }
 
 function isLocalMachineAccess(value: string): value is "never" | "always_confirm" | "always_allow" {
@@ -188,27 +217,42 @@ export async function runScheduledRoutines(deps: GatewayDeps, now = new Date()):
 export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
   const { upgradeWebSocket, websocket } = createBunWebSocket();
   app.use("*", async (c, next) => {
-    const requestId = c.req.header("X-Request-ID")?.slice(0, 128) || crypto.randomUUID();
+    const candidateRequestId = c.req.header("X-Request-ID") ?? "";
+    const requestId = /^[A-Za-z0-9._:-]{1,128}$/.test(candidateRequestId)
+      ? candidateRequestId
+      : crypto.randomUUID();
     const startedAt = performance.now();
-    await next();
-    const duration = (performance.now() - startedAt) / 1000;
     c.header("X-Request-ID", requestId);
-    incrementCounter("agentos_http_requests_total", {
-      method: c.req.method,
-      status: String(c.res.status),
-    });
-    const durationMs = Math.round(duration * 1000);
-    observeHistogram("agentos_http_request_duration_seconds", duration, {
-      method: c.req.method,
-    });
-    observeMillis("gateway_request_duration_ms", durationMs, { method: c.req.method });
-    logger.info({
-      requestId,
-      method: c.req.method,
-      path: c.req.path,
-      status: c.res.status,
-      durationMs,
-    });
+    await withLogContext({ requestId }, () =>
+      withSpan(
+        "http.server.request",
+        { "http.request.method": c.req.method, "url.path": c.req.path },
+        async (span) => {
+          try {
+            await next();
+          } finally {
+            const duration = (performance.now() - startedAt) / 1000;
+            const durationMs = Math.round(duration * 1000);
+            span.setAttribute("http.response.status_code", c.res.status);
+            if (c.res.status >= 500) span.setStatus({ code: SpanStatusCode.ERROR });
+            incrementCounter("agentos_http_requests_total", {
+              method: c.req.method,
+              status: String(c.res.status),
+            });
+            observeHistogram("agentos_http_request_duration_seconds", duration, {
+              method: c.req.method,
+            });
+            observeMillis("gateway_request_duration_ms", durationMs, { method: c.req.method });
+            logger.info({
+              method: c.req.method,
+              path: c.req.path,
+              status: c.res.status,
+              durationMs,
+            });
+          }
+        },
+      ),
+    );
   });
   app.get("/metrics", (c) => {
     if (process.env.METRICS_ENABLED !== "1") return c.notFound();
@@ -242,6 +286,35 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       c.header("Retry-After", String(60 - Math.floor((Date.now() % 60_000) / 1000)));
       return c.json({ error: "rate limit exceeded" }, 429);
     }
+    await withLogContext({ accountId }, next);
+  });
+  // The attachment endpoint accepts up to 10 MiB of bytes as base64 JSON
+  // (about 13.4 MiB on the wire); cap other API payloads while leaving room
+  // for that encoding and normal metadata.
+  app.use(
+    "/v1/*",
+    bodyLimit({
+      maxSize: 16 * 1024 * 1024,
+      onError: (c) => c.json({ error: "request body exceeds the 16 MiB limit" }, 413),
+    }),
+  );
+  app.use("/v1/*", async (c, next) => {
+    const requestPath = new URL(c.req.url).pathname;
+    const contentTypeIsJson = c.req.header("content-type")?.toLowerCase().includes("json") === true;
+    const bodyDeclared =
+      Number(c.req.header("content-length") ?? 0) > 0 ||
+      c.req.header("transfer-encoding") !== undefined ||
+      (contentTypeIsJson && openApiRequestBodyRequired(c.req.method, requestPath));
+    let body: unknown;
+    if (bodyDeclared && !["GET", "HEAD"].includes(c.req.method)) {
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "request body must contain valid JSON" }, 400);
+      }
+    }
+    const validation = validateOpenApiRequest(c.req.method, requestPath, body);
+    if (validation.error) return c.json({ error: validation.error }, 400);
     await next();
   });
 
@@ -721,6 +794,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
         url: mcpServers.url,
         cachedTools: mcpServers.cachedTools,
         lastHealth: mcpServers.lastHealth,
+        lastError: mcpServers.lastError,
         lastCheckedAt: mcpServers.lastCheckedAt,
         createdAt: mcpServers.createdAt,
       })
@@ -754,6 +828,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
             body.apiKey && key ? await encryptConnectorSecret(body.apiKey, key) : null,
           cachedTools: discovered,
           lastHealth: "healthy",
+          lastError: null,
           lastCheckedAt: new Date(),
         })
         .returning({
@@ -762,6 +837,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
           url: mcpServers.url,
           cachedTools: mcpServers.cachedTools,
           lastHealth: mcpServers.lastHealth,
+          lastError: mcpServers.lastError,
           lastCheckedAt: mcpServers.lastCheckedAt,
         });
       return c.json(row, 201);
@@ -817,7 +893,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     if (providerError) {
       if (state) await deps.redis.del(pendingKey);
       const description = c.req.query("error_description") || providerError;
-      return c.html(oauthResultPage("Connection failed", htmlEscape(description)), 400);
+      return c.html(oauthResultPage("Connection failed", description), 400);
     }
     const pendingRaw = state ? await deps.redis.getdel(pendingKey) : null;
     if (!pendingRaw || !code)
@@ -881,7 +957,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     } catch (err) {
       logger.error(loggedError(err), "oauth callback failed");
       const message = err instanceof Error ? err.message : "OAuth callback failed";
-      return c.html(oauthResultPage("Connection failed", htmlEscape(message)), 502);
+      return c.html(oauthResultPage("Connection failed", message), 502);
     }
   });
 
@@ -1178,6 +1254,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
   });
 
   const recordings = new Map<string, BrowserSession>();
+  const recordingStarts = new Map<string, Promise<BrowserSession>>();
 
   app.post("/v1/bots/:botId/browser-recording/start", async (c) => {
     const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
@@ -1190,23 +1267,42 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     if (!bot) return c.json({ error: "bot not found" }, 404);
     const key = `${auth.accountId}:${botId}`;
     if (recordings.has(key)) return c.json({ recording: true });
-    try {
+    const inProgress = recordingStarts.get(key);
+    if (inProgress) {
+      try {
+        await inProgress;
+        return c.json({ recording: true });
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : String(err) }, 503);
+      }
+    }
+    let session: BrowserSession | undefined;
+    const start = (async () => {
       const vmInfo = await deps.vm.provisionVM(auth.accountId);
-      if (!vmInfo.ipAddress) return c.json({ error: "VM browser is not reachable" }, 503);
+      if (!vmInfo.ipAddress) throw new Error("VM browser is not reachable");
       const port = await deps.vm.ensureBotBrowser(vmInfo.vmId, botId);
-      const session = new BrowserSession();
+      session = new BrowserSession();
       await session.connect(vmInfo.ipAddress, port);
       await session.startRecording();
       recordings.set(key, session);
+      return session;
+    })();
+    recordingStarts.set(key, start);
+    try {
+      await start;
       return c.json({ recording: true });
     } catch (err) {
+      await session?.disconnect().catch(() => undefined);
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 503);
+    } finally {
+      if (recordingStarts.get(key) === start) recordingStarts.delete(key);
     }
   });
 
   app.post("/v1/bots/:botId/browser-recording/stop", async (c) => {
     const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
     const key = `${auth.accountId}:${c.req.param("botId")}`;
+    await recordingStarts.get(key)?.catch(() => undefined);
     const session = recordings.get(key);
     if (!session) return c.json({ error: "recording is not in progress" }, 404);
     recordings.delete(key);
@@ -1354,11 +1450,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       )
     )
       return c.json({ error: "botId, skillId, name, and a valid trigger are required" }, 400);
-    const owned = await deps.db
-      .select()
-      .from(routines)
-      .where(and(eq(routines.accountId, auth.accountId), isNull(routines.deletedAt)));
-    if (owned.length >= 50) return c.json({ error: "Routine limit reached" }, 429);
+    const routineName = body.name.trim();
     const [bot] = await deps.db
       .select()
       .from(bots)
@@ -1412,23 +1504,36 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     if (!trigger) return c.json({ error: "connector event trigger is invalid" }, 400);
     const webhookSecret =
       body.trigger.type === "webhook" ? randomBytes(24).toString("hex") : undefined;
-    const [routine] = await deps.db
-      .insert(routines)
-      .values({
-        accountId: auth.accountId,
-        botId: bot.id,
-        skillId: skill.id,
-        name: body.name.trim(),
-        trigger: {
-          ...trigger,
-          ...(webhookSecret
-            ? { secretHash: createHash("sha256").update(webhookSecret).digest("hex") }
-            : {}),
-        },
-        enabled: body.enabled ?? true,
-        onError: body.onError ?? "pause",
-      })
-      .returning();
+    const creation = await deps.db.transaction(async (tx) => {
+      // Serialize per-account create requests so concurrent clients cannot
+      // race past the routine cap.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${auth.accountId}, 0))`);
+      const [countRow] = await tx
+        .select({ value: sql<number>`count(*)::int` })
+        .from(routines)
+        .where(and(eq(routines.accountId, auth.accountId), isNull(routines.deletedAt)));
+      if ((countRow?.value ?? 0) >= 50) return { limitReached: true as const };
+      const [routine] = await tx
+        .insert(routines)
+        .values({
+          accountId: auth.accountId,
+          botId: bot.id,
+          skillId: skill.id,
+          name: routineName,
+          trigger: {
+            ...trigger,
+            ...(webhookSecret
+              ? { secretHash: createHash("sha256").update(webhookSecret).digest("hex") }
+              : {}),
+          },
+          enabled: body.enabled ?? true,
+          onError: body.onError ?? "pause",
+        })
+        .returning();
+      return { limitReached: false as const, routine };
+    });
+    if (creation.limitReached) return c.json({ error: "Routine limit reached" }, 429);
+    const routine = creation.routine;
     if (!routine) return c.json({ error: "routine could not be created" }, 500);
     await upsertAutomationShadow(deps.db, routine);
     return c.json(
@@ -1743,6 +1848,74 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     return row ? c.json(row) : c.json({ error: "not found" }, 404);
   });
 
+  app.post("/v1/subagents/:subagentId/cancel", async (c) => {
+    const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
+    if (!auth.scopes.includes("admin") && !auth.scopes.includes("read-write"))
+      return c.json({ error: "write access required" }, 403);
+    const [row] = await deps.db
+      .select({
+        id: subagents.id,
+        childBotId: subagents.childBotId,
+        childTurnId: subagents.childTurnId,
+        childRunId: subagents.childRunId,
+        status: subagents.status,
+      })
+      .from(subagents)
+      .where(
+        and(eq(subagents.id, c.req.param("subagentId")), eq(subagents.accountId, auth.accountId)),
+      )
+      .limit(1);
+    if (!row) return c.json({ error: "subagent not found" }, 404);
+    if (row.status !== "queued" && row.status !== "running")
+      return c.json({ error: `subagent is already ${row.status}`, status: row.status }, 409);
+
+    await deps.redis.set(`run:${row.childRunId}:cancelled`, "1", "EX", 86400);
+    if (row.status === "queued") {
+      await deps.db
+        .update(turns)
+        .set({ state: "cancelled" })
+        .where(and(eq(turns.id, row.childTurnId), eq(turns.state, "pending")));
+      void drainAgent(row.childBotId, deps);
+    }
+    return c.json({ subagentId: row.id, status: "cancellation_requested" }, 202);
+  });
+
+  app.post("/v1/subagents/:subagentId/steer", async (c) => {
+    const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
+    if (!auth.scopes.includes("admin") && !auth.scopes.includes("read-write"))
+      return c.json({ error: "write access required" }, 403);
+    const body = await c.req.json<{ message?: string }>();
+    const message = body.message?.trim() ?? "";
+    if (!message || message.length > 2000)
+      return c.json({ error: "message must contain 1–2000 characters" }, 400);
+    const [row] = await deps.db
+      .select({
+        id: subagents.id,
+        childTurnId: subagents.childTurnId,
+        status: subagents.status,
+        steeringEvents: subagents.steeringEvents,
+      })
+      .from(subagents)
+      .where(
+        and(eq(subagents.id, c.req.param("subagentId")), eq(subagents.accountId, auth.accountId)),
+      )
+      .limit(1);
+    if (!row) return c.json({ error: "subagent not found" }, 404);
+    if (row.status !== "queued" && row.status !== "running")
+      return c.json({ error: `subagent is already ${row.status}`, status: row.status }, 409);
+
+    const steeringEvents = [...row.steeringEvents, { at: new Date().toISOString(), message }].slice(
+      -20,
+    );
+    await deps.db
+      .update(subagents)
+      .set({ steeringEvents })
+      .where(and(eq(subagents.id, row.id), eq(subagents.accountId, auth.accountId)));
+    await deps.redis.rpush(`subagent:${row.childTurnId}:steer`, message);
+    await deps.redis.expire(`subagent:${row.childTurnId}:steer`, 86400);
+    return c.json({ subagentId: row.id, status: row.status, steered: true }, 202);
+  });
+
   app.get("/v1/bots/:botId", async (c) => {
     const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
     const [bot] = await deps.db
@@ -1757,6 +1930,96 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       )
       .limit(1);
     return bot ? c.json(bot) : c.json({ error: "not found" }, 404);
+  });
+
+  app.get("/v1/bots/:botId/history", async (c) => {
+    const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
+    const botId = c.req.param("botId");
+    const [bot] = await deps.db
+      .select({ id: bots.id })
+      .from(bots)
+      .where(and(eq(bots.id, botId), eq(bots.accountId, auth.accountId), ne(bots.role, "subagent")))
+      .limit(1);
+    if (!bot) return c.json({ error: "not found" }, 404);
+
+    const recentTurns = await deps.db
+      .select({ id: turns.id, runId: turns.runId, type: turns.type, input: turns.input })
+      .from(turns)
+      .where(eq(turns.botId, botId))
+      .orderBy(desc(turns.createdAt))
+      .limit(50);
+    if (!recentTurns.length) return c.json({ items: [] });
+
+    const turnIds = recentTurns.map((turn) => turn.id);
+    const snapshots = await deps.db
+      .select({ turnId: steps.turnId, index: steps.index, modelMessages: steps.modelMessages })
+      .from(steps)
+      .where(inArray(steps.turnId, turnIds))
+      .orderBy(asc(steps.index));
+    const lastSnapshot = new Map<string, (typeof snapshots)[number]>();
+    for (const snapshot of snapshots) lastSnapshot.set(snapshot.turnId, snapshot);
+
+    const items: Array<{
+      id: string;
+      runId: string;
+      agentId: string;
+      role: "user" | "assistant";
+      content: string;
+    }> = [];
+    for (const turn of recentTurns.reverse()) {
+      if (turn.type === "user" && turn.input.prompt.trim())
+        items.push({
+          id: `${turn.runId}:user`,
+          runId: turn.runId,
+          agentId: botId,
+          role: "user",
+          content: turn.input.prompt,
+        });
+      const messages = lastSnapshot.get(turn.id)?.modelMessages;
+      if (!Array.isArray(messages)) continue;
+      let latestUserMessage = -1;
+      for (let index = 0; index < messages.length; index += 1) {
+        const message = messages[index];
+        if (message && typeof message === "object" && "role" in message && message.role === "user")
+          latestUserMessage = index;
+      }
+      for (let index = latestUserMessage + 1; index < messages.length; index += 1) {
+        const message = messages[index];
+        if (!message || typeof message !== "object" || !("role" in message)) continue;
+        const assistant = message as { role?: unknown; content?: unknown; toolCalls?: unknown };
+        if (assistant.role !== "assistant") continue;
+        if (typeof assistant.content === "string" && assistant.content.trim())
+          items.push({
+            id: `${turn.runId}:assistant:${index}`,
+            runId: turn.runId,
+            agentId: botId,
+            role: "assistant",
+            content: assistant.content,
+          });
+        if (!Array.isArray(assistant.toolCalls)) continue;
+        for (const call of assistant.toolCalls) {
+          if (!call || typeof call !== "object" || !("name" in call) || call.name !== "SendToUser")
+            continue;
+          const args =
+            "args" in call && call.args && typeof call.args === "object" ? call.args : null;
+          if (
+            !args ||
+            !("content" in args) ||
+            typeof args.content !== "string" ||
+            !args.content.trim()
+          )
+            continue;
+          items.push({
+            id: `${turn.runId}:send:${index}:${items.length}`,
+            runId: turn.runId,
+            agentId: botId,
+            role: "assistant",
+            content: args.content,
+          });
+        }
+      }
+    }
+    return c.json({ items });
   });
 
   app.delete("/v1/bots/:botId", async (c) => {
@@ -1968,6 +2231,88 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     return c.json(entries);
   });
 
+  app.get("/v1/bots/:botId/memory/reviews", async (c) => {
+    const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
+    const botId = c.req.param("botId");
+    const [bot] = await deps.db.select().from(bots).where(eq(bots.id, botId)).limit(1);
+    if (!bot || bot.accountId !== auth.accountId || bot.role === "subagent")
+      return c.json({ error: "not found" }, 404);
+    const rows = await deps.db
+      .select({
+        id: memoryReviewSuggestions.id,
+        memoryId: memoryReviewSuggestions.memoryId,
+        turnId: memoryReviewSuggestions.turnId,
+        existingContent: memories.content,
+        proposedContent: memoryReviewSuggestions.proposedContent,
+        createdAt: memoryReviewSuggestions.createdAt,
+      })
+      .from(memoryReviewSuggestions)
+      .innerJoin(memories, eq(memories.id, memoryReviewSuggestions.memoryId))
+      .where(
+        and(
+          eq(memoryReviewSuggestions.accountId, auth.accountId),
+          eq(memoryReviewSuggestions.botId, botId),
+          eq(memoryReviewSuggestions.status, "pending"),
+        ),
+      )
+      .orderBy(asc(memoryReviewSuggestions.createdAt));
+    return c.json(rows);
+  });
+
+  app.post("/v1/bots/:botId/memory/reviews/:reviewId", async (c) => {
+    const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
+    const botId = c.req.param("botId");
+    const [bot] = await deps.db.select().from(bots).where(eq(bots.id, botId)).limit(1);
+    if (!bot || bot.accountId !== auth.accountId || bot.role === "subagent")
+      return c.json({ error: "not found" }, 404);
+    const body = await c.req.json<{ action?: string }>();
+    if (body.action !== "accept" && body.action !== "reject")
+      return c.json({ error: "action must be accept or reject" }, 400);
+    const result = await deps.db.transaction(async (tx) => {
+      const [suggestion] = await tx
+        .update(memoryReviewSuggestions)
+        .set({ status: body.action === "accept" ? "accepted" : "rejected", resolvedAt: new Date() })
+        .where(
+          and(
+            eq(memoryReviewSuggestions.id, c.req.param("reviewId")),
+            eq(memoryReviewSuggestions.accountId, auth.accountId),
+            eq(memoryReviewSuggestions.botId, botId),
+            eq(memoryReviewSuggestions.status, "pending"),
+          ),
+        )
+        .returning({
+          memoryId: memoryReviewSuggestions.memoryId,
+          proposedContent: memoryReviewSuggestions.proposedContent,
+          turnId: memoryReviewSuggestions.turnId,
+        });
+      if (!suggestion) return false;
+      if (body.action === "accept") {
+        await tx
+          .update(memories)
+          .set({
+            content: suggestion.proposedContent,
+            source: "user_reviewed_update",
+            sourceTurnId: suggestion.turnId,
+            isUserAuthored: true,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(memories.id, suggestion.memoryId), eq(memories.accountId, auth.accountId)));
+        await tx
+          .insert(memoryEvidence)
+          .values({
+            accountId: auth.accountId,
+            memoryId: suggestion.memoryId,
+            turnId: suggestion.turnId,
+          })
+          .onConflictDoNothing();
+      }
+      return true;
+    });
+    return result
+      ? c.json({ resolved: true, action: body.action })
+      : c.json({ error: "review suggestion not found or already resolved" }, 409);
+  });
+
   app.post("/v1/bots/:botId/memory", async (c) => {
     const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
     const botId = c.req.param("botId");
@@ -2071,6 +2416,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     "/ws",
     upgradeWebSocket((c) => {
       const authHeader = c.req.header("Authorization");
+      const connectionId = crypto.randomUUID();
       let accountId = "";
       let authenticated = false;
       let resolveReady: () => void = () => {};
@@ -2088,7 +2434,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
             }
             accountId = auth.accountId;
             authenticated = true;
-            logger.info({ accountId }, "gateway connected");
+            logger.info({ connectionId, accountId }, "gateway connected");
             try {
               const waiting = await deps.redis.hgetall(`handoffs:${accountId}`);
               for (const value of Object.values(waiting)) {
@@ -2113,7 +2459,10 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
                 );
               }
             } catch (err) {
-              logger.warn(loggedError(err), "failed to replay secure handoffs");
+              logger.warn(
+                { connectionId, accountId, ...loggedError(err) },
+                "failed to replay secure handoffs",
+              );
             }
           } catch {
             ws.close(1008, "unauthorized");
@@ -2130,9 +2479,15 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
           try {
             const raw = typeof evt.data === "string" ? evt.data : String(evt.data);
             const frame = JSON.parse(raw) as ClientFrame;
-            await handleClientFrame(frame, { ...deps, accountId, send });
+            await withLogContext({ connectionId, accountId, frameType: frame.type }, () =>
+              withSpan(
+                "websocket.frame",
+                { "websocket.frame.type": frame.type, "websocket.connection.id": connectionId },
+                () => handleClientFrame(frame, { ...deps, accountId, send }),
+              ),
+            );
           } catch (err) {
-            logger.error(loggedError(err), "gateway message error");
+            logger.error({ connectionId, accountId, ...loggedError(err) }, "gateway message error");
             send({
               type: "error",
               agentId: "",
@@ -2143,7 +2498,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
           }
         },
         onClose() {
-          logger.info({ accountId }, "gateway disconnected");
+          logger.info({ connectionId, accountId }, "gateway disconnected");
         },
       };
     }),
@@ -2166,6 +2521,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
       const authHeader = c.req.header("Authorization");
       const botId = c.req.query("botId") ?? "";
       let tcp: ReturnType<typeof connectTcp> | null = null;
+      let closed = false;
       const stop = () => {
         tcp?.destroy();
         tcp = null;
@@ -2174,6 +2530,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
         async onOpen(_evt, ws) {
           try {
             const auth = await authenticateRequest(authHeader, deps.db);
+            if (closed) return;
             if (!auth.scopes.includes("admin") && !auth.scopes.includes("read-write")) {
               ws.close(1008, "write access required");
               return;
@@ -2189,28 +2546,42 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
                 ),
               )
               .limit(1);
+            if (closed) return;
             if (!bot) {
               ws.close(1008, "bot not found");
               return;
             }
             const vmInfo = await deps.vm.provisionVM(auth.accountId);
+            if (closed) return;
             if (!vmInfo.ipAddress) {
               ws.close(1011, "VM has no network address");
               return;
             }
             await deps.vm.ensureBotBrowser(vmInfo.vmId, botId);
+            if (closed) return;
             const port = await deps.vm.ensureBotVnc(vmInfo.vmId, botId);
+            if (closed) return;
             const socket = connectTcp(port, vmInfo.ipAddress);
             tcp = socket;
             socket.on("data", (chunk: Buffer) => {
-              ws.send(Uint8Array.from(chunk));
+              if (closed) return;
+              try {
+                ws.send(Uint8Array.from(chunk));
+              } catch (err) {
+                logger.debug({ ...loggedError(err), botId }, "vnc websocket send failed");
+                stop();
+                ws.close(1011, "VM screen connection closed");
+              }
             });
-            socket.on("close", () => ws.close());
+            socket.on("close", () => {
+              if (!closed) ws.close();
+            });
             socket.on("error", (err) => {
               logger.warn({ ...loggedError(err), botId }, "vnc tcp failed");
-              ws.close(1011, "VM screen is not reachable");
+              if (!closed) ws.close(1011, "VM screen is not reachable");
             });
           } catch (err) {
+            if (closed) return;
             logger.error({ ...loggedError(err), botId }, "vnc open failed");
             stop();
             const message = (err instanceof Error ? err.message : "vnc unavailable")
@@ -2220,6 +2591,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
           }
         },
         async onMessage(evt) {
+          if (closed) return;
           const socket = tcp;
           if (!socket || socket.destroyed) return;
           const data: unknown = evt.data;
@@ -2241,6 +2613,7 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
             socket.write(Uint8Array.from(new Uint8Array(await data.arrayBuffer())));
         },
         onClose() {
+          closed = true;
           stop();
         },
       };
@@ -2413,6 +2786,7 @@ async function handleSendPrompt(
     botId: frame.agentId,
     accountId: ctx.accountId,
     priority: frame.routingOptions?.priority,
+    traceParent: currentTraceParent(),
   });
   await ctx.redis.set(`run:${runId}:agentId`, frame.agentId, "EX", 86400);
 

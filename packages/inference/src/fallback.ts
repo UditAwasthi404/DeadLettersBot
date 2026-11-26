@@ -6,6 +6,7 @@ import type { ModelMessage } from "@agentOS/shared";
 import type {
   InferencePurpose,
   InferenceSession,
+  InferenceSessionOptions,
   InferenceStreamEvent,
   InferenceTool,
   ProviderFactory,
@@ -74,7 +75,8 @@ export function createFallbackSession(
   purpose: InferencePurpose,
   providers: ProviderFactory[],
   models?: Partial<Record<string, string>>,
+  options?: InferenceSessionOptions,
 ): InferenceSession {
-  const sessions = providers.map((p) => p.createSession(purpose, models?.[p.id]));
+  const sessions = providers.map((p) => p.createSession(purpose, models?.[p.id], options));
   return new FallbackSession(purpose, sessions);
 }

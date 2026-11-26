@@ -1,0 +1,24 @@
+{{- if .Values.certManager.enabled }}
+{{- if not .Values.ingress.enabled }}
+{{- fail "certManager.enabled requires ingress.enabled" }}
+{{- end }}
+{{- $issuerName := required "certManager.issuerName must name an existing cert-manager issuer" .Values.certManager.issuerName }}
+{{- $hosts := list }}
+{{- range .Values.ingress.hosts }}
+{{- $hosts = append $hosts .host }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "agentos.fullname" . }}
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+spec:
+  secretName: {{ required "certManager.secretName must be set" .Values.certManager.secretName | quote }}
+  issuerRef:
+    name: {{ $issuerName | quote }}
+    kind: {{ .Values.certManager.issuerKind | quote }}
+    group: cert-manager.io
+  dnsNames:
+    {{- toYaml $hosts | nindent 4 }}
+{{- end }}

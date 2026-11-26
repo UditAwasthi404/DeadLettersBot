@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 /**
  * Docker-based VM manager (BUILD_PLAN Track D).
- * Image `agentos-vm` is built by infra/docker/Dockerfile.vm. NoopVMManager keeps the host startable without Docker.
+ * Image `agentos/vm-manager` is built by infra/docker/Dockerfile.vm. NoopVMManager keeps the host startable without Docker.
  */
 import { PassThrough } from "node:stream";
 import Docker from "dockerode";
-import type { ExecResult, VMInfo, VMManager, VMStatus } from "./interface.ts";
+import type { ExecResult, VMInfo, VMManager, VMStats, VMStatus } from "./interface.ts";
 
-const IMAGE = "agentos-vm";
+const IMAGE = process.env.VM_IMAGE ?? "agentos/vm-manager";
+const MAX_EXEC_OUTPUT_BYTES = 1_048_576;
 
 type StateFile = Record<string, { accountId: string; vmId: string }>;
 
@@ -60,6 +61,9 @@ export class NoopVMManager implements VMManager {
   async listVMs(): Promise<VMInfo[]> {
     return [];
   }
+  async getVMStats(_vmId: string): Promise<VMStats | undefined> {
+    return undefined;
+  }
   async execInContainer(
     _vmId: string,
     _cmd: string[],
@@ -100,20 +104,29 @@ export class DockerVMManager implements VMManager {
 
   private async ensureAccountNetwork(accountId: string): Promise<string> {
     const name = this.accountNetworkName(accountId);
+    const isolated = process.env.VM_EGRESS_POLICY === "deny_all";
     let network: Docker.Network;
     try {
       network = await this.docker.createNetwork({
         Name: name,
         Driver: "bridge",
+        Internal: isolated,
         Labels: { "agentos.accountId": accountId },
       });
     } catch (err) {
       const statusCode = (err as { statusCode?: number }).statusCode;
       if (statusCode !== 409) throw err;
       network = this.docker.getNetwork(name);
-      const details = (await network.inspect()) as { Labels?: Record<string, string> };
+      const details = (await network.inspect()) as {
+        Labels?: Record<string, string>;
+        Internal?: boolean;
+      };
       if (details.Labels?.["agentos.accountId"] !== accountId)
         throw new Error("refusing to reuse a Docker network owned by another account");
+      if (Boolean(details.Internal) !== isolated)
+        throw new Error(
+          `VM_EGRESS_POLICY changed for account ${accountId}; terminate its VM before reprovisioning`,
+        );
     }
 
     const hostContainerId = await this.hostContainerId();
@@ -208,6 +221,23 @@ export class DockerVMManager implements VMManager {
     return infos;
   }
 
+  async getVMStats(vmId: string): Promise<VMStats | undefined> {
+    const stats = await this.docker.getContainer(vmId).stats({ stream: false, "one-shot": true });
+    const cpuDelta =
+      stats.cpu_stats.cpu_usage.total_usage - stats.precpu_stats.cpu_usage.total_usage;
+    const systemDelta = stats.cpu_stats.system_cpu_usage - stats.precpu_stats.system_cpu_usage;
+    const cpuCount = Math.max(stats.cpu_stats.online_cpus || 1, 1);
+    const cpuPercent =
+      systemDelta > 0 && cpuDelta >= 0 ? (cpuDelta / systemDelta) * cpuCount * 100 : 0;
+    const memoryUsedBytes = Math.max(0, stats.memory_stats.usage ?? 0);
+    const memoryLimitBytes = Math.max(0, stats.memory_stats.limit ?? 0);
+    return {
+      cpuPercent: Number.isFinite(cpuPercent) ? cpuPercent : 0,
+      memoryUsedBytes,
+      memoryLimitBytes,
+    };
+  }
+
   async terminateVM(vmId: string): Promise<void> {
     const container = this.docker.getContainer(vmId);
     const info = await container.inspect().catch(() => null);
@@ -279,11 +309,26 @@ export class DockerVMManager implements VMManager {
 
     const stdoutChunks: Uint8Array[] = [];
     const stderrChunks: Uint8Array[] = [];
+    let capturedBytes = 0;
+    let outputTruncated = false;
+    const capture = (chunks: Uint8Array[], chunk: Buffer) => {
+      const available = Math.max(0, MAX_EXEC_OUTPUT_BYTES - capturedBytes);
+      const length = Math.min(available, chunk.byteLength);
+      if (length > 0) {
+        chunks.push(Uint8Array.from(chunk.subarray(0, length)));
+        capturedBytes += length;
+      }
+      if (length < chunk.byteLength) outputTruncated = true;
+    };
     const stdoutStream = new PassThrough();
     const stderrStream = new PassThrough();
-    stdoutStream.on("data", (c: Buffer) => stdoutChunks.push(Uint8Array.from(c)));
-    stderrStream.on("data", (c: Buffer) => stderrChunks.push(Uint8Array.from(c)));
-    this.docker.modem.demuxStream(stream, stdoutStream, stderrStream);
+    stdoutStream.on("data", (c: Buffer) => capture(stdoutChunks, c));
+    stderrStream.on("data", (c: Buffer) => capture(stderrChunks, c));
+    this.docker.modem.demuxStream(
+      stream as unknown as NodeJS.ReadableStream,
+      stdoutStream,
+      stderrStream,
+    );
 
     let abortInProgress = false;
     const abortExecution = () => {
@@ -307,25 +352,33 @@ export class DockerVMManager implements VMManager {
     signal?.addEventListener("abort", abortExecution, { once: true });
     if (signal?.aborted) abortExecution();
 
-    if (attachStdin) {
-      stream.write(input ?? "");
-      stream.end();
+    try {
+      if (attachStdin) {
+        stream.write(input ?? "");
+        stream.end();
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        stream.on("end", () => resolve());
+        stream.on("error", (err: Error) => reject(err));
+      });
+    } finally {
+      signal?.removeEventListener("abort", abortExecution);
     }
 
-    await new Promise<void>((resolve, reject) => {
-      stream.on("end", () => resolve());
-      stream.on("error", (err: Error) => reject(err));
-    });
-
-    signal?.removeEventListener("abort", abortExecution);
     const inspect = await exec.inspect();
     const cancelled = signal?.aborted ?? false;
+    const stdout = Buffer.concat(stdoutChunks).toString();
+    const stderr = Buffer.concat(stderrChunks).toString();
+    const stderrSuffixes = [
+      ...(cancelled ? ["execution cancelled"] : []),
+      ...(outputTruncated ? [`output truncated after ${MAX_EXEC_OUTPUT_BYTES} bytes`] : []),
+    ];
     return {
-      stdout: Buffer.concat(stdoutChunks).toString(),
-      stderr: cancelled
-        ? `${Buffer.concat(stderrChunks).toString()}execution cancelled`
-        : Buffer.concat(stderrChunks).toString(),
+      stdout,
+      stderr: [stderr, ...stderrSuffixes].filter(Boolean).join("\n"),
       exitCode: cancelled ? 130 : (inspect.ExitCode ?? 0),
+      ...(outputTruncated ? { outputTruncated: true } : {}),
     };
   }
 
@@ -370,7 +423,7 @@ export class DockerVMManager implements VMManager {
     const stream = await exec.start({ hijack: true, stdin: false });
     const stdout = new PassThrough();
     const stderr = new PassThrough();
-    this.docker.modem.demuxStream(stream, stdout, stderr);
+    this.docker.modem.demuxStream(stream as unknown as NodeJS.ReadableStream, stdout, stderr);
     let buffer = "";
     stdout.on("data", (chunk: Buffer) => {
       buffer += chunk.toString();

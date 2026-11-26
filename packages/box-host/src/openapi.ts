@@ -4,6 +4,24 @@ const api = new OpenAPIHono();
 const ErrorBody = z.object({ error: z.string() });
 const Ok = z.object({ ok: z.boolean() });
 const Deleted = z.object({ deleted: z.boolean() });
+const LocalMachineAccess = z.enum(["never", "always_confirm", "always_allow"]);
+const PermissionLevel = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
+const MemorySettings = z.object({
+  agentScope: z.boolean(),
+  userScope: z.boolean(),
+  projectScope: z.boolean(),
+  projectId: z.string().optional(),
+});
+const ApprovalSettings = z.object({
+  autoReviewRules: z.array(
+    z.object({ actionPattern: z.string(), mode: z.enum(["require", "always_allow"]) }),
+  ),
+  defaultLevel: PermissionLevel,
+});
+const InferenceSettings = z.object({
+  providerId: z.string().optional(),
+  model: z.string().optional(),
+});
 const Bot = z.object({
   id: z.string(),
   accountId: z.string(),
@@ -13,24 +31,46 @@ const Bot = z.object({
   profileText: z.string(),
   tools: z.array(z.string()),
   skills: z.array(z.string()),
-  inferenceSettings: z.object({
-    providerId: z.string().optional(),
-    model: z.string().optional(),
-  }),
-  localMachineAccess: z.enum(["never", "always_confirm", "always_allow"]),
+  inferenceSettings: InferenceSettings,
+  memorySettings: MemorySettings,
+  approvalSettings: ApprovalSettings,
+  localMachineAccess: LocalMachineAccess,
   retainData: z.boolean(),
+});
+const ChatHistoryItem = z.object({
+  id: z.string(),
+  runId: z.string(),
+  agentId: z.string(),
+  role: z.enum(["user", "assistant"]),
+  content: z.string(),
+});
+const Attachment = z.object({
+  id: z.string(),
+  name: z.string(),
+  mimeType: z.string(),
+  sizeBytes: z.number(),
+  uri: z.string(),
 });
 const CreateBot = z.object({
   name: z.string(),
   role: z.enum(["main", "peer"]).optional(),
   systemPrompt: z.string().optional(),
   profileText: z.string().optional(),
+  tools: z.array(z.string()).optional(),
 });
 const UpdateBot = CreateBot.partial().extend({
+  role: z.enum(["main", "peer"]).optional(),
+  skills: z.array(z.string()).optional(),
+  memorySettings: MemorySettings.optional(),
+  approvalSettings: ApprovalSettings.optional(),
+  inferenceSettings: InferenceSettings.optional(),
   inferenceProvider: z.string().optional(),
   inferenceModel: z.string().optional(),
   retainData: z.boolean().optional(),
-  localMachineAccess: z.enum(["never", "always_confirm", "always_allow"]).optional(),
+  localMachineAccess: LocalMachineAccess.optional(),
+  tools: z
+    .union([z.array(z.string()), z.object({ localMachineAccess: LocalMachineAccess })])
+    .optional(),
 });
 const Memory = z.object({
   id: z.string(),
@@ -46,13 +86,17 @@ const CreateMemory = z.object({
   content: z.string(),
   projectId: z.string().optional(),
 });
-const SkillStep = z.object({
-  instruction: z.string(),
-  approvalRequired: z.boolean().optional(),
-  onError: z.enum(["stop", "retry", "skip", "notify_user", "custom_prompt"]).optional(),
-  maxAttempts: z.number().optional(),
-  customPrompt: z.string().optional(),
-});
+const SkillStep = z
+  .object({
+    instruction: z.string().trim().min(1).max(4000),
+    approvalRequired: z.boolean().optional(),
+    onError: z.enum(["stop", "retry", "skip", "notify_user", "custom_prompt"]).optional(),
+    maxAttempts: z.number().int().min(1).max(10).optional(),
+    customPrompt: z.string().max(2000).optional(),
+  })
+  .refine((step) => step.onError !== "custom_prompt" || Boolean(step.customPrompt?.trim()), {
+    message: "customPrompt is required when onError is custom_prompt",
+  });
 const Skill = z.object({
   id: z.string(),
   name: z.string(),
@@ -62,10 +106,10 @@ const Skill = z.object({
   ownerBotId: z.string().nullable(),
 });
 const CreateSkill = z.object({
-  name: z.string(),
-  description: z.string().optional(),
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(2000).optional(),
   ownerBotId: z.string().optional(),
-  steps: z.array(SkillStep),
+  steps: z.array(SkillStep).min(1).max(50),
 });
 const RoutineTrigger = z.union([
   z.object({ type: z.literal("cron"), schedule: z.string() }),
@@ -120,6 +164,7 @@ const McpServer = z.object({
   name: z.string(),
   url: z.string(),
   lastHealth: z.string(),
+  lastError: z.string().nullable(),
   lastCheckedAt: z.string().nullable(),
 });
 const AddMcp = z.object({
@@ -146,13 +191,14 @@ const CreateApiKey = z.object({
 });
 const botId = z.object({ botId: z.string() });
 const memoryId = z.object({ botId: z.string(), memoryId: z.string() });
+const memoryReviewId = z.object({ botId: z.string(), reviewId: z.string() });
 const skillId = z.object({ skillId: z.string() });
 const routineId = z.object({ routineId: z.string() });
 const service = z.object({ service: z.string() });
 const serverId = z.object({ serverId: z.string() });
 const keyId = z.object({ keyId: z.string() });
 
-function add(spec: {
+type ApiRouteSpec = {
   method: "get" | "post" | "patch" | "delete";
   path: string;
   summary: string;
@@ -161,7 +207,12 @@ function add(spec: {
   security?: Array<Record<string, string[]>>;
   params?: z.ZodType;
   body?: z.ZodType;
-}) {
+};
+
+const apiRouteSpecs: ApiRouteSpec[] = [];
+
+function add(spec: ApiRouteSpec) {
+  apiRouteSpecs.push(spec);
   const status = spec.status ?? 200;
   const route = createRoute({
     method: spec.method,
@@ -190,6 +241,65 @@ function add(spec: {
     },
   } as never);
   api.openapi(route, (() => new Response("{}", { status })) as never);
+}
+
+function routeMatch(routeTemplate: string, path: string): Map<string, string> | null {
+  const names: string[] = [];
+  const source = routeTemplate
+    .split("/")
+    .map((segment) => {
+      const parameter = /^\{([^}]+)\}$/.exec(segment);
+      if (parameter?.[1]) {
+        names.push(parameter[1]);
+        return "([^/]+)";
+      }
+      return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    })
+    .join("/");
+  const match = new RegExp(`^${source}/?$`).exec(path);
+  if (!match) return null;
+  return new Map(names.map((name, index) => [name, match[index + 1] ?? ""]));
+}
+
+function findApiRoute(method: string, path: string): ApiRouteSpec | undefined {
+  return apiRouteSpecs.find(
+    (candidate) =>
+      candidate.method.toUpperCase() === method.toUpperCase() && routeMatch(candidate.path, path),
+  );
+}
+
+export function openApiRequestBodyRequired(method: string, path: string): boolean {
+  return Boolean(findApiRoute(method, path)?.body);
+}
+
+/** Validate documented request parameters and bodies before gateway dispatch. */
+export function validateOpenApiRequest(
+  method: string,
+  path: string,
+  body: unknown,
+): { matched: boolean; error?: string } {
+  const route = findApiRoute(method, path);
+  if (!route) return { matched: false };
+  const parameters = routeMatch(route.path, path);
+  if (!parameters) return { matched: false };
+  if (route.params) {
+    const parsedParams = route.params.safeParse(Object.fromEntries(parameters));
+    if (!parsedParams.success) return { matched: true, error: "path parameters are invalid" };
+  }
+  if (route.body) {
+    const parsedBody = route.body.safeParse(body);
+    if (!parsedBody.success) {
+      const issue = parsedBody.error.issues[0];
+      const field = issue?.path.map(String).join(".");
+      return {
+        matched: true,
+        error: field
+          ? `${field} ${issue?.message ?? "is invalid"}`
+          : (issue?.message ?? "body is invalid"),
+      };
+    }
+  }
+  return { matched: true };
 }
 
 const publicRoute = [] as Array<Record<string, string[]>>;
@@ -230,6 +340,13 @@ add({
   response: Bot,
 });
 add({
+  method: "get",
+  path: "/v1/bots/{botId}/history",
+  summary: "Read recent chat history",
+  params: botId,
+  response: z.object({ items: z.array(ChatHistoryItem) }),
+});
+add({
   method: "patch",
   path: "/v1/bots/{botId}",
   summary: "Update a bot",
@@ -243,6 +360,29 @@ add({
   summary: "Delete a bot",
   params: botId,
   response: Deleted,
+});
+add({
+  method: "post",
+  path: "/v1/bots/{botId}/attachments",
+  summary: "Store an attachment for a bot conversation",
+  params: botId,
+  body: z.object({ name: z.string(), mimeType: z.string().optional(), dataBase64: z.string() }),
+  response: Attachment,
+  status: 201,
+});
+add({
+  method: "post",
+  path: "/v1/bots/{botId}/browser-recording/start",
+  summary: "Start recording browser actions for a bot",
+  params: botId,
+  response: z.object({ recording: z.boolean() }),
+});
+add({
+  method: "post",
+  path: "/v1/bots/{botId}/browser-recording/stop",
+  summary: "Stop recording browser actions for a bot",
+  params: botId,
+  response: z.object({ events: z.array(z.unknown()) }),
 });
 add({
   method: "get",
@@ -268,6 +408,37 @@ add({
   response: z.object({ botId: z.string(), memories: z.array(Memory) }),
 });
 add({
+  method: "get",
+  path: "/v1/bots/{botId}/memory/{memoryId}/evidence",
+  summary: "List source turns supporting a memory",
+  params: memoryId,
+  response: z.array(z.object({ id: z.string(), turnId: z.string(), createdAt: z.string() })),
+});
+add({
+  method: "get",
+  path: "/v1/bots/{botId}/memory/reviews",
+  summary: "List pending memory conflict suggestions",
+  params: botId,
+  response: z.array(
+    z.object({
+      id: z.string(),
+      memoryId: z.string(),
+      turnId: z.string(),
+      existingContent: z.string(),
+      proposedContent: z.string(),
+      createdAt: z.string(),
+    }),
+  ),
+});
+add({
+  method: "post",
+  path: "/v1/bots/{botId}/memory/reviews/{reviewId}",
+  summary: "Accept or reject a memory conflict suggestion",
+  params: memoryReviewId,
+  body: z.object({ action: z.enum(["accept", "reject"]) }),
+  response: z.object({ resolved: z.boolean(), action: z.enum(["accept", "reject"]) }),
+});
+add({
   method: "patch",
   path: "/v1/bots/{botId}/memory/{memoryId}",
   summary: "Update a memory",
@@ -290,6 +461,13 @@ add({
   body: CreateSkill,
   response: Skill,
   status: 201,
+});
+add({
+  method: "post",
+  path: "/v1/skills/draft",
+  summary: "Draft a skill from browser recording events",
+  body: z.object({ events: z.array(z.unknown()).min(1).max(2000) }),
+  response: z.object({ name: z.string(), description: z.string(), steps: z.array(SkillStep) }),
 });
 add({
   method: "patch",
@@ -474,6 +652,23 @@ add({
   response: z.object({ id: z.string(), status: z.string() }),
 });
 add({
+  method: "post",
+  path: "/v1/subagents/{subagentId}/cancel",
+  summary: "Request cancellation of a subagent task",
+  params: z.object({ subagentId: z.string() }),
+  response: z.object({ subagentId: z.string(), status: z.string() }),
+  status: 202,
+});
+add({
+  method: "post",
+  path: "/v1/subagents/{subagentId}/steer",
+  summary: "Add guidance to a running subagent task",
+  params: z.object({ subagentId: z.string() }),
+  body: z.object({ message: z.string().min(1).max(2000) }),
+  response: z.object({ subagentId: z.string(), status: z.string(), steered: z.boolean() }),
+  status: 202,
+});
+add({
   method: "get",
   path: "/v1/webhook-subscriptions",
   summary: "List outbound webhook subscriptions",
@@ -537,6 +732,20 @@ add({
   body: z.object({ botId: z.string() }),
   response: z.object({ runId: z.string(), status: z.string() }),
   status: 202,
+});
+add({
+  method: "get",
+  path: "/v1/skills/{skillId}/test/{runId}",
+  summary: "Get the status of a skill test",
+  params: z.object({ skillId: z.string(), runId: z.string() }),
+  response: z.object({ runId: z.string(), turnId: z.string(), status: z.string() }),
+});
+add({
+  method: "post",
+  path: "/v1/skills/{skillId}/rollback/{version}",
+  summary: "Restore a previous skill version",
+  params: z.object({ skillId: z.string(), version: z.string() }),
+  response: Skill,
 });
 add({
   method: "get",

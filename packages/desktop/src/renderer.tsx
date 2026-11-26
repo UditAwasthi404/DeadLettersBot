@@ -1,8 +1,23 @@
 import { ClerkProvider, SignIn, SignUp, useAuth, useClerk } from "@clerk/react";
+import { AlertDialog, Button, Dialog, Theme } from "@radix-ui/themes";
+import {
+  ArrowRight,
+  Bookmark,
+  Computer,
+  GitFork,
+  Link2,
+  ListChecks,
+  MessageSquare,
+  Paperclip,
+  Plus,
+  Settings2,
+  Sparkles,
+} from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { UpdateBanner } from "./UpdateBanner.tsx";
 import { RawVncSession } from "./rfb.ts";
+import "@radix-ui/themes/styles.css";
 import "./style.css";
 
 type ClerkBridge = {
@@ -25,6 +40,20 @@ function clerkPublishableKey(): string {
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_PROMPT_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+type AppButtonProps = React.ComponentProps<typeof Button>;
+
+function AppButton({ className, variant, size, ...props }: AppButtonProps) {
+  const primary = className?.split(/\s+/).includes("primary") ?? false;
+  return (
+    <Button
+      {...props}
+      className={className}
+      variant={variant ?? (primary ? "solid" : "ghost")}
+      size={size ?? "2"}
+    />
+  );
+}
 
 type LocalPolicy = "never" | "always_confirm" | "always_allow";
 
@@ -52,6 +81,14 @@ interface MemoryEntry {
 interface MemoryEvidenceEntry {
   id: string;
   turnId: string;
+  createdAt: string;
+}
+interface MemoryReviewSuggestion {
+  id: string;
+  memoryId: string;
+  turnId: string;
+  existingContent: string;
+  proposedContent: string;
   createdAt: string;
 }
 interface SkillItem {
@@ -85,7 +122,15 @@ interface RoutineItem {
     | { type: "cron"; schedule?: string }
     | { type: "webhook" }
     | { type: "inter_bot_message"; senderBotId?: string }
-    | { type: "file_change"; path?: string };
+    | { type: "file_change"; path?: string }
+    | {
+        type: "connector_event";
+        service: "gmail" | "google-calendar";
+        sender?: string;
+        subject?: string;
+        query?: string;
+        calendarId?: string;
+      };
   lastTriggeredAt: string | null;
   nextRunAt?: string | null;
   cronTimezone?: string | null;
@@ -105,10 +150,46 @@ function routineTriggerLabel(trigger: RoutineItem["trigger"], bots: Bot[]): stri
   if (trigger.type === "cron") return trigger.schedule ?? "Cron";
   if (trigger.type === "webhook") return "Webhook";
   if (trigger.type === "file_change") return `File change ${trigger.path ?? ""}`.trim();
+  if (trigger.type === "connector_event")
+    return trigger.service === "gmail"
+      ? `Gmail event${trigger.sender ? ` from ${trigger.sender}` : ""}${trigger.subject ? ` · ${trigger.subject}` : ""}`
+      : `Calendar event${trigger.subject ? ` · ${trigger.subject}` : ""}`;
   const senderName = trigger.senderBotId
     ? (bots.find((bot) => bot.id === trigger.senderBotId)?.name ?? "selected bot")
     : "any bot";
   return `Inter-bot message from ${senderName}`;
+}
+
+type ConnectorEventTrigger = Extract<RoutineItem["trigger"], { type: "connector_event" }>;
+
+function connectorEventTriggerFromDraft(input: {
+  service: ConnectorEventTrigger["service"];
+  sender: string;
+  subject: string;
+  query: string;
+  calendarId: string;
+}): ConnectorEventTrigger | null {
+  const sender = input.sender.trim();
+  const subject = input.subject.trim();
+  const query = input.query.trim();
+  const calendarId = input.calendarId.trim();
+  if (input.service === "google-calendar") {
+    if (!subject) return null;
+    return {
+      type: "connector_event",
+      service: input.service,
+      subject,
+      ...(calendarId ? { calendarId } : {}),
+    };
+  }
+  if (!sender && !subject && !query) return null;
+  return {
+    type: "connector_event",
+    service: input.service,
+    ...(sender ? { sender } : {}),
+    ...(subject ? { subject } : {}),
+    ...(query ? { query } : {}),
+  };
 }
 
 function cronFieldOk(field: string, min: number, max: number): boolean {
@@ -134,14 +215,6 @@ function gatewayHost(value: string): string {
 
 function isAccountEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
-function Glyph({ children }: { children: React.ReactNode }) {
-  return (
-    <svg className="glyph" viewBox="0 0 16 16" aria-hidden="true">
-      {children}
-    </svg>
-  );
 }
 
 function cronPreview(expression: string): string {
@@ -196,6 +269,7 @@ interface McpServerItem {
   url: string;
   cachedTools: Array<{ name: string }>;
   lastHealth: string;
+  lastError: string | null;
   lastCheckedAt: string | null;
 }
 type WebhookEventName = "turn.settled" | "routine.completed" | "approval.required";
@@ -215,6 +289,22 @@ interface WebhookDeliveryItem {
   lastError: string | null;
   createdAt: string;
 }
+interface SubagentItem {
+  id: string;
+  parentBotId: string;
+  taskDescription: string;
+  allowedTools: string[];
+  status: "queued" | "running" | "completed" | "error" | "cancelled" | "stalled";
+  result: string | null;
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
+  stallCount: number;
+  lastProgressAt: string | null;
+  stallEvents: Array<{ at: string; reason: string }>;
+  steeringEvents: Array<{ at: string; message: string }>;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
 interface ChatItem {
   id: string;
   role: "user" | "assistant" | "tool";
@@ -223,6 +313,12 @@ interface ChatItem {
   agentId?: string;
   toolName?: string;
   approval?: { actionId: string; permissionLevel: number };
+}
+interface ConfirmationDialogState {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  destructive: boolean;
 }
 interface PendingAttachment {
   id: string;
@@ -260,16 +356,34 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const [draft, setDraft] = useState("");
   const [activeRun, setActiveRun] = useState("");
   const [error, setError] = useState("");
+  const [confirmation, setConfirmation] = useState<ConfirmationDialogState | null>(null);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
+  const [memoryReviewSuggestions, setMemoryReviewSuggestions] = useState<MemoryReviewSuggestion[]>(
+    [],
+  );
+  const [memoryEditTarget, setMemoryEditTarget] = useState<MemoryEntry | null>(null);
+  const [memoryEditDraft, setMemoryEditDraft] = useState("");
   const [memoryEvidence, setMemoryEvidence] = useState<Record<string, MemoryEvidenceEntry[]>>({});
   const [automationOpen, setAutomationOpen] = useState(false);
   const [skillItems, setSkillItems] = useState<SkillItem[]>([]);
+  const [skillCreateOpen, setSkillCreateOpen] = useState(false);
+  const [skillCreateName, setSkillCreateName] = useState("");
+  const [skillCreateInstructions, setSkillCreateInstructions] = useState("");
   const [editingSkillId, setEditingSkillId] = useState("");
   const [skillDraftName, setSkillDraftName] = useState("");
   const [skillDraftDescription, setSkillDraftDescription] = useState("");
   const [skillDraftSteps, setSkillDraftSteps] = useState<SkillStepDraft[]>([]);
   const [routineItems, setRoutineItems] = useState<RoutineItem[]>([]);
+  const [routineCreateOpen, setRoutineCreateOpen] = useState(false);
+  const [routineCreateType, setRoutineCreateType] = useState<
+    "cron" | "webhook" | "inter_bot_message" | "file_change"
+  >("cron");
+  const [routineCreateName, setRoutineCreateName] = useState("");
+  const [routineCreateSkillId, setRoutineCreateSkillId] = useState("");
+  const [routineCreateSchedule, setRoutineCreateSchedule] = useState("0 9 * * *");
+  const [routineCreateFilePath, setRoutineCreateFilePath] = useState("/home/agent");
+  const [routineCreateSenderBotId, setRoutineCreateSenderBotId] = useState("");
   const [routineHistory, setRoutineHistory] = useState<Record<string, RoutineRunItem[]>>({});
   const [editingRoutineId, setEditingRoutineId] = useState("");
   const [routineDraftName, setRoutineDraftName] = useState("");
@@ -278,6 +392,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const [routineDraftSchedule, setRoutineDraftSchedule] = useState("");
   const [routineDraftSenderBotId, setRoutineDraftSenderBotId] = useState("");
   const [routineDraftPath, setRoutineDraftPath] = useState("/home/agent");
+  const [routineDraftConnectorService, setRoutineDraftConnectorService] = useState<
+    "gmail" | "google-calendar"
+  >("gmail");
+  const [routineDraftConnectorSender, setRoutineDraftConnectorSender] = useState("");
+  const [routineDraftConnectorSubject, setRoutineDraftConnectorSubject] = useState("");
+  const [routineDraftConnectorQuery, setRoutineDraftConnectorQuery] = useState("");
+  const [routineDraftCalendarId, setRoutineDraftCalendarId] = useState("primary");
+  const [newConnectorRoutineOpen, setNewConnectorRoutineOpen] = useState(false);
   const [routineDraftOnError, setRoutineDraftOnError] = useState<"notify_user" | "retry" | "pause">(
     "pause",
   );
@@ -296,10 +418,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   } | null>(null);
   const [connectorOpen, setConnectorOpen] = useState(false);
   const [webhookOpen, setWebhookOpen] = useState(false);
+  const [subagentOpen, setSubagentOpen] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookEvents, setWebhookEvents] = useState<WebhookEventName[]>(["turn.settled"]);
   const [webhookSubscriptions, setWebhookSubscriptions] = useState<WebhookSubscriptionItem[]>([]);
   const [webhookDeliveries, setWebhookDeliveries] = useState<WebhookDeliveryItem[]>([]);
+  const [subagentItems, setSubagentItems] = useState<SubagentItem[]>([]);
+  const [subagentSteering, setSubagentSteering] = useState<Record<string, string>>({});
   const [newWebhookSecret, setNewWebhookSecret] = useState("");
   const [inferenceProviders, setInferenceProviders] = useState<string[]>([]);
   const [inferenceProviderId, setInferenceProviderId] = useState("");
@@ -315,6 +440,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const screenRef = useRef<HTMLCanvasElement>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingAttachment[]>([]);
+  const [sendingPrompt, setSendingPrompt] = useState(false);
   const [localOpen, setLocalOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
@@ -335,6 +461,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const botNameRef = useRef<HTMLInputElement>(null);
+  const confirmationResolver = useRef<((confirmed: boolean) => void) | null>(null);
   const [localAccess, setLocalAccess] = useState<LocalPolicy>("always_confirm");
   const [pendingLocal, setPendingLocal] = useState<{
     agentId: string;
@@ -343,6 +470,25 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     command: string;
     cwd?: string;
   } | null>(null);
+
+  function requestConfirmation(
+    title: string,
+    description: string,
+    confirmLabel = "Continue",
+    destructive = false,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      confirmationResolver.current = resolve;
+      setConfirmation({ title, description, confirmLabel, destructive });
+    });
+  }
+
+  function resolveConfirmation(confirmed: boolean) {
+    const resolve = confirmationResolver.current;
+    confirmationResolver.current = null;
+    setConfirmation(null);
+    resolve?.(confirmed);
+  }
   const [allowLocalSession, setAllowLocalSession] = useState(false);
   const [screenMode, setScreenMode] = useState<null | "view" | "handoff">(null);
   const [handoff, setHandoff] = useState<{
@@ -487,13 +633,23 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     if (!clerk?.enabled || !clerk.loaded || !clerk.signedIn) return;
     let cancelled = false;
     const sync = async (initial: boolean) => {
-      const sessionToken = await clerk.getToken();
-      if (cancelled || !sessionToken) return;
-      setToken(sessionToken);
-      await window.agentOS.updateToken(sessionToken).catch(() => undefined);
-      if (!initial) return;
-      const ok = await connect({ token: sessionToken });
-      if (!ok && !cancelled) setAuthError("Clerk signed in, but the gateway rejected the session.");
+      try {
+        const sessionToken = await clerk.getToken();
+        if (cancelled) return;
+        if (!sessionToken) {
+          if (initial) setAuthError("Clerk signed in but did not provide a session token.");
+          return;
+        }
+        setToken(sessionToken);
+        await window.agentOS.updateToken(sessionToken);
+        if (!initial) return;
+        const ok = await connect({ token: sessionToken });
+        if (!ok && !cancelled)
+          setAuthError("Clerk signed in, but the gateway rejected the session.");
+      } catch (err) {
+        if (!cancelled)
+          setAuthError(err instanceof Error ? err.message : "Could not connect the Clerk session.");
+      }
     };
     void sync(true);
     const timer = setInterval(() => void sync(false), 45_000);
@@ -502,6 +658,54 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       clearInterval(timer);
     };
   }, [clerk?.enabled, clerk?.loaded, clerk?.signedIn, clerk?.getToken]);
+
+  useEffect(() => {
+    if (!signedIn || !botId || !baseUrl || !token) {
+      setItems([]);
+      return;
+    }
+    let active = true;
+    void window.agentOS
+      .apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${encodeURIComponent(botId)}/history`,
+      })
+      .then((result) => {
+        if (!active || !result || typeof result !== "object" || !("items" in result)) return;
+        const history = (result.items as ChatItem[]).filter(
+          (item) =>
+            item &&
+            typeof item.id === "string" &&
+            typeof item.runId === "string" &&
+            (item.role === "user" || item.role === "assistant") &&
+            typeof item.content === "string",
+        );
+        setItems((current) => {
+          const live = current.filter(
+            (item) =>
+              item.role === "tool" ||
+              !history.some(
+                (saved) =>
+                  saved.runId === item.runId &&
+                  saved.role === item.role &&
+                  (saved.content === item.content ||
+                    (item.role === "assistant" && saved.content.startsWith(item.content))),
+              ),
+          );
+          return [...history, ...live];
+        });
+      })
+      .catch((err: unknown) => {
+        if (active)
+          setError(
+            `Could not restore chat history: ${err instanceof Error ? err.message : String(err)}`,
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [baseUrl, botId, signedIn, token]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the item list is the scroll trigger; the ref is stable.
   useEffect(() => {
@@ -776,12 +980,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   async function loadMemories() {
     if (!botId) return;
     try {
-      const rows = (await window.agentOS.apiRequest({
-        baseUrl,
-        token,
-        path: `/v1/bots/${botId}/memory`,
-      })) as MemoryEntry[];
+      const [rows, suggestions] = (await Promise.all([
+        window.agentOS.apiRequest({ baseUrl, token, path: `/v1/bots/${botId}/memory` }),
+        window.agentOS.apiRequest({ baseUrl, token, path: `/v1/bots/${botId}/memory/reviews` }),
+      ])) as [MemoryEntry[], MemoryReviewSuggestion[]];
       setMemoryEntries(rows);
+      setMemoryReviewSuggestions(suggestions);
       showWorkspace("memory");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -839,17 +1043,22 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     }
   }
 
-  async function createSkill() {
-    const name = window.prompt("Name for this skill");
-    if (!name?.trim()) return;
-    const instructions = window.prompt(
-      "What should the skill do? Enter one instruction per line to create multiple steps.",
-    );
-    const steps = instructions
+  function openSkillCreate() {
+    setSkillCreateName("");
+    setSkillCreateInstructions("");
+    setSkillCreateOpen(true);
+  }
+
+  async function createSkill(event: React.FormEvent) {
+    event.preventDefault();
+    const steps = skillCreateInstructions
       ?.split("\n")
       .map((instruction) => instruction.trim())
       .filter(Boolean);
-    if (!steps?.length) return;
+    if (!skillCreateName.trim() || !steps?.length) {
+      setError("Add a skill name and at least one instruction.");
+      return;
+    }
     try {
       await window.agentOS.apiRequest({
         baseUrl,
@@ -857,11 +1066,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         path: "/v1/skills",
         method: "POST",
         body: {
-          name: name.trim(),
+          name: skillCreateName.trim(),
           description: steps[0] ?? "",
           steps: steps.map((instruction) => ({ instruction })),
         },
       });
+      setSkillCreateOpen(false);
       await loadAutomations();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -927,7 +1137,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   async function deleteSkill(skill: SkillItem) {
-    if (!window.confirm(`Delete skill “${skill.name}”?`)) return;
+    if (
+      !(await requestConfirmation(
+        `Delete “${skill.name}”?`,
+        "This removes the skill from this account. Routines that depend on it may stop working.",
+        "Delete skill",
+        true,
+      ))
+    )
+      return;
     try {
       await window.agentOS.apiRequest({
         baseUrl,
@@ -956,7 +1174,68 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     }
   }
 
-  async function createRoutine(
+  function beginConnectorRoutine() {
+    const targetBotId = botId || bots.find((bot) => bot.role !== "subagent")?.id || "";
+    const skill = skillItems.find((item) => !item.ownerBotId || item.ownerBotId === targetBotId);
+    if (!targetBotId || !skill) {
+      setError("Choose a bot with a compatible skill before creating a connector routine.");
+      return;
+    }
+    setRoutineDraftName(`${skill.name} event routine`);
+    setRoutineDraftBotId(targetBotId);
+    setRoutineDraftSkillId(skill.id);
+    setRoutineDraftConnectorService("gmail");
+    setRoutineDraftConnectorSender("");
+    setRoutineDraftConnectorSubject("");
+    setRoutineDraftConnectorQuery("");
+    setRoutineDraftCalendarId("primary");
+    setRoutineDraftOnError("pause");
+    setNewConnectorRoutineOpen(true);
+  }
+
+  async function saveConnectorRoutine(event: React.FormEvent) {
+    event.preventDefault();
+    if (!routineDraftName.trim() || !routineDraftBotId || !routineDraftSkillId) {
+      setError("Routine name, bot, and skill are required.");
+      return;
+    }
+    const trigger = connectorEventTriggerFromDraft({
+      service: routineDraftConnectorService,
+      sender: routineDraftConnectorSender,
+      subject: routineDraftConnectorSubject,
+      query: routineDraftConnectorQuery,
+      calendarId: routineDraftCalendarId,
+    });
+    if (!trigger) {
+      setError(
+        routineDraftConnectorService === "gmail"
+          ? "Add a sender, subject, or Gmail search query filter."
+          : "Add an event title filter for Google Calendar.",
+      );
+      return;
+    }
+    try {
+      await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: "/v1/routines",
+        method: "POST",
+        body: {
+          botId: routineDraftBotId,
+          skillId: routineDraftSkillId,
+          name: routineDraftName.trim(),
+          trigger,
+          onError: routineDraftOnError,
+        },
+      });
+      setNewConnectorRoutineOpen(false);
+      await loadAutomations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function openRoutineCreate(
     triggerType: "cron" | "webhook" | "inter_bot_message" | "file_change" = "cron",
   ) {
     const skill = skillItems.find((item) => !item.ownerBotId || item.ownerBotId === botId);
@@ -964,35 +1243,34 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       setError("Create or copy a skill to the selected bot before scheduling a routine.");
       return;
     }
-    const name = window.prompt("Name for this routine", skill.name);
-    if (!name?.trim()) return;
-    const schedule =
-      triggerType === "cron"
-        ? window.prompt("Five-field cron schedule (minute hour day month weekday)", "0 9 * * *")
-        : undefined;
-    if (triggerType === "cron" && !schedule?.trim()) return;
-    let filePath: string | undefined;
-    if (triggerType === "file_change") {
-      const entered = window.prompt(
-        "Workspace path to watch. It must stay inside /home/agent.",
-        "/home/agent",
-      );
-      if (!entered?.trim()) return;
-      filePath = entered.trim();
+    setRoutineCreateType(triggerType);
+    setRoutineCreateName(skill.name);
+    setRoutineCreateSkillId(skill.id);
+    setRoutineCreateSchedule("0 9 * * *");
+    setRoutineCreateFilePath("/home/agent");
+    setRoutineCreateSenderBotId("");
+    setRoutineCreateOpen(true);
+  }
+
+  async function createRoutine(event: React.FormEvent) {
+    event.preventDefault();
+    const skill = skillItems.find((item) => item.id === routineCreateSkillId);
+    if (!routineCreateName.trim() || !skill || (skill.ownerBotId && skill.ownerBotId !== botId)) {
+      setError("Routine name and a skill available to the selected bot are required.");
+      return;
     }
-    let senderBotId: string | undefined;
-    if (triggerType === "inter_bot_message") {
-      const senders = bots.filter((bot) => bot.id !== botId && bot.role !== "subagent");
-      const selection = window.prompt(
-        `Optional sender bot ID (leave blank for any bot):\n${senders.map((bot) => `${bot.name}: ${bot.id}`).join("\n")}`,
-        "",
-      );
-      if (selection === null) return;
-      senderBotId = selection.trim() || undefined;
-      if (senderBotId && !senders.some((bot) => bot.id === senderBotId)) {
-        setError("Choose a sender bot ID from the list, or leave it blank for any bot.");
-        return;
-      }
+    const senders = bots.filter((bot) => bot.id !== botId && bot.role !== "subagent");
+    if (routineCreateSenderBotId && !senders.some((bot) => bot.id === routineCreateSenderBotId)) {
+      setError("Choose an available sender bot or select any bot.");
+      return;
+    }
+    if (routineCreateType === "cron" && !routineCreateSchedule.trim()) {
+      setError("Enter a five-field cron schedule.");
+      return;
+    }
+    if (routineCreateType === "file_change" && !routineCreateFilePath.trim()) {
+      setError("Enter a path inside /home/agent.");
+      return;
     }
     try {
       const created = (await window.agentOS.apiRequest({
@@ -1003,18 +1281,24 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         body: {
           botId,
           skillId: skill.id,
-          name,
+          name: routineCreateName.trim(),
           trigger:
-            triggerType === "cron"
-              ? { type: "cron", schedule }
-              : triggerType === "webhook"
+            routineCreateType === "cron"
+              ? { type: "cron", schedule: routineCreateSchedule.trim() }
+              : routineCreateType === "webhook"
                 ? { type: "webhook" }
-                : triggerType === "file_change"
-                  ? { type: "file_change", path: filePath }
-                  : { type: "inter_bot_message", ...(senderBotId ? { senderBotId } : {}) },
+                : routineCreateType === "file_change"
+                  ? { type: "file_change", path: routineCreateFilePath.trim() }
+                  : {
+                      type: "inter_bot_message",
+                      ...(routineCreateSenderBotId
+                        ? { senderBotId: routineCreateSenderBotId }
+                        : {}),
+                    },
         },
       })) as { routine: RoutineItem; webhookSecret?: string };
-      if (triggerType === "webhook" && created.webhookSecret)
+      setRoutineCreateOpen(false);
+      if (routineCreateType === "webhook" && created.webhookSecret)
         setRoutineWebhookSetup({
           url: `${baseUrl.replace(/\/$/, "")}/v1/webhooks/${created.routine.id}`,
           secret: created.webhookSecret,
@@ -1037,6 +1321,23 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       routine.trigger.type === "inter_bot_message" ? (routine.trigger.senderBotId ?? "") : "",
     );
     setRoutineDraftPath(routine.trigger.type === "file_change" ? (routine.trigger.path ?? "") : "");
+    setRoutineDraftConnectorService(
+      routine.trigger.type === "connector_event" ? routine.trigger.service : "gmail",
+    );
+    setRoutineDraftConnectorSender(
+      routine.trigger.type === "connector_event" ? (routine.trigger.sender ?? "") : "",
+    );
+    setRoutineDraftConnectorSubject(
+      routine.trigger.type === "connector_event" ? (routine.trigger.subject ?? "") : "",
+    );
+    setRoutineDraftConnectorQuery(
+      routine.trigger.type === "connector_event" ? (routine.trigger.query ?? "") : "",
+    );
+    setRoutineDraftCalendarId(
+      routine.trigger.type === "connector_event"
+        ? (routine.trigger.calendarId ?? "primary")
+        : "primary",
+    );
     setRoutineDraftOnError(routine.onError ?? "pause");
   }
 
@@ -1045,9 +1346,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       routineDraftBotId !== routine.botId || routineDraftSkillId !== routine.skillId;
     if (
       assignmentChanged &&
-      !window.confirm(
-        `Reassign “${routine.name}” to the selected bot and skill? Future runs will use that assignment.`,
-      )
+      !(await requestConfirmation(
+        `Reassign “${routine.name}”?`,
+        "Future runs will use the selected bot and skill.",
+        "Reassign",
+      ))
     )
       return;
     if (!routineDraftName.trim() || !routineDraftBotId || !routineDraftSkillId) {
@@ -1061,6 +1364,22 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     if (routine.trigger.type === "file_change" && !routineDraftPath.trim()) {
       setError("A file-change routine needs a path inside /home/agent.");
       return;
+    }
+    if (routine.trigger.type === "connector_event") {
+      const connectorFilter =
+        routineDraftConnectorService === "gmail"
+          ? routineDraftConnectorSender.trim() ||
+            routineDraftConnectorSubject.trim() ||
+            routineDraftConnectorQuery.trim()
+          : routineDraftConnectorSubject.trim();
+      if (!connectorFilter) {
+        setError(
+          routineDraftConnectorService === "gmail"
+            ? "Add at least one sender, subject, or Gmail query filter."
+            : "Add an event title filter for a Google Calendar routine.",
+        );
+        return;
+      }
     }
     try {
       await window.agentOS.apiRequest({
@@ -1083,7 +1402,29 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 }
               : routine.trigger.type === "file_change"
                 ? { trigger: { type: "file_change", path: routineDraftPath.trim() } }
-                : {}),
+                : routine.trigger.type === "connector_event"
+                  ? {
+                      trigger: {
+                        type: "connector_event",
+                        service: routineDraftConnectorService,
+                        ...(routineDraftConnectorService === "gmail" &&
+                        routineDraftConnectorSender.trim()
+                          ? { sender: routineDraftConnectorSender.trim() }
+                          : {}),
+                        ...(routineDraftConnectorSubject.trim()
+                          ? { subject: routineDraftConnectorSubject.trim() }
+                          : {}),
+                        ...(routineDraftConnectorService === "gmail" &&
+                        routineDraftConnectorQuery.trim()
+                          ? { query: routineDraftConnectorQuery.trim() }
+                          : {}),
+                        ...(routineDraftConnectorService === "google-calendar" &&
+                        routineDraftCalendarId.trim()
+                          ? { calendarId: routineDraftCalendarId.trim() }
+                          : {}),
+                      },
+                    }
+                  : {}),
           onError: routineDraftOnError,
         },
       });
@@ -1101,9 +1442,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     try {
       if (update.test) {
         if (
-          !window.confirm(
-            `Run “${routine.name}” now? This executes its skill immediately and may perform configured external actions.`,
-          )
+          !(await requestConfirmation(
+            `Run “${routine.name}” now?`,
+            "This runs its skill immediately and may perform configured external actions.",
+            "Run now",
+          ))
         )
           return;
         await window.agentOS.apiRequest({
@@ -1113,7 +1456,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           method: "POST",
         });
       } else if (update.delete) {
-        if (!window.confirm(`Delete routine “${routine.name}”?`)) return;
+        if (
+          !(await requestConfirmation(
+            `Delete “${routine.name}”?`,
+            "This removes the routine and its run history.",
+            "Delete routine",
+            true,
+          ))
+        )
+          return;
         await window.agentOS.apiRequest({
           baseUrl,
           token,
@@ -1176,6 +1527,56 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     }
   }
 
+  async function loadSubagents(open = true) {
+    try {
+      const rows = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: "/v1/subagents",
+      })) as SubagentItem[];
+      setSubagentItems(rows);
+      if (open) showWorkspace("subagents");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function cancelSubagent(item: SubagentItem) {
+    try {
+      await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/subagents/${encodeURIComponent(item.id)}/cancel`,
+        method: "POST",
+      });
+      await loadSubagents(false);
+      setNotice("Cancellation requested.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      await loadSubagents(false);
+    }
+  }
+
+  async function steerSubagent(item: SubagentItem) {
+    const message = subagentSteering[item.id]?.trim();
+    if (!message) return;
+    try {
+      await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/subagents/${encodeURIComponent(item.id)}/steer`,
+        method: "POST",
+        body: { message },
+      });
+      setSubagentSteering((current) => ({ ...current, [item.id]: "" }));
+      await loadSubagents(false);
+      setNotice("Guidance sent to the subagent.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      await loadSubagents(false);
+    }
+  }
+
   async function createWebhook(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
@@ -1195,7 +1596,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   async function removeWebhook(subscription: WebhookSubscriptionItem) {
-    if (!window.confirm(`Delete webhook subscription for ${subscription.url}?`)) return;
+    if (
+      !(await requestConfirmation(
+        "Delete this webhook subscription?",
+        subscription.url,
+        "Delete webhook",
+        true,
+      ))
+    )
+      return;
     try {
       await window.agentOS.apiRequest({
         baseUrl,
@@ -1247,7 +1656,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   async function removeMcpServer(server: McpServerItem) {
-    if (!window.confirm(`Remove MCP server “${server.name}”?`)) return;
+    if (
+      !(await requestConfirmation(
+        `Remove “${server.name}”?`,
+        "The agent will no longer be able to call this server's tools.",
+        "Remove server",
+        true,
+      ))
+    )
+      return;
     try {
       await window.agentOS.apiRequest({
         baseUrl,
@@ -1382,9 +1799,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       return;
     }
     if (
-      !window.confirm(
-        `Test “${skill.name}” on this bot now? The run uses real tools and can change files, sites, and connected services.`,
-      )
+      !(await requestConfirmation(
+        `Test “${skill.name}” now?`,
+        "The run uses real tools and can change files, websites, and connected services.",
+        "Start test",
+      ))
     )
       return;
     try {
@@ -1423,7 +1842,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   async function disconnectService(service: string) {
-    if (!window.confirm(`Disconnect ${service}?`)) return;
+    if (
+      !(await requestConfirmation(
+        `Disconnect ${service}?`,
+        "AgentOS will remove the saved connection and ask the provider to revoke access.",
+        "Disconnect",
+        true,
+      ))
+    )
+      return;
     try {
       const result = (await window.agentOS.apiRequest({
         baseUrl,
@@ -1443,8 +1870,18 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   async function editMemory(memory: MemoryEntry) {
-    const content = window.prompt("Edit memory", memory.content);
-    if (!content?.trim() || content === memory.content) return;
+    setMemoryEditTarget(memory);
+    setMemoryEditDraft(memory.content);
+  }
+
+  async function saveMemoryEdit(event: React.FormEvent) {
+    event.preventDefault();
+    const memory = memoryEditTarget;
+    const content = memoryEditDraft.trim();
+    if (!memory || !content || content === memory.content) {
+      setMemoryEditTarget(null);
+      return;
+    }
     try {
       await window.agentOS.apiRequest({
         baseUrl,
@@ -1453,6 +1890,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         method: "PATCH",
         body: { content },
       });
+      setMemoryEditTarget(null);
       await loadMemories();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1481,13 +1919,39 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   async function deleteMemory(memory: MemoryEntry) {
-    if (!window.confirm("Delete this memory?")) return;
+    if (
+      !(await requestConfirmation(
+        "Delete this memory?",
+        "The agent will no longer use this fact as context.",
+        "Delete memory",
+        true,
+      ))
+    )
+      return;
     try {
       await window.agentOS.apiRequest({
         baseUrl,
         token,
         path: `/v1/bots/${botId}/memory/${memory.id}`,
         method: "DELETE",
+      });
+      await loadMemories();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function resolveMemoryReview(
+    suggestion: MemoryReviewSuggestion,
+    action: "accept" | "reject",
+  ) {
+    try {
+      await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${botId}/memory/reviews/${suggestion.id}`,
+        method: "POST",
+        body: { action },
       });
       await loadMemories();
     } catch (err) {
@@ -1546,14 +2010,16 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
 
   async function sendPrompt(event: React.FormEvent) {
     event.preventDefault();
+    if (sendingPrompt) return;
     const prompt = draft.trim();
     const attachments = pendingFiles;
     if ((!prompt && attachments.length === 0) || !botId) return;
     const names = attachments.map((file) => file.name).join("\n");
+    const optimisticMessageId = crypto.randomUUID();
     setItems((old) => [
       ...old,
       {
-        id: crypto.randomUUID(),
+        id: optimisticMessageId,
         role: "user",
         content: [prompt, names].filter(Boolean).join("\n"),
         agentId: botId,
@@ -1562,6 +2028,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     setDraft("");
     setPendingFiles([]);
     setError("");
+    setSendingPrompt(true);
     try {
       await window.agentOS.send({
         type: "sendPrompt",
@@ -1571,7 +2038,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         nonce: crypto.randomUUID(),
       });
     } catch (err) {
+      setItems((old) => old.filter((item) => item.id !== optimisticMessageId));
+      setDraft((current) => current || prompt);
+      setPendingFiles((current) => (current.length ? current : attachments));
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSendingPrompt(false);
     }
   }
 
@@ -1665,12 +2137,21 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   function showWorkspace(
-    next: "chat" | "memory" | "automation" | "connectors" | "webhooks" | "local" | "model",
+    next:
+      | "chat"
+      | "memory"
+      | "automation"
+      | "connectors"
+      | "webhooks"
+      | "subagents"
+      | "local"
+      | "model",
   ) {
     setMemoryOpen(next === "memory");
     setAutomationOpen(next === "automation");
     setConnectorOpen(next === "connectors");
     setWebhookOpen(next === "webhooks");
+    setSubagentOpen(next === "subagents");
     setLocalOpen(next === "local");
     setModelOpen(next === "model");
     setConnectOpen(false);
@@ -1683,17 +2164,19 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   );
   const workspace = webhookOpen
     ? "webhooks"
-    : connectorOpen
-      ? "connectors"
-      : automationOpen
-        ? "automation"
-        : memoryOpen
-          ? "memory"
-          : localOpen
-            ? "local"
-            : modelOpen
-              ? "model"
-              : "chat";
+    : subagentOpen
+      ? "subagents"
+      : connectorOpen
+        ? "connectors"
+        : automationOpen
+          ? "automation"
+          : memoryOpen
+            ? "memory"
+            : localOpen
+              ? "local"
+              : modelOpen
+                ? "model"
+                : "chat";
   const workspaceTitle =
     workspace === "memory"
       ? "Memory"
@@ -1703,17 +2186,30 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           ? "Connectors"
           : workspace === "webhooks"
             ? "Webhooks"
-            : workspace === "local"
-              ? "This computer"
-              : workspace === "model"
-                ? "Model & privacy"
-                : (selectedBot?.name ?? "Choose a bot");
+            : workspace === "subagents"
+              ? "Subagents"
+              : workspace === "local"
+                ? "This computer"
+                : workspace === "model"
+                  ? "Model & privacy"
+                  : (selectedBot?.name ?? "Choose a bot");
   const workspaceSubtitle =
     workspace === "chat"
       ? activeRun
         ? "Working"
         : (selectedBot?.role ?? "Agent conversation")
       : (selectedBot?.name ?? "Workspace");
+
+  useEffect(() => {
+    if (workspace !== "subagents" || !signedIn || !token) return;
+    const timer = window.setInterval(() => {
+      void window.agentOS
+        .apiRequest({ baseUrl, token, path: "/v1/subagents" })
+        .then((rows) => setSubagentItems(rows as SubagentItem[]))
+        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [workspace, signedIn, token, baseUrl]);
 
   return (
     <div className="app-shell">
@@ -1740,14 +2236,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             )}
             {clerk.loaded && !clerk.signedIn && (
               <>
-                {clerkScreen === "in" ? <SignIn /> : <SignUp />}
-                <button
+                {clerkScreen === "in" ? <SignIn routing="hash" /> : <SignUp routing="hash" />}
+                <AppButton
                   type="button"
                   className="auth-switch"
                   onClick={() => setClerkScreen((current) => (current === "in" ? "up" : "in"))}
                 >
                   {clerkScreen === "in" ? "Create a new account" : "I already have an account"}
-                </button>
+                </AppButton>
               </>
             )}
             {clerk.loaded && clerk.signedIn && <p>Checking the gateway session…</p>}
@@ -1835,17 +2331,17 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               </p>
             )}
             {sessionReady && (
-              <button type="submit" className="primary" disabled={authBusy}>
+              <AppButton type="submit" className="primary" disabled={authBusy}>
                 {authBusy
                   ? "Creating account…"
                   : authMode === "create"
                     ? "Create account"
                     : "Sign in"}
-              </button>
+              </AppButton>
             )}
             {sessionReady &&
               (authMode === "create" ? (
-                <button
+                <AppButton
                   type="button"
                   className="auth-switch"
                   onClick={() => {
@@ -1854,9 +2350,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   }}
                 >
                   I already have a token
-                </button>
+                </AppButton>
               ) : (
-                <button
+                <AppButton
                   type="button"
                   className="auth-switch"
                   onClick={() => {
@@ -1865,7 +2361,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   }}
                 >
                   Create a new account
-                </button>
+                </AppButton>
               ))}
           </form>
         </section>
@@ -1876,95 +2372,105 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           <span>AgentOS</span>
         </div>
         <nav className="sidebar-nav" aria-label="Workspace">
-          <button
+          <Button
             type="button"
+            variant="ghost"
             className={`nav-item ${workspace === "chat" ? "active" : ""}`}
+            title="Chat"
             aria-current={workspace === "chat" ? "page" : undefined}
             onClick={() => showWorkspace("chat")}
           >
-            <Glyph>
-              <path d="M2.5 3.5h11v7.2H6.2L3.2 13V10.7H2.5z" />
-            </Glyph>
+            <MessageSquare className="glyph" aria-hidden="true" />
             Chat
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
             className={`nav-item ${workspace === "memory" ? "active" : ""}`}
+            title="Memory"
             aria-current={workspace === "memory" ? "page" : undefined}
             disabled={!botId}
             onClick={() => void loadMemories()}
           >
-            <Glyph>
-              <path d="M4 2.5h8v11l-4-2.2-4 2.2z" />
-            </Glyph>
+            <Bookmark className="glyph" aria-hidden="true" />
             Memory
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
             className={`nav-item ${workspace === "automation" ? "active" : ""}`}
+            title="Automations"
             aria-current={workspace === "automation" ? "page" : undefined}
             disabled={!token}
             onClick={() => void loadAutomations()}
           >
-            <Glyph>
-              <path d="M3 4.5h10M3 8h10M3 11.5h6" />
-            </Glyph>
-            Skills
-          </button>
-          <button
+            <ListChecks className="glyph" aria-hidden="true" />
+            Automations
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
+            className={`nav-item ${workspace === "subagents" ? "active" : ""}`}
+            title="Subagents"
+            aria-current={workspace === "subagents" ? "page" : undefined}
+            disabled={!token}
+            onClick={() => void loadSubagents()}
+          >
+            <GitFork className="glyph" aria-hidden="true" />
+            Subagents
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
             className={`nav-item ${workspace === "connectors" ? "active" : ""}`}
+            title="Connectors"
             aria-current={workspace === "connectors" ? "page" : undefined}
             disabled={!token}
             onClick={() => void loadConnectors()}
           >
-            <Glyph>
-              <path d="M6.2 9.2 4.4 11a2.2 2.2 0 0 1-3.1-3.1l1.8-1.8M9.8 6.8 11.6 5a2.2 2.2 0 0 1 3.1 3.1l-1.8 1.8M6.2 9.8l3.6-3.6" />
-            </Glyph>
+            <Link2 className="glyph" aria-hidden="true" />
             Connectors
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
             className={`nav-item ${workspace === "webhooks" ? "active" : ""}`}
+            title="Webhooks"
             aria-current={workspace === "webhooks" ? "page" : undefined}
             disabled={!token}
             onClick={() => void loadWebhooks()}
           >
-            <Glyph>
-              <path d="M8.8 1.8 4.2 8.2h3.2L6.6 14l5.2-7.2H8.6z" />
-            </Glyph>
+            <Sparkles className="glyph" aria-hidden="true" />
             Webhooks
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
             className={`nav-item ${workspace === "model" ? "active" : ""}`}
+            title="Model settings"
             aria-current={workspace === "model" ? "page" : undefined}
             disabled={!botId}
             onClick={() => void loadInferenceSettings()}
           >
-            <Glyph>
-              <path d="M8 2.2v2.1M8 11.7v2.1M2.2 8h2.1M11.7 8h2.1M4 4l1.5 1.5M10.5 10.5 12 12M12 4l-1.5 1.5M5.5 10.5 4 12" />
-              <circle cx="8" cy="8" r="2.2" />
-            </Glyph>
+            <Settings2 className="glyph" aria-hidden="true" />
             Model
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
+            variant="ghost"
             className={`nav-item ${workspace === "local" ? "active" : ""}`}
+            title="This computer"
             aria-current={workspace === "local" ? "page" : undefined}
             disabled={!botId}
             onClick={() => void openLocalSettings()}
           >
-            <Glyph>
-              <rect x="2.2" y="3" width="11.6" height="7.6" rx="1.2" />
-              <path d="M6 13.2h4M8 10.6v2.6" />
-            </Glyph>
+            <Computer className="glyph" aria-hidden="true" />
             This computer
-          </button>
+          </Button>
         </nav>
         <div className="roster-head">
           <span>Bots</span>
-          <button
+          <AppButton
             type="button"
             className="icon-button"
             title="New bot (Ctrl+N)"
@@ -1975,7 +2481,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             disabled={!token}
           >
             +
-          </button>
+          </AppButton>
         </div>
         <input
           className="sidebar-search"
@@ -1986,10 +2492,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         />
         <div className="roster">
           {visibleBots.map((bot) => (
-            <button
+            <AppButton
               type="button"
               key={bot.id}
               className={`bot-row ${bot.id === botId ? "selected" : ""}`}
+              title={`${bot.name} · ${bot.role}`}
+              aria-label={`${bot.name}, ${bot.role}`}
               onClick={() => {
                 setBotId(bot.id);
                 setItems([]);
@@ -2001,7 +2509,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 {bot.name}
                 <small>{bot.role}</small>
               </span>
-            </button>
+            </AppButton>
           ))}
           {!bots.length && <p className="empty-note">Connect to load your bots.</p>}
           {!!bots.length && !visibleBots.length && (
@@ -2036,10 +2544,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 />
               </label>
               <div className="popover-actions">
-                <button type="submit" className="primary">
+                <AppButton type="submit" className="primary">
                   Connect
-                </button>
-                <button
+                </AppButton>
+                <AppButton
                   type="button"
                   onClick={() => {
                     void window.agentOS.disconnect();
@@ -2051,11 +2559,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   disabled={status !== "connected"}
                 >
                   Disconnect
-                </button>
+                </AppButton>
               </div>
             </form>
           )}
-          <button
+          <AppButton
             type="button"
             className="account-row"
             onClick={() => setConnectOpen((open) => !open)}
@@ -2066,7 +2574,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               <strong>{status === "connected" ? "Connected" : "Not connected"}</strong>
               <small>{gatewayHost(baseUrl)}</small>
             </span>
-          </button>
+          </AppButton>
         </div>
       </aside>
       <main className="chat-panel">
@@ -2081,7 +2589,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </div>
           <div className="header-actions">
             {activeRun && (
-              <button
+              <AppButton
                 type="button"
                 className="stop-button"
                 onClick={() =>
@@ -2089,16 +2597,16 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 }
               >
                 Stop
-              </button>
+              </AppButton>
             )}
-            <button
+            <AppButton
               type="button"
               className={screenMode === "view" ? "primary" : ""}
               onClick={() => setScreenMode((mode) => (mode === "view" ? null : "view"))}
               disabled={!botId || screenMode === "handoff"}
             >
               {screenMode === "view" ? "Hide screen" : "Agent screen"}
-            </button>
+            </AppButton>
           </div>
         </header>
         {botDraftOpen && (
@@ -2124,12 +2632,16 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 aria-label="Bot name"
               />
               <div className="popover-actions">
-                <button type="button" onClick={() => setBotDraftOpen(false)}>
+                <AppButton type="button" onClick={() => setBotDraftOpen(false)}>
                   Cancel
-                </button>
-                <button type="submit" className="primary" disabled={!botDraftName.trim() || !token}>
+                </AppButton>
+                <AppButton
+                  type="submit"
+                  className="primary"
+                  disabled={!botDraftName.trim() || !token}
+                >
                   Create
-                </button>
+                </AppButton>
               </div>
             </div>
           </form>
@@ -2154,9 +2666,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 {label}
               </label>
             ))}
-            <button type="button" onClick={() => showWorkspace("chat")}>
+            <AppButton type="button" onClick={() => showWorkspace("chat")}>
               Back to chat
-            </button>
+            </AppButton>
           </section>
         )}
         {pendingLocal && (
@@ -2174,15 +2686,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 Always allow this session
               </label>
               <div className="approval-actions">
-                <button
+                <AppButton
                   type="button"
                   onClick={() => void replyLocal(allowLocalSession ? "allow_session" : "allow")}
                 >
                   Run
-                </button>
-                <button type="button" className="deny" onClick={() => void replyLocal("deny")}>
+                </AppButton>
+                <AppButton type="button" className="deny" onClick={() => void replyLocal("deny")}>
                   Block
-                </button>
+                </AppButton>
               </div>
             </section>
           </div>
@@ -2196,13 +2708,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             </p>
             <canvas ref={screenRef} width={1280} height={800} />
             {screenMode === "handoff" ? (
-              <button type="button" onClick={() => void returnControl()}>
+              <AppButton type="button" onClick={() => void returnControl()}>
                 Return to Bot
-              </button>
+              </AppButton>
             ) : (
-              <button type="button" onClick={() => setScreenMode(null)}>
+              <AppButton type="button" onClick={() => setScreenMode(null)}>
                 Close
-              </button>
+              </AppButton>
             )}
           </section>
         )}
@@ -2246,30 +2758,142 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               entries to remove stored facts.
             </p>
             <div className="memory-actions">
-              <button
+              <AppButton
                 type="button"
                 className="primary"
                 onClick={() => void saveInferenceSettings()}
               >
                 Save model settings
-              </button>
-              <button type="button" onClick={() => showWorkspace("chat")}>
+              </AppButton>
+              <AppButton type="button" onClick={() => showWorkspace("chat")}>
                 Back to chat
-              </button>
+              </AppButton>
             </div>
           </section>
         )}
-        {workspace === "webhooks" ? (
+        {workspace === "subagents" ? (
+          <section className="messages memory-view">
+            <div className="memory-toolbar">
+              <div>
+                <h2>Subagents</h2>
+                <p className="empty-note">Background tasks started by your agents.</p>
+              </div>
+              <div>
+                <AppButton type="button" onClick={() => void loadSubagents(false)}>
+                  Refresh
+                </AppButton>
+                <AppButton type="button" onClick={() => showWorkspace("chat")}>
+                  Back to chat
+                </AppButton>
+              </div>
+            </div>
+            {!subagentItems.length && (
+              <p className="empty-note">No background tasks have been started.</p>
+            )}
+            {subagentItems.map((item) => {
+              const active = item.status === "queued" || item.status === "running";
+              return (
+                <article className="memory-entry subagent-entry" key={item.id}>
+                  <div className="memory-toolbar">
+                    <div>
+                      <span className={`status-pill status-${item.status}`}>{item.status}</span>
+                      <small>Started {new Date(item.createdAt).toLocaleString()}</small>
+                    </div>
+                    <small>
+                      {item.lastProgressAt
+                        ? `Progress ${new Date(item.lastProgressAt).toLocaleString()}`
+                        : "Waiting for its first step"}
+                    </small>
+                  </div>
+                  <h3>Task</h3>
+                  <p>{item.taskDescription}</p>
+                  <small>Tools: {item.allowedTools.join(", ") || "none"}</small>
+                  {item.stallCount > 0 && (
+                    <p className="empty-note">
+                      {item.stallCount} stall {item.stallCount === 1 ? "event" : "events"}
+                      {item.stallEvents.at(-1)?.reason
+                        ? ` · ${item.stallEvents.at(-1)?.reason}`
+                        : ""}
+                    </p>
+                  )}
+                  {item.result && (
+                    <details>
+                      <summary>Result</summary>
+                      <pre className="subagent-result">{item.result}</pre>
+                    </details>
+                  )}
+                  {item.usage && (
+                    <small>
+                      Tokens: {item.usage.totalTokens.toLocaleString()} total ·{" "}
+                      {item.usage.promptTokens.toLocaleString()} prompt ·{" "}
+                      {item.usage.completionTokens.toLocaleString()} completion
+                    </small>
+                  )}
+                  {active && (
+                    <>
+                      <form
+                        className="subagent-steer-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void steerSubagent(item);
+                        }}
+                      >
+                        <label htmlFor={`subagent-steer-${item.id}`}>Send guidance</label>
+                        <textarea
+                          id={`subagent-steer-${item.id}`}
+                          value={subagentSteering[item.id] ?? ""}
+                          onChange={(event) =>
+                            setSubagentSteering((current) => ({
+                              ...current,
+                              [item.id]: event.target.value,
+                            }))
+                          }
+                          maxLength={2000}
+                          rows={2}
+                          placeholder="Add context or redirect the task"
+                        />
+                        <div className="memory-actions">
+                          <AppButton type="submit" disabled={!subagentSteering[item.id]?.trim()}>
+                            Send guidance
+                          </AppButton>
+                          <AppButton
+                            type="button"
+                            className="deny"
+                            onClick={() => void cancelSubagent(item)}
+                          >
+                            Cancel task
+                          </AppButton>
+                        </div>
+                      </form>
+                      {item.steeringEvents.length > 0 && (
+                        <details>
+                          <summary>Guidance history ({item.steeringEvents.length})</summary>
+                          <ul>
+                            {item.steeringEvents.map((event, index) => (
+                              <li key={`${event.at}-${index}`}>
+                                {new Date(event.at).toLocaleString()} · {event.message}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </>
+                  )}
+                </article>
+              );
+            })}
+          </section>
+        ) : workspace === "webhooks" ? (
           <section className="messages memory-view">
             <div className="memory-toolbar">
               <h2>Outbound webhooks</h2>
               <div>
-                <button type="button" onClick={() => void loadWebhooks()}>
+                <AppButton type="button" onClick={() => void loadWebhooks()}>
                   Refresh
-                </button>
-                <button type="button" onClick={() => setWebhookOpen(false)}>
+                </AppButton>
+                <AppButton type="button" onClick={() => setWebhookOpen(false)}>
                   Back to chat
-                </button>
+                </AppButton>
               </div>
             </div>
             <p className="empty-note">
@@ -2281,9 +2905,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 <strong>Save this signing secret now</strong>
                 <p>AgentOS stores only an encrypted copy and will not show it again.</p>
                 <code>{newWebhookSecret}</code>
-                <button type="button" onClick={() => setNewWebhookSecret("")}>
+                <AppButton type="button" onClick={() => setNewWebhookSecret("")}>
                   Done
-                </button>
+                </AppButton>
               </output>
             )}
             <form className="mcp-server-form" onSubmit={(event) => void createWebhook(event)}>
@@ -2316,9 +2940,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   ),
                 )}
               </fieldset>
-              <button type="submit" disabled={!token || webhookEvents.length === 0}>
+              <AppButton type="submit" disabled={!token || webhookEvents.length === 0}>
                 Create webhook
-              </button>
+              </AppButton>
             </form>
             <h3>Subscriptions</h3>
             {!webhookSubscriptions.length && (
@@ -2331,9 +2955,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   <small>Created {new Date(subscription.createdAt).toLocaleString()}</small>
                 </div>
                 <p>Events: {subscription.events.join(", ")}</p>
-                <button type="button" onClick={() => void removeWebhook(subscription)}>
+                <AppButton type="button" onClick={() => void removeWebhook(subscription)}>
                   Delete subscription
-                </button>
+                </AppButton>
               </article>
             ))}
             <h3>Recent deliveries</h3>
@@ -2354,9 +2978,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   {delivery.lastError ? ` · ${delivery.lastError}` : ""}
                 </p>
                 {delivery.status === "failed" && (
-                  <button type="button" onClick={() => void retryWebhookDelivery(delivery)}>
+                  <AppButton type="button" onClick={() => void retryWebhookDelivery(delivery)}>
                     Retry delivery
-                  </button>
+                  </AppButton>
                 )}
               </article>
             ))}
@@ -2366,12 +2990,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             <div className="memory-toolbar">
               <h2>Connectors</h2>
               <div>
-                <button type="button" onClick={() => void loadConnectors()}>
+                <AppButton type="button" onClick={() => void loadConnectors()}>
                   Refresh
-                </button>
-                <button type="button" onClick={() => setConnectorOpen(false)}>
+                </AppButton>
+                <AppButton type="button" onClick={() => setConnectorOpen(false)}>
                   Back to chat
-                </button>
+                </AppButton>
               </div>
             </div>
             <div className="connector-grid">
@@ -2395,13 +3019,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     )}
                     <div className="memory-actions">
                       {connected ? (
-                        <button type="button" onClick={() => void disconnectService(card.oauth)}>
+                        <AppButton type="button" onClick={() => void disconnectService(card.oauth)}>
                           Disconnect
-                        </button>
+                        </AppButton>
                       ) : (
-                        <button type="button" onClick={() => void connectService(card.oauth)}>
+                        <AppButton type="button" onClick={() => void connectService(card.oauth)}>
                           Connect
-                        </button>
+                        </AppButton>
                       )}
                     </div>
                   </article>
@@ -2416,9 +3040,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 </div>
                 <p>Scopes: {connector.scopes.join(", ") || "provider defaults"}</p>
                 <div className="memory-actions">
-                  <button type="button" onClick={() => void disconnectService(connector.service)}>
+                  <AppButton
+                    type="button"
+                    onClick={() => void disconnectService(connector.service)}
+                  >
                     Disconnect
-                  </button>
+                  </AppButton>
                 </div>
               </article>
             ))}
@@ -2452,9 +3079,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 onChange={(event) => setMcpApiKey(event.target.value)}
                 placeholder="Bearer API key (optional)"
               />
-              <button type="submit" disabled={!token}>
+              <AppButton type="submit" disabled={!token}>
                 Add MCP server
-              </button>
+              </AppButton>
             </form>
             {!mcpItems.length && <p className="empty-note">No MCP servers configured.</p>}
             {mcpItems.map((server) => (
@@ -2469,11 +3096,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   </small>
                 </div>
                 <p>{server.url}</p>
+                {server.lastError && <output>{server.lastError}</output>}
                 <p>{server.cachedTools?.length ?? 0} discovered tools</p>
                 <div className="memory-actions">
-                  <button type="button" onClick={() => void removeMcpServer(server)}>
+                  <AppButton type="button" onClick={() => void removeMcpServer(server)}>
                     Remove
-                  </button>
+                  </AppButton>
                 </div>
               </article>
             ))}
@@ -2488,40 +3116,40 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 </p>
               </div>
               <div className="toolbar-actions">
-                <button type="button" onClick={() => void toggleRecording()} disabled={!botId}>
+                <AppButton type="button" onClick={() => void toggleRecording()} disabled={!botId}>
                   {recording ? "Stop recording" : "Record browser task"}
-                </button>
-                <button type="button" className="primary" onClick={() => void createSkill()}>
+                </AppButton>
+                <AppButton type="button" className="primary" onClick={openSkillCreate}>
                   New skill
-                </button>
+                </AppButton>
                 <details className="menu">
                   <summary>New routine</summary>
                   <div className="menu-panel">
-                    <button
+                    <AppButton
                       type="button"
                       onClick={(event) => {
                         event.currentTarget.closest("details")?.removeAttribute("open");
-                        void createRoutine("cron");
+                        openRoutineCreate("cron");
                       }}
                       disabled={!botId || !skillItems.length}
                     >
                       On a schedule
-                    </button>
-                    <button
+                    </AppButton>
+                    <AppButton
                       type="button"
                       onClick={(event) => {
                         event.currentTarget.closest("details")?.removeAttribute("open");
-                        void createRoutine("webhook");
+                        openRoutineCreate("webhook");
                       }}
                       disabled={!botId || !skillItems.length}
                     >
                       From a webhook
-                    </button>
-                    <button
+                    </AppButton>
+                    <AppButton
                       type="button"
                       onClick={(event) => {
                         event.currentTarget.closest("details")?.removeAttribute("open");
-                        void createRoutine("inter_bot_message");
+                        openRoutineCreate("inter_bot_message");
                       }}
                       disabled={
                         !botId ||
@@ -2530,22 +3158,32 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                       }
                     >
                       When another bot messages
-                    </button>
-                    <button
+                    </AppButton>
+                    <AppButton
                       type="button"
                       onClick={(event) => {
                         event.currentTarget.closest("details")?.removeAttribute("open");
-                        void createRoutine("file_change");
+                        openRoutineCreate("file_change");
                       }}
                       disabled={!botId || !skillItems.length}
                     >
                       When a file changes
-                    </button>
+                    </AppButton>
+                    <AppButton
+                      type="button"
+                      onClick={(event) => {
+                        event.currentTarget.closest("details")?.removeAttribute("open");
+                        beginConnectorRoutine();
+                      }}
+                      disabled={!botId || !skillItems.length}
+                    >
+                      When a Gmail or Calendar event arrives
+                    </AppButton>
                   </div>
                 </details>
-                <button type="button" onClick={() => showWorkspace("chat")}>
+                <AppButton type="button" onClick={() => showWorkspace("chat")}>
                   Back to chat
-                </button>
+                </AppButton>
               </div>
             </div>
             {routineWebhookSetup && (
@@ -2554,10 +3192,148 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 <p>AgentOS stores only its hash, so it cannot be shown again.</p>
                 <code>POST {routineWebhookSetup.url}</code>
                 <code>X-Routine-Secret: {routineWebhookSetup.secret}</code>
-                <button type="button" onClick={() => setRoutineWebhookSetup(null)}>
+                <AppButton type="button" onClick={() => setRoutineWebhookSetup(null)}>
                   Done
-                </button>
+                </AppButton>
               </output>
+            )}
+            {newConnectorRoutineOpen && (
+              <form className="skill-editor" onSubmit={(event) => void saveConnectorRoutine(event)}>
+                <h3>New connector routine</h3>
+                <label>
+                  Routine name
+                  <input
+                    value={routineDraftName}
+                    onChange={(event) => setRoutineDraftName(event.target.value)}
+                    maxLength={120}
+                    required
+                  />
+                </label>
+                <label>
+                  Bot
+                  <select
+                    value={routineDraftBotId}
+                    onChange={(event) => {
+                      const nextBotId = event.target.value;
+                      setRoutineDraftBotId(nextBotId);
+                      const compatibleSkills = skillItems.filter(
+                        (skill) => !skill.ownerBotId || skill.ownerBotId === nextBotId,
+                      );
+                      setRoutineDraftSkillId(compatibleSkills[0]?.id ?? "");
+                    }}
+                  >
+                    {bots
+                      .filter((bot) => bot.role !== "subagent")
+                      .map((bot) => (
+                        <option key={bot.id} value={bot.id}>
+                          {bot.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label>
+                  Skill
+                  <select
+                    value={routineDraftSkillId}
+                    onChange={(event) => setRoutineDraftSkillId(event.target.value)}
+                  >
+                    {skillItems
+                      .filter(
+                        (skill) => !skill.ownerBotId || skill.ownerBotId === routineDraftBotId,
+                      )
+                      .map((skill) => (
+                        <option key={skill.id} value={skill.id}>
+                          {skill.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                <label>
+                  Connector
+                  <select
+                    value={routineDraftConnectorService}
+                    onChange={(event) =>
+                      setRoutineDraftConnectorService(
+                        event.target.value as "gmail" | "google-calendar",
+                      )
+                    }
+                  >
+                    <option value="gmail">Gmail</option>
+                    <option value="google-calendar">Google Calendar</option>
+                  </select>
+                </label>
+                {routineDraftConnectorService === "gmail" && (
+                  <label>
+                    Sender email (optional)
+                    <input
+                      type="email"
+                      value={routineDraftConnectorSender}
+                      onChange={(event) => setRoutineDraftConnectorSender(event.target.value)}
+                      maxLength={200}
+                      placeholder="name@example.com"
+                    />
+                  </label>
+                )}
+                <label>
+                  {routineDraftConnectorService === "gmail"
+                    ? "Subject contains (optional)"
+                    : "Event title contains"}
+                  <input
+                    value={routineDraftConnectorSubject}
+                    onChange={(event) => setRoutineDraftConnectorSubject(event.target.value)}
+                    maxLength={200}
+                    placeholder="Project update"
+                  />
+                </label>
+                {routineDraftConnectorService === "gmail" ? (
+                  <label>
+                    Gmail search query (optional)
+                    <input
+                      value={routineDraftConnectorQuery}
+                      onChange={(event) => setRoutineDraftConnectorQuery(event.target.value)}
+                      maxLength={200}
+                      placeholder="has:attachment"
+                    />
+                  </label>
+                ) : (
+                  <label>
+                    Calendar ID
+                    <input
+                      value={routineDraftCalendarId}
+                      onChange={(event) => setRoutineDraftCalendarId(event.target.value)}
+                      maxLength={200}
+                      placeholder="primary"
+                    />
+                  </label>
+                )}
+                <label>
+                  When a run fails
+                  <select
+                    value={routineDraftOnError}
+                    onChange={(event) =>
+                      setRoutineDraftOnError(
+                        event.target.value as "notify_user" | "retry" | "pause",
+                      )
+                    }
+                  >
+                    <option value="pause">Pause the routine</option>
+                    <option value="notify_user">Notify you</option>
+                    <option value="retry">Retry</option>
+                  </select>
+                </label>
+                <p>
+                  Connect the selected Google service first. The initial poll records a baseline;
+                  only new matching events trigger runs.
+                </p>
+                <div className="memory-actions">
+                  <AppButton type="submit" className="primary">
+                    Create routine
+                  </AppButton>
+                  <AppButton type="button" onClick={() => setNewConnectorRoutineOpen(false)}>
+                    Cancel
+                  </AppButton>
+                </div>
+              </form>
             )}
             {taughtDraft && (
               <form
@@ -2605,10 +3381,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   </label>
                 ))}
                 <div className="memory-actions">
-                  <button type="submit">Save skill</button>
-                  <button type="button" onClick={() => setTaughtDraft(null)}>
+                  <AppButton type="submit">Save skill</AppButton>
+                  <AppButton type="button" onClick={() => setTaughtDraft(null)}>
                     Discard draft
-                  </button>
+                  </AppButton>
                 </div>
               </form>
             )}
@@ -2759,7 +3535,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                             Require approval before this step
                           </label>
                         </div>
-                        <button
+                        <AppButton
                           type="button"
                           onClick={() =>
                             setSkillDraftSteps((previous) =>
@@ -2769,11 +3545,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                           disabled={skillDraftSteps.length < 2}
                         >
                           Remove step
-                        </button>
+                        </AppButton>
                       </div>
                     ))}
                     <div className="memory-actions">
-                      <button
+                      <AppButton
                         type="button"
                         onClick={() =>
                           setSkillDraftSteps((previous) => [
@@ -2789,36 +3565,36 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                         }
                       >
                         Add step
-                      </button>
-                      <button type="button" onClick={() => void saveSkill()}>
+                      </AppButton>
+                      <AppButton type="button" onClick={() => void saveSkill()}>
                         Save version
-                      </button>
-                      <button type="button" onClick={() => setEditingSkillId("")}>
+                      </AppButton>
+                      <AppButton type="button" onClick={() => setEditingSkillId("")}>
                         Cancel
-                      </button>
+                      </AppButton>
                     </div>
                   </div>
                 )}
                 <div className="memory-actions">
-                  <button
+                  <AppButton
                     type="button"
                     onClick={() =>
                       editingSkillId === skill.id ? setEditingSkillId("") : editSkill(skill)
                     }
                   >
                     {editingSkillId === skill.id ? "Close editor" : "Edit"}
-                  </button>
-                  <button type="button" onClick={() => void testSkill(skill)}>
+                  </AppButton>
+                  <AppButton type="button" onClick={() => void testSkill(skill)}>
                     Test skill
-                  </button>
+                  </AppButton>
                   {skillTests[skill.id] && (
-                    <button type="button" onClick={() => void refreshSkillTest(skill)}>
+                    <AppButton type="button" onClick={() => void refreshSkillTest(skill)}>
                       Test {skillTests[skill.id]?.status}
-                    </button>
+                    </AppButton>
                   )}
-                  <button type="button" onClick={() => void deleteSkill(skill)}>
+                  <AppButton type="button" onClick={() => void deleteSkill(skill)}>
                     Delete
-                  </button>
+                  </AppButton>
                   <select
                     aria-label={`Copy ${skill.name} to another bot`}
                     value=""
@@ -2926,6 +3702,75 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                         />
                       </label>
                     )}
+                    {routine.trigger.type === "connector_event" && (
+                      <>
+                        <label>
+                          Connector
+                          <select
+                            value={routineDraftConnectorService}
+                            onChange={(event) =>
+                              setRoutineDraftConnectorService(
+                                event.target.value as "gmail" | "google-calendar",
+                              )
+                            }
+                          >
+                            <option value="gmail">Gmail</option>
+                            <option value="google-calendar">Google Calendar</option>
+                          </select>
+                        </label>
+                        {routineDraftConnectorService === "gmail" && (
+                          <label>
+                            Sender email (optional)
+                            <input
+                              type="email"
+                              value={routineDraftConnectorSender}
+                              onChange={(event) =>
+                                setRoutineDraftConnectorSender(event.target.value)
+                              }
+                              maxLength={200}
+                              placeholder="name@example.com"
+                            />
+                          </label>
+                        )}
+                        <label>
+                          {routineDraftConnectorService === "gmail"
+                            ? "Subject contains (optional)"
+                            : "Event title contains"}
+                          <input
+                            value={routineDraftConnectorSubject}
+                            onChange={(event) =>
+                              setRoutineDraftConnectorSubject(event.target.value)
+                            }
+                            maxLength={200}
+                            placeholder="Project update"
+                          />
+                        </label>
+                        {routineDraftConnectorService === "gmail" ? (
+                          <label>
+                            Gmail search query (optional)
+                            <input
+                              value={routineDraftConnectorQuery}
+                              onChange={(event) =>
+                                setRoutineDraftConnectorQuery(event.target.value)
+                              }
+                              maxLength={200}
+                              placeholder="has:attachment"
+                            />
+                          </label>
+                        ) : (
+                          <label>
+                            Calendar ID
+                            <input
+                              value={routineDraftCalendarId}
+                              onChange={(event) => setRoutineDraftCalendarId(event.target.value)}
+                              maxLength={200}
+                              placeholder="primary"
+                            />
+                          </label>
+                        )}
+                        <p>Choose a filter so the routine only runs for matching events.</p>
+                      </>
+                    )}
                     <label>
                       When a run fails
                       <select
@@ -2962,12 +3807,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                       </label>
                     )}
                     <div className="memory-actions">
-                      <button type="button" onClick={() => void saveRoutineEdit(routine)}>
+                      <AppButton type="button" onClick={() => void saveRoutineEdit(routine)}>
                         Save routine
-                      </button>
-                      <button type="button" onClick={() => setEditingRoutineId("")}>
+                      </AppButton>
+                      <AppButton type="button" onClick={() => setEditingRoutineId("")}>
                         Cancel
-                      </button>
+                      </AppButton>
                     </div>
                   </div>
                 )}
@@ -3000,27 +3845,30 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   </details>
                 ))}
                 <div className="memory-actions">
-                  <button type="button" onClick={() => editRoutine(routine)}>
+                  <AppButton type="button" onClick={() => editRoutine(routine)}>
                     Edit
-                  </button>
-                  <button type="button" onClick={() => void updateRoutine(routine, { test: true })}>
+                  </AppButton>
+                  <AppButton
+                    type="button"
+                    onClick={() => void updateRoutine(routine, { test: true })}
+                  >
                     Test run
-                  </button>
-                  <button type="button" onClick={() => void loadRoutineHistory(routine)}>
+                  </AppButton>
+                  <AppButton type="button" onClick={() => void loadRoutineHistory(routine)}>
                     History
-                  </button>
-                  <button
+                  </AppButton>
+                  <AppButton
                     type="button"
                     onClick={() => void updateRoutine(routine, { enabled: !routine.enabled })}
                   >
                     {routine.enabled ? "Pause" : "Resume"}
-                  </button>
-                  <button
+                  </AppButton>
+                  <AppButton
                     type="button"
                     onClick={() => void updateRoutine(routine, { delete: true })}
                   >
                     Delete
-                  </button>
+                  </AppButton>
                 </div>
               </article>
             ))}
@@ -3030,14 +3878,54 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             <div className="memory-toolbar">
               <h2>Memory</h2>
               <div>
-                <button type="button" onClick={() => void exportMemories()}>
+                <AppButton type="button" onClick={() => void exportMemories()}>
                   Export JSON
-                </button>
-                <button type="button" onClick={() => showWorkspace("chat")}>
+                </AppButton>
+                <AppButton type="button" onClick={() => showWorkspace("chat")}>
                   Back to chat
-                </button>
+                </AppButton>
               </div>
             </div>
+            {!!memoryReviewSuggestions.length && (
+              <section aria-labelledby="memory-review-heading">
+                <h3 id="memory-review-heading">Suggested updates</h3>
+                <p className="empty-note">
+                  The agent found possible corrections. Existing memory changes only when you
+                  accept.
+                </p>
+                {memoryReviewSuggestions.map((suggestion) => (
+                  <article className="memory-entry" key={suggestion.id}>
+                    <small>
+                      Possible correction · {new Date(suggestion.createdAt).toLocaleString()}
+                    </small>
+                    <p>
+                      <strong>Current</strong>
+                      <br />
+                      {suggestion.existingContent}
+                    </p>
+                    <p>
+                      <strong>Suggested</strong>
+                      <br />
+                      {suggestion.proposedContent}
+                    </p>
+                    <div className="memory-actions">
+                      <AppButton
+                        type="button"
+                        onClick={() => void resolveMemoryReview(suggestion, "accept")}
+                      >
+                        Accept update
+                      </AppButton>
+                      <AppButton
+                        type="button"
+                        onClick={() => void resolveMemoryReview(suggestion, "reject")}
+                      >
+                        Dismiss
+                      </AppButton>
+                    </div>
+                  </article>
+                ))}
+              </section>
+            )}
             {!memoryEntries.length && <p className="empty-note">No saved memories for this bot.</p>}
             {memoryEntries.map((memory) => (
               <article className="memory-entry" key={memory.id}>
@@ -3052,15 +3940,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 </div>
                 <p>{memory.content}</p>
                 <div className="memory-actions">
-                  <button type="button" onClick={() => void loadMemoryEvidence(memory)}>
+                  <AppButton type="button" onClick={() => void loadMemoryEvidence(memory)}>
                     {memoryEvidence[memory.id] ? "Hide evidence" : "Evidence"}
-                  </button>
-                  <button type="button" onClick={() => void editMemory(memory)}>
+                  </AppButton>
+                  <AppButton type="button" onClick={() => void editMemory(memory)}>
                     Edit
-                  </button>
-                  <button type="button" onClick={() => void deleteMemory(memory)}>
+                  </AppButton>
+                  <AppButton type="button" onClick={() => void deleteMemory(memory)}>
                     Delete
-                  </button>
+                  </AppButton>
                 </div>
                 {memoryEvidence[memory.id]?.length ? (
                   <ul>
@@ -3093,7 +3981,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     "Check my connected accounts",
                     "Plan the next routine",
                   ].map((suggestion) => (
-                    <button
+                    <AppButton
                       key={suggestion}
                       type="button"
                       disabled={!botId}
@@ -3103,7 +3991,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                       }}
                     >
                       {suggestion}
-                    </button>
+                    </AppButton>
                   ))}
                 </div>
               </div>
@@ -3116,19 +4004,19 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     <pre>{item.content}</pre>
                     {item.approval && (
                       <div className="approval-actions">
-                        <button type="button" onClick={() => void decide(item, "allow_once")}>
+                        <AppButton type="button" onClick={() => void decide(item, "allow_once")}>
                           Allow once
-                        </button>
-                        <button type="button" onClick={() => void decide(item, "always_allow")}>
+                        </AppButton>
+                        <AppButton type="button" onClick={() => void decide(item, "always_allow")}>
                           Always allow
-                        </button>
-                        <button
+                        </AppButton>
+                        <AppButton
                           type="button"
                           className="deny"
                           onClick={() => void decide(item, "deny")}
                         >
                           Deny
-                        </button>
+                        </AppButton>
                       </div>
                     )}
                   </details>
@@ -3137,13 +4025,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     <div className="message-label">
                       {item.role === "user" ? "You" : (selectedBot?.name ?? "Agent")}
                       {item.role === "assistant" && (
-                        <button
+                        <AppButton
                           type="button"
                           className="copy-button"
                           onClick={() => void navigator.clipboard.writeText(item.content)}
                         >
                           Copy
-                        </button>
+                        </AppButton>
                       )}
                     </div>
                     <div className="message-content">{item.content}</div>
@@ -3156,9 +4044,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         {error && (
           <div className="error-banner" role="alert">
             {error}
-            <button type="button" onClick={() => setError("")} aria-label="Dismiss">
+            <AppButton type="button" onClick={() => setError("")} aria-label="Dismiss">
               ×
-            </button>
+            </AppButton>
           </div>
         )}
         {notice && <output className="notice-banner">{notice}</output>}
@@ -3188,14 +4076,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 {pendingFiles.map((file) => (
                   <span className="attachment-chip" key={file.id}>
                     {file.name}
-                    <button
+                    <AppButton
                       type="button"
                       onClick={() =>
                         setPendingFiles((current) => current.filter((item) => item.id !== file.id))
                       }
                     >
                       ×
-                    </button>
+                    </AppButton>
                   </span>
                 ))}
               </div>
@@ -3237,35 +4125,223 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             />
             <div className="composer-footer">
               <div className="composer-tools">
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
                   className="icon-button"
                   title="Attach files"
                   disabled={!botId}
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  <Glyph>
-                    <path d="M8.2 4.2 4.4 8a2.6 2.6 0 0 0 3.7 3.7l4.6-4.6a1.7 1.7 0 0 0-2.4-2.4L5.8 9.2a.8.8 0 0 0 1.1 1.1l3.6-3.6" />
-                  </Glyph>
-                </button>
+                  <Paperclip className="glyph" aria-hidden="true" />
+                </Button>
                 <span>
                   <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
                   {dragOver ? " · Drop to attach" : ""}
                 </span>
               </div>
-              <button
+              <Button
                 type="submit"
+                variant="solid"
                 className="primary"
-                disabled={!botId || (!draft.trim() && pendingFiles.length === 0)}
+                disabled={sendingPrompt || !botId || (!draft.trim() && pendingFiles.length === 0)}
+                aria-busy={sendingPrompt}
               >
-                Send
-                <Glyph>
-                  <path d="M3 8h10M9 4l4 4-4 4" />
-                </Glyph>
-              </button>
+                {sendingPrompt ? "Sending…" : "Send"}
+                <ArrowRight className="glyph" aria-hidden="true" />
+              </Button>
             </div>
           </form>
         )}
+        <AlertDialog.Root
+          open={confirmation !== null}
+          onOpenChange={(open) => {
+            if (!open && confirmation) resolveConfirmation(false);
+          }}
+        >
+          {confirmation && (
+            <AlertDialog.Content maxWidth="440px">
+              <AlertDialog.Title>{confirmation.title}</AlertDialog.Title>
+              <AlertDialog.Description>{confirmation.description}</AlertDialog.Description>
+              <div className="memory-actions">
+                <AlertDialog.Cancel>
+                  <AppButton type="button">Cancel</AppButton>
+                </AlertDialog.Cancel>
+                <AppButton
+                  type="button"
+                  className={confirmation.destructive ? "danger" : "primary"}
+                  variant="solid"
+                  color={confirmation.destructive ? "red" : undefined}
+                  onClick={() => resolveConfirmation(true)}
+                >
+                  {confirmation.confirmLabel}
+                </AppButton>
+              </div>
+            </AlertDialog.Content>
+          )}
+        </AlertDialog.Root>
+        <Dialog.Root
+          open={memoryEditTarget !== null}
+          onOpenChange={(open) => {
+            if (!open) setMemoryEditTarget(null);
+          }}
+        >
+          <Dialog.Content maxWidth="540px">
+            <Dialog.Title>Edit memory</Dialog.Title>
+            <Dialog.Description>
+              Update the fact the agent uses as context. This changes the saved memory immediately.
+            </Dialog.Description>
+            <form className="skill-editor" onSubmit={(event) => void saveMemoryEdit(event)}>
+              <label>
+                Memory
+                <textarea
+                  value={memoryEditDraft}
+                  onChange={(event) => setMemoryEditDraft(event.target.value)}
+                  rows={6}
+                  maxLength={4000}
+                  required
+                />
+              </label>
+              <div className="memory-actions">
+                <Dialog.Close>
+                  <AppButton type="button">Cancel</AppButton>
+                </Dialog.Close>
+                <AppButton
+                  type="submit"
+                  className="primary"
+                  disabled={
+                    !memoryEditDraft.trim() || memoryEditDraft.trim() === memoryEditTarget?.content
+                  }
+                >
+                  Save memory
+                </AppButton>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Root>
+        <Dialog.Root open={skillCreateOpen} onOpenChange={setSkillCreateOpen}>
+          <Dialog.Content maxWidth="540px">
+            <Dialog.Title>New skill</Dialog.Title>
+            <Dialog.Description>
+              Give the skill a name and add one instruction per line. Each line becomes a step.
+            </Dialog.Description>
+            <form className="skill-editor" onSubmit={(event) => void createSkill(event)}>
+              <label>
+                Name
+                <input
+                  value={skillCreateName}
+                  onChange={(event) => setSkillCreateName(event.target.value)}
+                  maxLength={120}
+                  required
+                />
+              </label>
+              <label>
+                Instructions
+                <textarea
+                  value={skillCreateInstructions}
+                  onChange={(event) => setSkillCreateInstructions(event.target.value)}
+                  rows={7}
+                  required
+                  placeholder={"Open the project dashboard\nSummarize the latest activity"}
+                />
+              </label>
+              <div className="memory-actions">
+                <Dialog.Close>
+                  <AppButton type="button">Cancel</AppButton>
+                </Dialog.Close>
+                <AppButton type="submit" className="primary">
+                  Create skill
+                </AppButton>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Root>
+        <Dialog.Root open={routineCreateOpen} onOpenChange={setRoutineCreateOpen}>
+          <Dialog.Content maxWidth="560px">
+            <Dialog.Title>New routine</Dialog.Title>
+            <Dialog.Description>
+              This routine runs a skill on the selected bot when its trigger fires.
+            </Dialog.Description>
+            <form className="skill-editor" onSubmit={(event) => void createRoutine(event)}>
+              <label>
+                Name
+                <input
+                  value={routineCreateName}
+                  onChange={(event) => setRoutineCreateName(event.target.value)}
+                  maxLength={120}
+                  required
+                />
+              </label>
+              <label>
+                Skill
+                <select
+                  value={routineCreateSkillId}
+                  onChange={(event) => setRoutineCreateSkillId(event.target.value)}
+                  required
+                >
+                  {skillItems
+                    .filter((skill) => !skill.ownerBotId || skill.ownerBotId === botId)
+                    .map((skill) => (
+                      <option key={skill.id} value={skill.id}>
+                        {skill.name}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              {routineCreateType === "cron" && (
+                <label>
+                  Schedule (minute hour day month weekday)
+                  <input
+                    value={routineCreateSchedule}
+                    onChange={(event) => setRoutineCreateSchedule(event.target.value)}
+                    placeholder="0 9 * * *"
+                    required
+                  />
+                </label>
+              )}
+              {routineCreateType === "file_change" && (
+                <label>
+                  Workspace path to watch
+                  <input
+                    value={routineCreateFilePath}
+                    onChange={(event) => setRoutineCreateFilePath(event.target.value)}
+                    placeholder="/home/agent/project"
+                    required
+                  />
+                </label>
+              )}
+              {routineCreateType === "inter_bot_message" && (
+                <label>
+                  Sender bot
+                  <select
+                    value={routineCreateSenderBotId}
+                    onChange={(event) => setRoutineCreateSenderBotId(event.target.value)}
+                  >
+                    <option value="">Any bot</option>
+                    {bots
+                      .filter((bot) => bot.id !== botId && bot.role !== "subagent")
+                      .map((bot) => (
+                        <option key={bot.id} value={bot.id}>
+                          {bot.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              )}
+              {routineCreateType === "webhook" && (
+                <p>A one-time signing secret will be shown after the routine is created.</p>
+              )}
+              <div className="memory-actions">
+                <Dialog.Close>
+                  <AppButton type="button">Cancel</AppButton>
+                </Dialog.Close>
+                <AppButton type="submit" className="primary">
+                  Create routine
+                </AppButton>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Root>
       </main>
     </div>
   );
@@ -3344,6 +4420,8 @@ const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("root mount node is missing");
 createRoot(rootElement).render(
   <React.StrictMode>
-    {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
+    <Theme appearance="dark" accentColor="blue" grayColor="slate" radius="large">
+      {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
+    </Theme>
   </React.StrictMode>,
 );

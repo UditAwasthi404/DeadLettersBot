@@ -7,6 +7,7 @@ import { toCoreMessages, toToolSet } from "../convert.ts";
 import type {
   InferencePurpose,
   InferenceSession,
+  InferenceSessionOptions,
   InferenceStreamEvent,
   InferenceTool,
   ProviderFactory,
@@ -21,16 +22,19 @@ export class XaiSession implements InferenceSession {
   readonly purpose: InferencePurpose;
   private readonly modelId: string;
   private readonly client: ReturnType<typeof createOpenAI>;
+  private readonly options?: InferenceSessionOptions;
 
   constructor(
     purpose: InferencePurpose,
     modelId?: string,
     apiKey = process.env.XAI_API_KEY,
     baseURL = process.env.XAI_BASE_URL ?? "https://api.x.ai/v1",
+    options?: InferenceSessionOptions,
   ) {
     this.purpose = purpose;
     this.modelId = modelId ?? (purpose === "summarization" ? DEFAULT_SUMMARY : DEFAULT_MAIN);
     this.client = createOpenAI({ apiKey, baseURL });
+    this.options = options;
   }
 
   async *streamComplete(
@@ -52,15 +56,24 @@ export class XaiSession implements InferenceSession {
       allowSystemInMessages: true,
       messages: toCoreMessages(messages),
       tools: toToolSet(tools),
+      ...(this.options?.promptCacheKey
+        ? { providerOptions: { openai: { promptCacheKey: this.options.promptCacheKey } } }
+        : {}),
       stopWhen: stepCountIs(1),
     });
-    yield* mapFullStream(result);
+    yield* mapFullStream(result, this.providerId);
   }
 }
 
 export const xaiProvider: ProviderFactory = {
   id: "xai",
-  createSession(purpose, model) {
-    return new XaiSession(purpose, model);
+  createSession(purpose, model, options) {
+    return new XaiSession(
+      purpose,
+      model,
+      process.env.XAI_API_KEY,
+      process.env.XAI_BASE_URL ?? "https://api.x.ai/v1",
+      options,
+    );
   },
 };

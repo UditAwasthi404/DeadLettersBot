@@ -1,0 +1,103 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: desktop-macos
+          - os: windows-latest
+            artifact: desktop-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Set desktop version from release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/set-desktop-version.mjs
+      - run: pnpm --filter @agentOS/desktop build
+      - name: Package universal macOS installer
+        if: runner.os == 'macOS'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: pnpm --filter @agentOS/desktop exec electron-builder --mac dmg zip --universal --publish never
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        run: pnpm --filter @agentOS/desktop exec electron-builder --win nsis --x64 --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            packages/desktop/release/*.dmg
+            packages/desktop/release/*.zip
+            packages/desktop/release/*.exe
+            packages/desktop/release/*.blockmap
+            packages/desktop/release/latest*.yml
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: AgentOS ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: release-assets/*
+
+  publish-containers:
+    name: Publish Docker images when registry credentials are configured
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push release images
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'agentos' }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if [[ -z "$DOCKERHUB_USERNAME" || -z "$DOCKERHUB_TOKEN" ]]; then
+            echo "Docker Hub credentials are not configured; image publication skipped."
+            exit 0
+          fi
+          version="${RELEASE_TAG#v}"
+          echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          docker buildx build --platform linux/amd64 --push \
+            --file infra/docker/Dockerfile.host \
+            --tag "$DOCKERHUB_NAMESPACE/box-host:$version" \
+            --tag "$DOCKERHUB_NAMESPACE/box-host:latest" .
+          docker buildx build --platform linux/amd64 --push \
+            --file infra/docker/Dockerfile.vm \
+            --tag "$DOCKERHUB_NAMESPACE/vm-manager:$version" \
+            --tag "$DOCKERHUB_NAMESPACE/vm-manager:latest" infra/docker

@@ -16,7 +16,9 @@
   },
   "dependencies": {
     "@clerk/react": "6.18.4",
-    "electron-updater": "^6.8.11",
+    "@radix-ui/themes": "3.3.0",
+    "electron-updater": "6.8.11",
+    "lucide-react": "1.79.0",
     "react": "19.0.3",
     "react-dom": "19.0.3",
     "ws": "8.21.0"
@@ -26,12 +28,12 @@
     "@types/react": "19.0.3",
     "@types/react-dom": "19.0.2",
     "@types/ws": "8.5.13",
-    "dmg-builder": "26.15.0",
+    "dmg-builder": "26.18.0",
     "electron": "42.11.16",
-    "electron-builder": "26.15.0",
-    "electron-builder-squirrel-windows": "26.15.0",
+    "electron-builder": "26.18.0",
+    "electron-builder-squirrel-windows": "26.18.0",
     "typescript": "5.7.2",
-    "vite": "6.4.4"
+    "vite": "6.4.6"
   },
   "build": {
     "appId": "dev.agentos.desktop",
@@ -52,8 +54,8 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "OWNER",
-      "repo": "REPO"
+      "owner": "UditAwasthi404",
+      "repo": "DeadLettersBot"
     }
   }
 }

@@ -107,6 +107,8 @@ export const turns = pgTable(
       promptTokens: number;
       completionTokens: number;
       totalTokens: number;
+      cachedPromptTokens?: number;
+      cacheWritePromptTokens?: number;
       source?: "provider" | "estimate";
     }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -208,6 +210,37 @@ export const memoryEvidence = pgTable(
   (t) => [
     uniqueIndex("memory_evidence_memory_turn_idx").on(t.memoryId, t.turnId),
     index("memory_evidence_account_idx").on(t.accountId, t.createdAt),
+  ],
+);
+
+/** Conflicting automatic facts are queued for an explicit user decision. */
+export const memoryReviewSuggestions = pgTable(
+  "memory_review_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    botId: uuid("bot_id")
+      .notNull()
+      .references(() => bots.id),
+    memoryId: uuid("memory_id")
+      .notNull()
+      .references(() => memories.id, { onDelete: "cascade" }),
+    turnId: uuid("turn_id")
+      .notNull()
+      .references(() => turns.id),
+    proposedContent: text("proposed_content").notNull(),
+    status: text("status")
+      .$type<"pending" | "accepted" | "rejected">()
+      .notNull()
+      .default("pending"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("memory_review_turn_memory_idx").on(t.turnId, t.memoryId),
+    index("memory_review_account_status_idx").on(t.accountId, t.status),
   ],
 );
 
@@ -485,6 +518,7 @@ export const mcpServers = pgTable(
       .$type<"unknown" | "healthy" | "error">()
       .notNull()
       .default("unknown"),
+    lastError: text("last_error"),
     lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -577,6 +611,8 @@ export const subagents = pgTable(
       promptTokens: number;
       completionTokens: number;
       totalTokens: number;
+      cachedPromptTokens?: number;
+      cacheWritePromptTokens?: number;
       source?: "provider" | "estimate";
     }>(),
     stallCount: integer("stall_count").notNull().default(0),

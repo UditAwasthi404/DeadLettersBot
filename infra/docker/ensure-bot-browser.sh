@@ -23,6 +23,24 @@ port_open() {
   (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
 }
 
+cdp_ready() {
+  node - "http://127.0.0.1:$1/json/version" <<'NODE'
+const controller = new AbortController();
+const timeout = setTimeout(() => controller.abort(), 500);
+fetch(process.argv[2], { signal: controller.signal })
+  .then(async (response) => {
+    const body = await response.json();
+    clearTimeout(timeout);
+    process.exit(response.ok && typeof body.Browser === "string" &&
+      typeof body.webSocketDebuggerUrl === "string" ? 0 : 1);
+  })
+  .catch(() => {
+    clearTimeout(timeout);
+    process.exit(1);
+  });
+NODE
+}
+
 mapping_claims() {
   local value="$1"
   for file in "$state_dir"/[0-9a-fA-F-]*; do
@@ -61,13 +79,24 @@ fi
 
 flock -u 9
 exec 9>&-
+exec 8>"$state_dir/$bot_id.lock"
+flock 8
 
 if [[ ! -e "/tmp/.X11-unix/X$display" ]]; then
   nohup Xvfb ":$display" -screen 0 1280x800x24 -nolisten tcp \
     >"$state_dir/xvfb-$bot_id.log" 2>&1 9>&- &
+  for _ in $(seq 1 50); do
+    [[ -S "/tmp/.X11-unix/X$display" ]] && break
+    sleep 0.1
+  done
 fi
 
-if ! port_open "$port"; then
+if [[ ! -S "/tmp/.X11-unix/X$display" ]]; then
+  echo "Xvfb did not open display socket $display" >&2
+  exit 1
+fi
+
+if ! cdp_ready "$port"; then
   nohup env DISPLAY=":$display" chromium \
     --no-sandbox \
     --disable-dev-shm-usage \
@@ -79,7 +108,9 @@ if ! port_open "$port"; then
 fi
 
 for _ in $(seq 1 100); do
-  if port_open "$port"; then
+  if cdp_ready "$port"; then
+    flock -u 8
+    exec 8>&-
     printf '%s\n' "$port"
     exit 0
   fi

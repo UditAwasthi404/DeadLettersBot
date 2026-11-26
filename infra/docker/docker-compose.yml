@@ -16,16 +16,23 @@ services:
     environment:
       PORT: 8787
       METRICS_ENABLED: ${METRICS_ENABLED:-0}
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-agentos-box-host}
       API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-120}
       BOT_STEP_BUDGET: ${BOT_STEP_BUDGET:-50}
       MODEL_CONTEXT_TOKENS: ${MODEL_CONTEXT_TOKENS:-128000}
       MEMORY_SYNTHESIS_ENABLED: ${MEMORY_SYNTHESIS_ENABLED:-0}
       MCP_STRICT_MODE: ${MCP_STRICT_MODE:-0}
+      DYNAMIC_TOOL_OFFLOADING: ${DYNAMIC_TOOL_OFFLOADING:-1}
       WEBHOOK_MAX_ATTEMPTS: ${WEBHOOK_MAX_ATTEMPTS:-6}
       WEBHOOK_DELIVERY_RETENTION_DAYS: ${WEBHOOK_DELIVERY_RETENTION_DAYS:-30}
       VM_MEMORY_BYTES: ${VM_MEMORY_BYTES:-2147483648}
       VM_CPU_NANOS: ${VM_CPU_NANOS:-2000000000}
       VM_PIDS_LIMIT: ${VM_PIDS_LIMIT:-512}
+      VM_EGRESS_POLICY: ${VM_EGRESS_POLICY:-allow_all}
+      VM_IMAGE: ${VM_IMAGE:-agentos/vm-manager}
       VM_HOST_IN_DOCKER: "1"
       DATABASE_URL: postgresql://agentos:agentos@postgres:5432/agentos
       REDIS_URL: redis://redis:6379
@@ -98,7 +105,7 @@ services:
       - "443:443"
       - "443:443/udp"
     volumes:
-      - infra/docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./infra/docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddydata:/data
       - caddyconfig:/config
     depends_on:
@@ -114,10 +121,20 @@ services:
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
-      - infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheusdata:/prometheus
     depends_on:
       - box-host
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
 
   grafana:
     image: grafana/grafana:11.3.0
@@ -128,7 +145,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
-      - infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafanadata:/var/lib/grafana
     depends_on:
       - prometheus
@@ -182,7 +199,7 @@ services:
     build:
       context: infra/docker
       dockerfile: Dockerfile.vm
-    image: agentos-vm
+    image: ${VM_IMAGE:-agentos/vm-manager}
     command: ["true"]
     restart: "no"
 
@@ -196,4 +213,4 @@ volumes:
 
 networks:
   default:
-    name: agentos
+    name: ${AGENTOS_NETWORK_NAME:-agentos}

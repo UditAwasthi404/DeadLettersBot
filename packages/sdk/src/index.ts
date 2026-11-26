@@ -15,6 +15,20 @@ export interface BotRecord extends BotSummary {
   createdAt: string;
   updatedAt: string;
 }
+export interface ChatHistoryItem {
+  id: string;
+  runId: string;
+  agentId: string;
+  role: "user" | "assistant";
+  content: string;
+}
+export interface BotAttachmentRecord {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  uri: string;
+}
 export interface MemoryRecord {
   id: string;
   accountId: string;
@@ -32,6 +46,14 @@ export interface MemoryRecord {
 export interface MemoryEvidenceRecord {
   id: string;
   turnId: string;
+  createdAt: string;
+}
+export interface MemoryReviewSuggestion {
+  id: string;
+  memoryId: string;
+  turnId: string;
+  existingContent: string;
+  proposedContent: string;
   createdAt: string;
 }
 export interface SkillStep {
@@ -58,7 +80,15 @@ export type RoutineTrigger =
   | { type: "cron"; schedule: string }
   | { type: "webhook"; secretHash?: string }
   | { type: "inter_bot_message"; senderBotId?: string }
-  | { type: "file_change"; path: string };
+  | { type: "file_change"; path: string }
+  | {
+      type: "connector_event";
+      service: "gmail" | "google-calendar";
+      sender?: string;
+      subject?: string;
+      query?: string;
+      calendarId?: string;
+    };
 export interface RoutineRecord {
   id: string;
   accountId: string;
@@ -131,6 +161,7 @@ export interface McpServerRecord {
     warning?: string;
   }>;
   lastHealth: string;
+  lastError: string | null;
   lastCheckedAt: string | null;
   createdAt?: string;
 }
@@ -139,9 +170,13 @@ export interface SubagentRecord {
   parentBotId: string;
   taskDescription: string;
   allowedTools: string[];
-  status: "queued" | "running" | "completed" | "error" | "cancelled";
+  status: "queued" | "running" | "completed" | "error" | "cancelled" | "stalled";
   result: string | null;
   usage: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
+  stallCount?: number;
+  lastProgressAt?: string | null;
+  stallEvents?: Array<{ at: string; reason: string }>;
+  steeringEvents?: Array<{ at: string; message: string }>;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -279,6 +314,20 @@ export class AgentOSClient {
     return this.request(`/v1/bots/${encodeURIComponent(botId)}`);
   }
 
+  getBotHistory(botId: string): Promise<{ items: ChatHistoryItem[] }> {
+    return this.request(`/v1/bots/${encodeURIComponent(botId)}/history`);
+  }
+
+  uploadAttachment(
+    botId: string,
+    input: { name: string; mimeType?: string; dataBase64: string },
+  ): Promise<BotAttachmentRecord> {
+    return this.request(`/v1/bots/${encodeURIComponent(botId)}/attachments`, {
+      method: "POST",
+      body: input,
+    });
+  }
+
   createBot(input: {
     name: string;
     role?: "main" | "peer";
@@ -322,6 +371,21 @@ export class AgentOSClient {
   listMemoryEvidence(botId: string, memoryId: string): Promise<MemoryEvidenceRecord[]> {
     return this.request(
       `/v1/bots/${encodeURIComponent(botId)}/memory/${encodeURIComponent(memoryId)}/evidence`,
+    );
+  }
+
+  listMemoryReviewSuggestions(botId: string): Promise<MemoryReviewSuggestion[]> {
+    return this.request(`/v1/bots/${encodeURIComponent(botId)}/memory/reviews`);
+  }
+
+  resolveMemoryReview(
+    botId: string,
+    reviewId: string,
+    action: "accept" | "reject",
+  ): Promise<{ resolved: true; action: "accept" | "reject" }> {
+    return this.request(
+      `/v1/bots/${encodeURIComponent(botId)}/memory/reviews/${encodeURIComponent(reviewId)}`,
+      { method: "POST", body: { action } },
     );
   }
 
@@ -471,6 +535,10 @@ export class AgentOSClient {
     return this.request(`/v1/routines/${encodeURIComponent(routineId)}/history`);
   }
 
+  syncAutomations(): Promise<{ upserted: number; deleted: number }> {
+    return this.request("/v1/automation/sync", { method: "POST" });
+  }
+
   listAuditLog(limit = 100): Promise<AuditLogRecord[]> {
     return this.request(`/v1/audit-log?limit=${encodeURIComponent(String(limit))}`);
   }
@@ -599,6 +667,22 @@ export class AgentOSClient {
 
   getSubagent(subagentId: string): Promise<SubagentRecord> {
     return this.request(`/v1/subagents/${encodeURIComponent(subagentId)}`);
+  }
+
+  cancelSubagent(subagentId: string): Promise<{ subagentId: string; status: string }> {
+    return this.request(`/v1/subagents/${encodeURIComponent(subagentId)}/cancel`, {
+      method: "POST",
+    });
+  }
+
+  steerSubagent(
+    subagentId: string,
+    message: string,
+  ): Promise<{ subagentId: string; status: string }> {
+    return this.request(`/v1/subagents/${encodeURIComponent(subagentId)}/steer`, {
+      method: "POST",
+      body: { message },
+    });
   }
 
   connectWebSocket(createSocket: GatewaySocketFactory): GatewaySocket {

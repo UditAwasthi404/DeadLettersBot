@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, ipcMain, session, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import WebSocket from "ws";
@@ -65,11 +66,60 @@ function createWindow(): void {
     process.env.VITE_DEV_SERVER_URL ?? (!app.isPackaged ? "http://127.0.0.1:5173" : undefined);
   if (devUrl) void windowRef.loadURL(devUrl);
   else void windowRef.loadFile(join(__dirname, "../dist/index.html"));
-  windowRef.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  windowRef.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      const localOrigin = new URL(process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173")
+        .origin;
+      const allowed =
+        parsed.origin === localOrigin ||
+        parsed.hostname === "accounts.google.com" ||
+        parsed.hostname === "github.com" ||
+        parsed.hostname === "appleid.apple.com" ||
+        parsed.hostname === "accounts.clerk.com" ||
+        parsed.hostname.endsWith(".clerk.accounts.dev") ||
+        parsed.hostname.endsWith(".clerk.com") ||
+        parsed.hostname.endsWith(".clerk.dev");
+      return allowed
+        ? {
+            action: "allow",
+            overrideBrowserWindowOptions: {
+              width: 480,
+              height: 720,
+              minWidth: 400,
+              minHeight: 600,
+              resizable: true,
+              autoHideMenuBar: true,
+              backgroundColor: "#1c1c1e",
+              parent: windowRef ?? undefined,
+              modal: false,
+              webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+                sandbox: true,
+              },
+            },
+          }
+        : { action: "deny" };
+    } catch {
+      return { action: "deny" };
+    }
+  });
   windowRef.webContents.on("will-navigate", (event, url) => {
-    const allowed =
-      process.env.VITE_DEV_SERVER_URL ?? (!app.isPackaged ? "http://127.0.0.1:5173" : "file://");
-    if (!url.startsWith(allowed)) event.preventDefault();
+    try {
+      const target = new URL(url);
+      if (app.isPackaged) {
+        const entrypoint = pathToFileURL(join(__dirname, "../dist/index.html"));
+        if (target.protocol !== "file:" || target.pathname !== entrypoint.pathname)
+          event.preventDefault();
+      } else {
+        const devOrigin = new URL(process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173")
+          .origin;
+        if (target.origin !== devOrigin) event.preventDefault();
+      }
+    } catch {
+      event.preventDefault();
+    }
   });
   windowRef.on("closed", () => {
     windowRef = null;
@@ -446,7 +496,7 @@ ipcMain.handle(
 
 app.whenReady().then(() => {
   createWindow();
-  // shortcut: GitHub publish owner/repo are placeholders until a release channel exists.
+  // Updates are published by the tag-triggered workflow for the configured GitHub repository.
   if (app.isPackaged) {
     autoUpdater.on("update-available", () => {
       windowRef?.webContents.send("update:available");

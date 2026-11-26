@@ -15,8 +15,9 @@ import { drainAgent } from "./worker.ts";
 
 type Cursor = { initialized: boolean; seenIds: string[] };
 
-const MAX_ROUTINES = 20;
+const MAX_ROUTINES_PER_POLL = 20;
 const MAX_NEW_EVENTS = 5;
+const pollOffsetKey = "routine:connector-events:poll-offset";
 
 function cursorKey(routineId: string): string {
   return `routine:${routineId}:connector-cursor`;
@@ -105,11 +106,20 @@ export function pollConnectorEvents(deps: GatewayDeps): Promise<number> {
 }
 
 async function poll(deps: GatewayDeps): Promise<number> {
-  const sources = (await loadScheduleSources(deps.db))
-    .filter((routine) => routine.trigger.type === "connector_event")
-    .slice(0, MAX_ROUTINES);
+  const sources = (await loadScheduleSources(deps.db)).filter(
+    (routine) => routine.enabled && routine.trigger.type === "connector_event",
+  );
+  if (!sources.length) return 0;
+  const rawOffset = Number.parseInt((await deps.redis.get(pollOffsetKey)) ?? "0", 10);
+  const offset = Number.isSafeInteger(rawOffset) && rawOffset >= 0 ? rawOffset % sources.length : 0;
+  const selected: typeof sources = [];
+  for (let index = 0; index < Math.min(sources.length, MAX_ROUTINES_PER_POLL); index += 1) {
+    const routine = sources[(offset + index) % sources.length];
+    if (routine) selected.push(routine);
+  }
+  await deps.redis.set(pollOffsetKey, String((offset + selected.length) % sources.length));
   let fired = 0;
-  for (const routine of sources) {
+  for (const routine of selected) {
     if (routine.trigger.type !== "connector_event") continue;
     try {
       const token = await accessTokenFor(deps, routine.accountId, routine.trigger.service);
@@ -117,18 +127,9 @@ async function poll(deps: GatewayDeps): Promise<number> {
       const found = await eventIds(routine.trigger.service, routine.trigger, token);
       const cursor = await readCursor(deps, routine.id);
       const seen = new Set(cursor.seenIds);
-      const fresh = found.filter((item) => !seen.has(item.id)).slice(0, MAX_NEW_EVENTS);
-      const seenIds = [...found.map((item) => item.id), ...cursor.seenIds]
-        .filter((id, index, all) => all.indexOf(id) === index)
-        .slice(0, 100);
-      await deps.redis.set(
-        cursorKey(routine.id),
-        JSON.stringify({ initialized: true, seenIds }),
-        "EX",
-        60 * 60 * 24 * 14,
-      );
-      if (!cursor.initialized) continue;
-      for (const item of fresh) {
+      const fresh = found.filter((item) => !seen.has(item.id));
+      const queued = cursor.initialized ? fresh.slice(0, MAX_NEW_EVENTS) : [];
+      for (const item of queued) {
         await queueRoutine(
           deps,
           routine,
@@ -137,6 +138,19 @@ async function poll(deps: GatewayDeps): Promise<number> {
         );
         fired += 1;
       }
+      const deferredIds = new Set(fresh.slice(queued.length).map((item) => item.id));
+      const discoveredIds = cursor.initialized
+        ? found.map((item) => item.id).filter((id) => !deferredIds.has(id))
+        : found.map((item) => item.id);
+      const seenIds = [...discoveredIds, ...cursor.seenIds]
+        .filter((id, index, all) => all.indexOf(id) === index)
+        .slice(0, 100);
+      await deps.redis.set(
+        cursorKey(routine.id),
+        JSON.stringify({ initialized: true, seenIds }),
+        "EX",
+        60 * 60 * 24 * 14,
+      );
     } catch (err) {
       logger.error({ ...loggedError(err), routineId: routine.id }, "connector event poll failed");
     }

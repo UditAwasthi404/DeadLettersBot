@@ -39,14 +39,23 @@ export class AnthropicSession implements InferenceSession {
       };
       return;
     }
+    const coreMessages = toCoreMessages(messages);
+    const systemMessage = coreMessages.find((message) => message.role === "system");
+    if (
+      systemMessage &&
+      typeof systemMessage.content === "string" &&
+      systemMessage.content.length >= 1024
+    ) {
+      systemMessage.providerOptions = { anthropic: { cacheControl: { type: "ephemeral" } } };
+    }
     const result = streamText({
       model: this.client(this.modelId),
       allowSystemInMessages: true,
-      messages: toCoreMessages(messages),
+      messages: coreMessages,
       tools: toToolSet(tools),
       stopWhen: stepCountIs(1),
     });
-    yield* mapFullStream(result);
+    yield* mapFullStream(result, this.providerId);
   }
 }
 

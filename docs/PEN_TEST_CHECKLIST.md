@@ -14,10 +14,12 @@ Run only against an isolated development deployment with test accounts and dispo
 
 - [ ] Request an unadvertised tool and a tool disallowed by the bot policy; confirm neither executes.
 - [ ] Deny an approval and confirm the action does not run; interrupt a long shell command and confirm its process group exits.
-- [ ] Serve a web page containing hidden text, script instructions, prompt-injection text, and oversized content; confirm extraction is bounded and no embedded instruction gains authority.
-- [ ] Configure an MCP endpoint that redirects to another host and confirm redirects are rejected. Separately test DNS rebinding/private-address resolution; DNS pinning is currently an open finding.
-- [ ] Attempt path traversal and symlink escape through file tools in a disposable VM; confirm access stays within the permitted workspace.
+- [ ] In an isolated VM, verify `RunShell` can read runtime files and write under `/home/agent`, but cannot read `/var` or write `/etc`; verify IPv4 and IPv6 socket creation and external connection attempts are denied. Verify PID isolation separately because shell commands share their account VM PID namespace.
+- [ ] Serve a web page containing hidden text, script instructions, prompt-injection text, and oversized content; confirm parse5 extraction omits hidden/executable content, response reads are capped at 2 MiB, returned text is capped at 8,000 characters, and no embedded instruction gains authority. Source hardening is implemented; adversarial runtime acceptance remains open.
+- [ ] Configure an MCP endpoint that redirects to another host and confirm redirects are rejected. Verify that mixed public/private DNS answers are rejected, HTTPS loopback is denied, only HTTP loopback is accepted for development, and the selected public address remains pinned across initialization and tool calls; source hardening is implemented, but controlled DNS/transport acceptance has not been run.
+- [ ] Attempt absolute paths outside `/home/agent`, `..` traversal, and symlink escape through file tools in a disposable VM; confirm read, write, append, delete, and listing stay within `/home/agent`. Source now uses descriptor-relative `openat(O_NOFOLLOW)`; runtime acceptance remains open.
 - [ ] Inspect browser rendering and desktop UI for stored/reflected XSS using harmless test payloads.
+- [ ] Verify Electron top-level navigation rejects lookalike development origins and arbitrary local files while allowing the exact bundled entrypoint; verify the development CSP permits Vite HMR only on its loopback port.
 
 ## Secrets, connectors, and recovery
 

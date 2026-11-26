@@ -7,10 +7,17 @@ export interface VMInfo {
   ipAddress?: string;
 }
 
+export interface VMStats {
+  cpuPercent: number;
+  memoryUsedBytes: number;
+  memoryLimitBytes: number;
+}
+
 export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  outputTruncated?: boolean;
 }
 
 export interface VMManager {
@@ -21,6 +28,8 @@ export interface VMManager {
   getVMStatus(vmId: string): Promise<VMInfo>;
   /** Account VMs this process knows about. Empty when no runtime state is recorded. */
   listVMs(): Promise<VMInfo[]>;
+  /** Point-in-time container resource usage; undefined when unsupported. */
+  getVMStats(vmId: string): Promise<VMStats | undefined>;
   execInContainer(
     vmId: string,
     cmd: string[],

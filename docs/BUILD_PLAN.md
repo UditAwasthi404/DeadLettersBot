@@ -102,11 +102,11 @@ agentOS/
 
 #### Week 3
 - [x] **Context assembly** (`packages/agent-core`) — `renderSystemPrompt()` with all 6 section groups. Section pinning + hash tracking. `assembleTurnAction()` for user turn messages. User-info message with tool schemas.
-- [x] **Dynamic tool offloading** — `stableDynamicToolCatalog` gate (default: on). `GetDynamicTools` / `CallDynamicTool` stubs. Catalog diff updates via `deferUserInfoCatalogRerender()`.
+- [x] **Dynamic tool offloading** — `DYNAMIC_TOOL_OFFLOADING` defaults to on. MCP names and schemas are omitted from the initial prompt; `GetDynamicTools` returns bounded, paged, untrusted metadata on demand, and `CallDynamicTool` routes through account-scoped live MCP validation with permission level 2. Set the flag to `0` to use the legacy static `MCPCall` prompt. Live provider/MCP acceptance remains open.
 - [x] **Tool routing** — `machineId` resolution: explicit ID → registered computer; absent → box VM.
 - [x] **Permission adapter** — validate tool requests against bot's allowed tools; reject unadvertised tool names.
 
-> Checkpoint: Phase 1 Week 3 Track C + Track D Week 2 done — agent-core prompt assembly (6 groups + hash), STATIC_CATALOG + dynamic stubs, checkPermission/dispatchTool wired into box-host runner; vm-manager VMManager + DockerVMManager/Noop. Next: Week 4 browser/web tools + real VM image / file+shell execution.
+> Checkpoint: Phase 1 Week 3 Track C + Track D Week 2 — agent-core prompt assembly, static tool catalog, MCP dynamic catalog discovery/calls, checkPermission/dispatchTool wired into box-host runner; vm-manager VMManager + DockerVMManager/Noop. Week 4 browser/web tools and real VM image/file/shell execution are implemented with deployment acceptance still open.
 
 #### Week 4
 - [x] **Browser tools** (`packages/tools`) — implement using Playwright + CDP: `BrowserNavigate`, `BrowserClick`, `BrowserType`, `BrowserScreenshot`, `BrowserExtractContent`, `BrowserScroll`, `BrowserWaitForElement`.
@@ -121,12 +121,12 @@ agentOS/
 
 #### Week 2
 - [x] **VM provisioning interface** (`packages/vm-manager`) — define `VMManager`: `provisionVM(accountId)`, `wakeVM(vmId)`, `suspendVM(vmId)`, `terminateVM(vmId)`, `getVMStatus(vmId)`.
-- [ ] **Docker-based VM (dev)** — per-account Docker containers and dedicated per-account bridge networks are implemented with Chromium, Xvfb, bash, and persistent per-bot browser profiles on Debian Bookworm; the specified Ubuntu 22.04/Node.js image and verified container acceptance remain.
+- [ ] **Docker-based VM (dev)** — per-account Docker containers and dedicated per-account bridge networks are implemented with Chromium, Xvfb, bash, Node.js 22/npm 10, and persistent per-bot browser profiles on Debian Bookworm. The image now creates a world-accessible sticky `/tmp/.X11-unix` socket directory for unprivileged Xvfb. Cached-image browser startup passed under dropped capabilities with network disabled when that directory was supplied as tmpfs; the fresh image rebuild was blocked by unreachable Debian mirrors. The built image ran Node as UID 1000 with `/home/agent` writable; the specified Ubuntu 22.04 base and full container acceptance remain.
 
 #### Week 3
-- [ ] **Per-bot Xvfb screens** — on-demand Xvfb/Chromium instances now use a stable bot-ID mapping, separate display, CDP port, and persistent profile. Docker runtime acceptance remains.
+- [ ] **Per-bot Xvfb screens** — on-demand Xvfb/Chromium instances use a stable bot-ID mapping, separate display, CDP port, and persistent profile. Per-bot startup locks prevent concurrent browser/recording setup from launching duplicate Chromium processes, VNC setup has its own per-bot lock, Xvfb readiness waits for its display socket, and a mapped CDP port is accepted only when Chromium's `/json/version` endpoint responds; the helper returned its CDP port under dropped capabilities and disabled networking in a disposable cached-image container; multi-bot persistence/isolation acceptance remains.
 - [ ] **Execution daemon** — Docker commands now use a tracked process-group wrapper; explicit turn interrupts abort shell/file commands and close the active per-bot browser connection. The loopback `box-execution-daemon` socket/protocol, unified CDP routing, caller-disconnect handling, and runtime acceptance remain.
-- [ ] **Window router** — browser calls route to each bot's isolated CDP port. A disconnect-aware upstream router that cancels active browser requests and daemon acceptance remain.
+- [ ] **Window router** — browser calls route to each bot's isolated CDP port. The VNC upstream now stops on client disconnect, checks for disconnect after each asynchronous VM/browser setup step, and tears down on WebSocket send failure; CDP daemon routing and runtime cancellation acceptance remain.
 
 #### Week 4
 - [x] **VM lifecycle** — idle timeout (10 min → suspend). Wake on next message (cold start < 30s target). Health checks.
@@ -163,8 +163,8 @@ agentOS/
 - [x] **Memory prompt injection** — `[memory]` section in system prompt: user facts → project facts → agent facts, each with recall size limit.
 
 #### Week 7
-- [ ] **Post-turn memory extraction** — conservative extraction is enqueued transactionally with turn settlement and processed by a leased, durable retry worker. Each supporting turn is now recorded idempotently per fact and exposed through account/bot-scoped API and desktop memory UI; conflict review and runtime recovery acceptance remain.
-- [ ] **Legacy extraction** — safe append-only extraction is implemented; add/update/delete review semantics and automatic conflict resolution remain intentionally unimplemented.
+- [ ] **Post-turn memory extraction** — conservative extraction is enqueued transactionally with turn settlement and processed by a leased, durable retry worker. Supporting turns are recorded idempotently; when the model identifies a correction and cites an exact existing fact, it creates a durable review suggestion. Account/bot-scoped API and desktop controls let the user accept or dismiss it; worker recovery and provider runtime acceptance remain.
+- [ ] **Legacy extraction** — safe append-only extraction and review-only replacement suggestions are implemented; suggestions are accepted or dismissed by the user and never auto-overwrite memory. Deletion inference and runtime recovery acceptance remain open.
 - [x] **Background synthesis** — opt-in `MEMORY_SYNTHESIS_ENABLED` worker queues jobs after extraction finds evidence, considers only repeated non-user-authored facts, asks a synthesis model and a separate verifier, and applies supported merges transactionally with optimistic-concurrency retries. Runtime acceptance and model-quality review remain.
 - [x] **User-authored memory protection** — entries with `isUserAuthored: true` are never auto-overwritten.
 
@@ -197,7 +197,7 @@ agentOS/
 #### Week 9
 - [ ] **`CreateSubagent` tool** — implemented as a bounded child turn in the background lane with an isolated conversation, restricted read/browser/search tools, and a step budget; richer task categories and runtime verification remain.
 - [ ] **TaskSubagent lifecycle** — durable completion metadata and parent revival turns are implemented; stall detection, restart/race verification, and lifecycle UX remain.
-- [ ] **Subagent tracking** — status, timestamps, result, basic usage, cancellation, and `GetSubagentStatus` are implemented; steering, stall events, and verified token accounting remain.
+- [ ] **Subagent tracking** — status, timestamps, result, usage, cancellation, steering, and stall events are exposed through account-scoped APIs. The desktop now has a live task view with progress, results, token usage, stall history, cancel, and steer controls; runtime lifecycle and token-accounting verification remain.
 - [x] **Less-fanout policy** — reuse an already queued/running executor for the same normalized task brief, tool set, and step budget before creating another child turn; differing tasks remain separate.
 
 ---
@@ -210,7 +210,7 @@ agentOS/
 - [x] **Summary carrier** — archive the full original transcript under `summary-archives/`, retain recent complete exchanges, include the summary in the next context, and record the archive key on the settled turn.
 - [x] **Pending summary adoption** — summarization is synchronous, so no pending summary is reused across turns and there is no stale-prefix adoption path.
 - [x] **Context preservation on failure** — do not replace the conversation on summarization failure; if settlement fails after transcript replacement, restore the original transcript from the in-memory source.
-- [ ] **Provider-specific compaction** — separate implementations for xAI, Anthropic, OpenAI styles. (Generic path as default; provider variants stubbed for v1.)
+- [x] **Provider-specific compaction** — provider selection applies separate xAI, Anthropic, and OpenAI summary request/carrier formats, with generic style for other providers. Long-context runtime acceptance remains open.
 
 ---
 
@@ -238,7 +238,7 @@ agentOS/
 - [x] **Skill injection** — inject skill steps into agent system prompt `[skills]` section when skill is active. Bot follows steps as instructions.
 
 #### Week 12
-- [x] **Browser recording ingest** — CDP navigation, click, type, and scroll events are recorded for at most 10 minutes. One inference call turns the log into draft `SkillStep[]` for review.
+- [x] **Browser recording ingest** — CDP navigation, click, type, and scroll events are recorded for at most 10 minutes. One inference call turns the log into draft `SkillStep[]` for review. Concurrent start requests for the same account/bot now share one in-flight recording session, and stop waits for startup to settle.
 - [x] **"Teach a task" flow** — desktop skills panel: Start Recording, Stop Recording, edit the draft, then save through the versioned skill API.
 - [ ] **Skill approval points** — routine-attached skills expose `CompleteSkillStep`, permit multiple tool calls within the current instruction, and pause before annotated steps. Turn checkpoints now restore skill progress and transcript context; in-flight tool action(s) may repeat if the process exits before their results are checkpointed, and runtime acceptance verification remains.
 - [ ] **Skill error handling** — runtime enforces `stop`, bounded configurable `retry` (1–10 failed actions, default 3), `skip`, `notify_user`, and bounded `custom_prompt` recovery, persisting retry counts in turn checkpoints; the desktop exposes policy, limit, and recovery text. Runtime acceptance verification remains.
@@ -258,15 +258,15 @@ agentOS/
 
 #### Week 14
 - [x] **Webhook trigger** — `POST /v1/webhooks/{routineId}` endpoint. Validate shared secret. Enqueue routine on background lane.
-- [ ] **Connector event trigger** — poll connector APIs for new events (e.g., new Gmail message). Configurable filter (subject match, sender, label). Trigger matching routines.
+- [x] **Connector event trigger** — background polling supports Gmail and Google Calendar with Gmail sender/subject/query filters and Calendar title/calendar filters; the first successful poll establishes a baseline, then new event IDs queue matching routines. Polling rotates fairly through up to 20 triggers per minute and retains events beyond the five-per-trigger batch for later polls. Provider/runtime acceptance remains open.
 - [x] **File change trigger** — `inotifywait` on a path inside `/home/agent`. Bursts debounce for 1 second, then the routine is queued and written to history.
 - [ ] **Inter-bot message trigger** — API and runtime support are implemented with an optional sender filter and hop-count propagation; desktop creation/editing controls are implemented; runtime verification remains.
 
 #### Week 15
 - [x] **Routine history** — store last 20 runs per routine: triggered_at, status, duration, input_summary, output_summary, error_message. `GET /v1/routines/{id}/history`.
-- [x] **Error handling** — `onError: notify_user` → SendToUser in parent chat. `onError: retry` → up to 3 retries with exponential backoff. Permanently failed → pause + flag in UI.
-- [ ] **Automation sync** — reconcile local routine definitions with hosted shadow schedules on startup. `isBoxHostedForAutomationSync` flag. Explicit sync call required to delete remote schedules.
-- [x] **50-routine limit** — enforce per account. Return `429 Routine limit reached` on creation if exceeded.
+- [x] **Error handling** — `onError: notify_user` queues a durable bot wake turn that asks the bot to deliver the failure through `SendToUser`, including when the owner is offline. `onError: retry` → up to 3 retries with exponential backoff. Permanently failed → pause + flag in UI. Chat-delivery acceptance remains open.
+- [x] **Automation sync** — hosted startup upserts live local routine definitions into automation shadows when `isBoxHostedForAutomationSync` is enabled. Removed schedules are retained until the account invokes the explicit sync endpoint, which deletes orphan shadows and definitions. Runtime acceptance remains.
+- [x] **50-routine limit** — per-account active-routine counting and insertion run under a transaction-scoped advisory lock, so concurrent creates cannot exceed 50; excess requests return `429 Routine limit reached`.
 
 ---
 
@@ -304,7 +304,7 @@ agentOS/
 - [x] **MCP management API** — `GET/POST/DELETE /v1/connectors/mcp`. Add MCP server URL + API key. Stores with encryption. Startup and 60-second background probes refresh last-known health with bounded concurrency without invoking tools.
 - [x] **MCP multi-account guidance** — when an account has multiple MCP servers, the prompt instructs the agent to choose by configured server name/tool, use the exact server ID, avoid cross-server data movement unless requested, and treat metadata/results as untrusted.
 - [x] **`[mcp_instructions]` + `[mcp_status]` prompt sections** — connected tool names/descriptions and last-known status are included in the environment section.
-- [ ] **Tunneling docs** — HTTPS tunnel guidance documented; tunnel health checks remain.
+- [x] **Tunneling docs** — HTTPS tunnel guidance is documented in `docs/SELF_HOSTING.md`; periodic MCP discovery probes cover configured tunnel URLs and surface endpoint availability in the management UI. AgentOS does not start or supervise the external tunnel process.
 
 ---
 
@@ -317,7 +317,7 @@ agentOS/
 - [ ] Google Calendar connector: bot creates an event
 - [ ] Salesforce connector: bot queries and updates a record
 - [ ] MCP server connected: bot discovers and calls a custom tool
-- [ ] 50-routine limit enforced
+- [x] 50-routine limit enforced with serialized per-account creation
 - [ ] Routine error → user notified in chat
 
 ---
@@ -332,7 +332,8 @@ agentOS/
 - [x] **Electron app scaffold** (`packages/desktop`) — Electron, React 19, and Vite with renderer / preload / main separation. Styling stays in `style.css`.
 - [x] **Gateway client** — WebSocket client in Electron Main. Reconnect uses exponential backoff capped at 30 seconds and stops on user disconnect or quit. The gateway URL and bearer token are restored from the Electron session.
 - [x] **Bot roster sidebar** — list all bots. Create / rename / delete. Select active bot. (Rename/delete are limited by the API's history-protection rule.)
-- [x] **Chat view** — streaming message display. Tool call visualization (show tool name + collapsible params/result). Approval UI inline in chat.
+- [x] **Chat view** — streaming message display, restored recent history from persisted turns, tool call visualization (show tool name + collapsible params/result), and inline approval UI.
+- [x] **Desktop component system** — Radix Themes provides the shared dark theme, consistent buttons, guided skill/routine/memory forms, and accessible confirmation dialogs across navigation, chat, and settings; Lucide supplies consistent icons. Failed prompt sends restore the draft and attachments and remove the optimistic chat row.
 
 #### Week 19 — Full Chat Features
 - [x] **File attachments** — drag-and-drop files into chat. Send as attachment in `sendPrompt`.
@@ -344,27 +345,28 @@ agentOS/
 #### Week 20 — Memory, Skills, Routines UI
 - [x] **Memory viewer** — list all memory entries per bot. Show scope, source, timestamp, staleness. Edit and delete inline.
 - [x] **Memory export** — "Export Memory" button → download JSON.
-- [x] **Skills UI** — list, versioned edit, step error policies, drag reorder, delete, and Teach a Task recording are in the desktop. Runtime acceptance remains.
-- [x] **Routines UI** — list, cron/webhook/file-change/inter-bot creation, cron preview, one-time webhook secret, pause/resume, confirmed test, delete, and the last 20 history rows are in the desktop. Runtime acceptance remains.
+- [x] **Skills UI** — list, guided Radix Dialog creation, versioned edit, step error policies, drag reorder, delete, and Teach a Task recording are in the desktop. Runtime acceptance remains.
+- [x] **Routines UI** — list, guided Radix Dialog creation for cron/webhook/file-change/inter-bot triggers, Gmail/Google Calendar event creation and editing, connector filters, cron preview, one-time webhook secret, pause/resume, confirmed test, delete, and the last 20 history rows are in the desktop. Runtime acceptance remains.
 
 #### Week 21 — Connectors and Settings
 - [x] **Connectors panel** — Gmail, Calendar, Drive, OneDrive, Outlook Mail, Outlook Calendar, Teams, SharePoint, and Salesforce. Microsoft services share one OAuth connection. Disconnect asks for confirmation.
 - [x] **MCP servers panel** — add/remove MCP server URLs with masked API-key entry. Show discovered tool count and last-known health/check time.
+- [x] **Subagent lifecycle panel** — inspect active and completed background tasks, results, token usage, progress/stall history; send steering guidance or request cancellation.
 - [x] **Account settings** — per-bot provider/model selection and a retain-data preference are in the desktop and API. Disabling retention does not delete stored memory.
 - [x] **Local computer execution settings** — Always Require Approval / Always Allow / Never Allow toggle.
-- [x] **Auto-update** — packaged builds check electron-updater and show a restart banner. The GitHub publish owner and repo are placeholders.
+- [x] **Auto-update** — packaged builds check electron-updater and show a restart banner. The owner/repo now match the configured GitHub remote; signed installer and update acceptance remain open.
 
 ---
 
 ### Track B: REST API and SDK (Weeks 18–19)
 
 #### Week 18
-- [x] **OpenAPI spec** — `/openapi.json` is generated with Zod request and response schemas for health, bots, memory, skills, routines, connectors, MCP, audit, API keys, and webhooks. Bearer auth is the default for `/v1`. Formal validation of every handler against the document remains.
+- [x] **OpenAPI spec** — `/openapi.json` is generated with Zod request and response schemas for health, bots (including recent chat history), memory, skills, routines, connectors, MCP, audit, API keys, and webhooks. Documented body and path-parameter schemas are now applied before gateway dispatch. Response validation and endpoint-level contract acceptance remain.
 - [x] **Rate limiting** — per-account fixed-window rate limits on authenticated API endpoints in Redis.
 - [x] **API key management** — create / revoke API keys for programmatic access. Scoped: read-only, read-write, admin.
 
 #### Week 19
-- [x] **TypeScript SDK** (`packages/sdk`) — `AgentOSClient` and `AgentOSError` cover bots, memory, skills, routines, connectors, MCP, audit, and API keys, and accept either `(baseUrl, token)` or an options object. OpenAPI-generated types and npm publication remain.
+- [x] **TypeScript SDK** (`packages/sdk`) — `AgentOSClient` and `AgentOSError` cover bots (including recent chat history), memory, skills, routines, connectors, MCP, audit, and API keys, and accept either `(baseUrl, token)` or an options object. OpenAPI-generated types and npm publication remain.
 - [ ] **Webhook delivery** — signed POST events for turn settled, routine completed, and approval required use a durable queue with bounded retries, account-scoped history, configurable terminal-record retention, and manual retry. Desktop subscription and delivery management is implemented; end-to-end acceptance remains.
 - [x] **API docs** — `GET /docs` serves Scalar against `/openapi.json`.
 
@@ -379,7 +381,7 @@ agentOS/
 - [x] **Health check endpoints** — `GET /health` (liveness), `GET /ready` (readiness).
 
 #### Week 21
-- [ ] **Helm chart** (`infra/helm/`) — initial chart now provisions a single `box-host`, PostgreSQL, Redis, MinIO, PVCs, Secrets, and optional Ingress. Isolated `vm-manager`, HPA, cert-manager resources, and Kubernetes runtime acceptance remain; current Docker VM network/browser routing cannot run correctly inside this chart.
+- [ ] **Helm chart** (`infra/helm/`) — initial chart now provisions a single `box-host`, PostgreSQL, Redis, MinIO, PVCs, Secrets, and optional Ingress; optional cert-manager Certificate creation is configurable for ingress hostnames. Isolated `vm-manager`, HPA, and Kubernetes runtime acceptance remain; current Docker VM network/browser routing cannot run correctly inside this chart.
 - [x] **VM garbage collector** — `gcIdleVMs` terminates account VMs idle for 30 days and runs every 24 hours. `accounts.last_active_at` is updated when a turn starts. A 7-day warning is not sent yet.
 - [x] **Backup/restore** — `scripts/backup.sh`: dump PostgreSQL + export S3 blobs. `scripts/restore.sh`. Document frequency recommendations.
 
@@ -394,14 +396,14 @@ agentOS/
 
 #### Week 21
 - [x] **Secrets rotation** — JWTs that verify with `JWT_SECRET_PREVIOUS` are re-signed with `JWT_SECRET` and returned in `X-AgentOS-Refreshed-Token`. Connector, MCP, and webhook secrets decrypted with the previous key are re-encrypted on read. Runtime rotation acceptance remains.
-- [ ] **Network egress policy** — VM-level `iptables` rules for egress filtering. Optional `getEgressPolicy(domains/CIDR/ports)` enforcement per account.
-- [x] **Prompt injection hardening** — FetchURL strips HTML before the 8,000-character cap. MCP, web, browser, file, shell, and connector results are wrapped in one `[UNTRUSTED_EXTERNAL_DATA]` envelope. Regex HTML reduction is not a parser, and adversarial runtime checks remain.
-- [ ] **Shell sandboxing** — `RunShell` now enters unprivileged user, PID, mount/proc, and network namespaces with `unshare`; the Docker VM executes it as `agent` with all Linux capabilities dropped and `no-new-privileges`. Runtime image/namespace acceptance remains.
+- [ ] **Network egress policy** — Compose and startup validation expose `VM_EGRESS_POLICY=deny_all`, which creates per-account Docker networks with `Internal: true`; the default `allow_all` preserves browser access. Existing networks refuse silent policy changes. A disposable internal-network container could not reach `1.1.1.1:443`. This is a global deny-all switch, not the planned per-account domain/CIDR/port allowlist or VM-level `iptables` enforcement; account provisioning and Helm VM isolation remain unverified/unsupported.
+- [x] **Prompt injection hardening** — FetchURL pins resolved public addresses through the outbound connection, follows only revalidated redirects, classifies IPs with ipaddr.js, caps reads at 2 MiB and returned text at 8,000 characters, and uses parse5 to extract text while dropping hidden/executable elements. MCP, web, browser, file, shell, and connector results are wrapped in one `[UNTRUSTED_EXTERNAL_DATA]` envelope. Adversarial runtime checks remain.
+- [ ] **Shell sandboxing** — `RunShell` uses `setpriv`, a fail-closed Landlock filesystem policy, and a nested seccomp filter inside the account VM. The helper allows read/write access to `/home/agent` and `/tmp`, read/execute access to `/usr`, read-only access to `/etc`, and rejects IP socket creation, connection/bind, io_uring, process signaling, and process tracing syscalls. A disposable VM accepted workspace writes and runtime reads, rejected system writes and `/var` opens, and blocked an external TCP connection with all container capabilities dropped. Commands still share the account VM's PID namespace; per-command PID isolation and full `RunShell` dispatch acceptance remain open. Docker's default seccomp blocks nested `unshare` and this engine rejects namespace `clone()`, so namespace creation is not currently used.
 
 #### Week 22
-- [x] **Security audit** — `docs/SECURITY_AUDIT.md` records the SQL, path, XSS, and shell review plus the rotation and untrusted-data changes. DNS pinning and a running penetration test remain.
+- [x] **Security audit** — `docs/SECURITY_AUDIT.md` records the SQL, path, Electron navigation, shell, secret rotation, untrusted-data, and MCP DNS-pinning source changes. Controlled DNS/Electron acceptance, a running penetration test, and complete source review remain.
 - [x] **Dependency audit** — weekly Dependabot updates configured, all direct package versions are pinned, and the full `pnpm audit` reports zero advisories.
-- [ ] **OWASP checks** — verify: no SQL injection (parameterized queries throughout), no XSS in desktop app, no path traversal in file tools.
+- [ ] **OWASP checks** — parameterized SQL queries are in use; `/v1/*` requests have a 16 MiB body cap after authentication/rate limiting, declared JSON is parsed once and malformed bodies return 400, and the limit leaves room for base64-encoded attachments; VM file tools walk `/home/agent` with descriptor-relative `openat(O_NOFOLLOW)` operations instead of shell-based check-then-open paths. A disposable image probe accepted normal file operations and rejected symlink/`..` escapes; full tool/API acceptance, deletion semantics, route review, and desktop XSS review remain.
 - [x] **Pen test checklist** — `docs/PEN_TEST_CHECKLIST.md` covers JWT forgery, scope isolation, path traversal, XSS, MCP redirects/DNS, injection, secret rotation, and recovery; execution and findings remain.
 
 ---
@@ -409,12 +411,12 @@ agentOS/
 ### Track E: Performance and Observability (Weeks 22–23)
 
 #### Week 22
-- [ ] **OpenTelemetry** — direct Prometheus instrumentation now covers gateway latency, turn duration, step duration, inference latency, tool execution time, memory extraction time, and checkpoint write time with bucketed latency histograms. OpenTelemetry SDK/tracing integration and runtime scrape verification remain.
-- [ ] **Grafana dashboards** — four provisioned dashboards and optional Prometheus/Grafana Compose services are implemented. VM dashboard currently shows VM-related tool activity rather than container health gauges; runtime validation remains.
-- [ ] **Structured logging** — basic JSON HTTP request logs include request IDs, method, path, status, and duration. Pino integration and bot/turn correlation across all logs remain.
+- [x] **OpenTelemetry** — direct Prometheus instrumentation covers gateway latency, turn duration, step duration, inference latency, tool execution time, memory extraction time, and checkpoint write time. Local Compose Jaeger accepted HTTP spans and a WebSocket turn trace; Jaeger confirms `websocket.frame` → `agent.turn` → `agent.tool.execution` parent/child relationships. Prometheus target is `up` and `/metrics` responds.
+- [x] **Grafana dashboards** — five provisioned dashboards and optional Prometheus/Grafana Compose services are implemented. The VM dashboard plots host-known container lifecycle counts and aggregate Docker CPU/memory usage refreshed every 30 seconds with bounded concurrency. Runtime acceptance: Grafana health is `ok`, its API lists all five dashboards, Prometheus target health is `up`, and the box-host `/metrics` endpoint responds.
+- [ ] **Structured logging** — Pino JSON logs now inherit validated HTTP request IDs and authenticated account IDs through async context; WebSocket frames add connection/frame IDs, and turn work adds account/bot/turn/run IDs across runner logs. Runtime log correlation acceptance remains.
 
 #### Week 23
-- [ ] **Prompt cache optimization** — verify section hashing works correctly; test cache hit rate with provider (xAI, Anthropic). Target: > 70% cache hit on groups 1–3.
+- [ ] **Prompt cache optimization** — stable hashed per-agent cache affinity is wired for OpenAI-compatible providers; long Anthropic system prompts opt in to ephemeral caching; provider cache read/write token metrics and turn usage are recorded. Section-hash correctness, live xAI/Anthropic cache-hit measurement, and the > 70% target on groups 1–3 remain open.
 - [ ] **Context assembly benchmarks** — `renderSystemPrompt()` P99 < 200ms under 100 concurrent bots.
 - [ ] **Checkpoint write benchmarks** — P95 < 500ms. Tune PostgreSQL write settings + connection pool.
 - [ ] **VM cold start optimization** — target < 30s. Pre-warm VM pool (keep N VMs in standby).
@@ -433,9 +435,9 @@ agentOS/
 - [x] **README** — root `README.md` covers the project, Docker Compose quickstart, feature overview, and documentation links; a fresh-tester run remains an exit criterion.
 - [x] **CONTRIBUTING.md** — contribution and development guide covers code practices and pull requests.
 - [x] **LICENSE** — MIT license file present.
-- [ ] **GitHub release** — tag v1.0.0, write release notes, attach desktop app binaries (macOS + Windows).
-- [ ] **Docker Hub publish** — push `agentOS/box-host:1.0.0`, `agentOS/vm-manager:1.0.0` images.
-- [ ] **npm publish** — publish `@agentOS/sdk@1.0.0`.
+- [ ] **GitHub release** — a tag-triggered workflow now packages a universal macOS DMG/ZIP and Windows NSIS installer, generates release notes, and attaches updater metadata. The workflow targets this repository; actual v1.0.0 release, signing/notarization, install acceptance, and public distribution remain.
+- [ ] **Docker Hub publish** — release workflow now builds and pushes `agentos/box-host` and `agentos/vm-manager` version/latest tags when Docker Hub credentials and namespace settings are configured; actual registry publication remains pending credentials and image acceptance.
+- [ ] **npm publish** — the SDK build and publish script exist, but `@agentOS/sdk` is marked private and uses uppercase letters, which npm disallows for new package names. Publishing requires selecting an owned, lowercase npm scope/name, removing the private-package flag, then running registry acceptance with credentials.
 
 ---
 
@@ -443,7 +445,7 @@ agentOS/
 - [ ] Desktop app installs on macOS and Windows from DMG/installer without extra steps
 - [ ] Complete E2E test suite passing
 - [ ] Eval suite: ≥ 80% task completion rate
-- [ ] Docker Compose self-host: `docker compose up` → working system in < 5 minutes
+- [x] Docker Compose self-host: isolated fresh-project acceptance started the full stack with mock inference, bootstrapped an account, created a bot, and completed a WebSocket prompt through `accepted` → `message` → `settled` in under five minutes. The existing project account was not modified.
 - [ ] Helm chart deploys successfully to a fresh Kubernetes cluster
 - [ ] P95 turn latency < 10s (measured under load test)
 - [ ] Security audit findings resolved (no critical/high open)

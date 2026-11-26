@@ -13,7 +13,11 @@ export default defineConfig({
       name: "dev-csp",
       apply: "serve",
       transformIndexHtml(html) {
-        return html.replace("connect-src 'none'", "connect-src 'self'");
+        return html.replace(
+          /connect-src ([^;]+);/,
+          (_directive, sources: string) =>
+            `connect-src ${sources} http://127.0.0.1:5173 ws://127.0.0.1:5173;`,
+        );
       },
     },
   ],

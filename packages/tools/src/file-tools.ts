@@ -1,15 +1,17 @@
 import { posix } from "node:path";
 import type { VMManager } from "@agentOS/vm-manager";
-import { shellEscape } from "./shell-escape.ts";
 
-function pathDenied(input: string): boolean {
+const WORKSPACE_ROOT = "/home/agent";
+
+function workspacePath(input: string): string | null {
   const slash = input.replaceAll("\\", "/");
-  const normalized = posix.normalize(slash);
-  return slash.split("/").includes("..") || normalized.split("/").includes("..");
+  if (!slash.trim() || slash.includes("\0") || slash.split("/").includes("..")) return null;
+  const resolved = posix.resolve(WORKSPACE_ROOT, slash);
+  return resolved === WORKSPACE_ROOT || resolved.startsWith(`${WORKSPACE_ROOT}/`) ? resolved : null;
 }
 
-function traversalError(input: string): { error: "path traversal denied" } | null {
-  return pathDenied(input) ? { error: "path traversal denied" } : null;
+function fileCommand(path: string, operation: string): string[] {
+  return ["agentos-file", operation, path];
 }
 
 export async function readFile(
@@ -18,16 +20,16 @@ export async function readFile(
   vm: VMManager,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const denied = traversalError(args.path);
-  if (denied) return denied;
-  const { stdout, stderr, exitCode } = await vm.execInContainer(
+  const path = workspacePath(args.path);
+  if (!path) return { error: `path must stay inside ${WORKSPACE_ROOT}` };
+  const { stdout, stderr, exitCode, outputTruncated } = await vm.execInContainer(
     vmId,
-    ["cat", args.path],
+    fileCommand(path, "read"),
     undefined,
     signal,
   );
   if (exitCode !== 0) return { error: stderr || `exit ${exitCode}` };
-  return { content: stdout };
+  return { content: stdout, ...(outputTruncated ? { truncated: true } : {}) };
 }
 
 export async function writeFile(
@@ -36,11 +38,11 @@ export async function writeFile(
   vm: VMManager,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const denied = traversalError(args.path);
-  if (denied) return denied;
+  const path = workspacePath(args.path);
+  if (!path) return { error: `path must stay inside ${WORKSPACE_ROOT}` };
   const { stderr, exitCode } = await vm.execInContainer(
     vmId,
-    ["sh", "-c", `cat > ${shellEscape(args.path)}`],
+    fileCommand(path, "write"),
     args.content,
     signal,
   );
@@ -54,11 +56,11 @@ export async function appendFile(
   vm: VMManager,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const denied = traversalError(args.path);
-  if (denied) return denied;
+  const path = workspacePath(args.path);
+  if (!path) return { error: `path must stay inside ${WORKSPACE_ROOT}` };
   const { stderr, exitCode } = await vm.execInContainer(
     vmId,
-    ["sh", "-c", `cat >> ${shellEscape(args.path)}`],
+    fileCommand(path, "append"),
     args.content,
     signal,
   );
@@ -72,11 +74,11 @@ export async function deleteFile(
   vm: VMManager,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const denied = traversalError(args.path);
-  if (denied) return denied;
+  const path = workspacePath(args.path);
+  if (!path) return { error: `path must stay inside ${WORKSPACE_ROOT}` };
   const { stderr, exitCode } = await vm.execInContainer(
     vmId,
-    ["rm", "-f", args.path],
+    fileCommand(path, "delete"),
     undefined,
     signal,
   );
@@ -90,14 +92,14 @@ export async function listDirectory(
   vm: VMManager,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const denied = traversalError(args.path);
-  if (denied) return denied;
-  const { stdout, stderr, exitCode } = await vm.execInContainer(
+  const path = workspacePath(args.path);
+  if (!path) return { error: `path must stay inside ${WORKSPACE_ROOT}` };
+  const { stdout, stderr, exitCode, outputTruncated } = await vm.execInContainer(
     vmId,
-    ["ls", "-la", args.path],
+    fileCommand(path, "list"),
     undefined,
     signal,
   );
   if (exitCode !== 0) return { error: stderr || `exit ${exitCode}` };
-  return { listing: stdout };
+  return { listing: stdout, ...(outputTruncated ? { truncated: true } : {}) };
 }

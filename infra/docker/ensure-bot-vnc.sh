@@ -8,6 +8,9 @@ if [[ ! "$bot_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
 fi
 
 state_dir="$HOME/.agentos/browsers"
+mkdir -p "$state_dir"
+exec 9>"$state_dir/$bot_id.vnc.lock"
+flock 9
 mapping="$state_dir/$bot_id"
 if [[ ! -r "$mapping" ]]; then
   echo "browser display is not running" >&2
@@ -32,6 +35,8 @@ fi
 
 for _ in $(seq 1 50); do
   if port_open "$vnc_port"; then
+    flock -u 9
+    exec 9>&-
     echo "$vnc_port"
     exit 0
   fi

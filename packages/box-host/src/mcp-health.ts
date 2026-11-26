@@ -7,7 +7,7 @@ import { loggedError, logger } from "./logger.ts";
 
 let activeRun: Promise<number> | undefined;
 
-/** Refresh last-known MCP health with bounded concurrency and without invoking tools. */
+/** Refresh last-known MCP health and discovered tool catalogs without invoking tools. */
 export function processMcpHealthChecks(deps: GatewayDeps): Promise<number> {
   if (activeRun) return activeRun;
   activeRun = refreshMcpHealth(deps).finally(() => {
@@ -34,6 +34,7 @@ async function refreshMcpHealth(deps: GatewayDeps): Promise<number> {
         const row = rows[next++];
         if (!row) continue;
         let health: "healthy" | "error" = "healthy";
+        let cachedTools: Awaited<ReturnType<typeof discoverMcpTools>> | undefined;
         try {
           const key = process.env.CONNECTOR_ENCRYPTION_KEY;
           if (row.authTokenCiphertext && !key)
@@ -52,14 +53,22 @@ async function refreshMcpHealth(deps: GatewayDeps): Promise<number> {
                   },
                 )
               : undefined;
-          await discoverMcpTools(row.url, token);
+          cachedTools = await discoverMcpTools(row.url, token);
         } catch (err) {
           health = "error";
           logger.warn({ ...loggedError(err), serverId: row.id }, "MCP health check failed");
         }
         await deps.db
           .update(mcpServers)
-          .set({ lastHealth: health, lastCheckedAt: new Date() })
+          .set({
+            lastHealth: health,
+            lastError:
+              health === "error"
+                ? "Discovery failed; check endpoint availability, tunnel status, and credentials."
+                : null,
+            lastCheckedAt: new Date(),
+            ...(cachedTools ? { cachedTools } : {}),
+          })
           .where(and(eq(mcpServers.id, row.id), eq(mcpServers.accountId, row.accountId)));
         checked += 1;
       }

@@ -10,6 +10,7 @@ export interface QueuePayload {
   botId: string;
   accountId: string;
   priority?: boolean;
+  traceParent?: string;
 }
 
 const PRIORITY_OFFSET = 1e12;

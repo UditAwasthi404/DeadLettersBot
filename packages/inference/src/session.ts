@@ -5,6 +5,11 @@ import type { ZodTypeAny } from "zod";
 
 export type InferencePurpose = "main" | "summarization";
 
+export interface InferenceSessionOptions {
+  /** Stable per-agent key used by providers for cache-aware routing. */
+  promptCacheKey?: string;
+}
+
 export interface InferenceTool {
   name: string;
   description: string;
@@ -42,5 +47,9 @@ export async function* observeInferenceStream(
 
 export interface ProviderFactory {
   readonly id: string;
-  createSession(purpose: InferencePurpose, model?: string): InferenceSession;
+  createSession(
+    purpose: InferencePurpose,
+    model?: string,
+    options?: InferenceSessionOptions,
+  ): InferenceSession;
 }

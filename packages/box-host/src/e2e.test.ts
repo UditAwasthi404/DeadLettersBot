@@ -32,6 +32,9 @@ class MockVMManager implements VMManager {
   async listVMs(): Promise<VMInfo[]> {
     return [];
   }
+  async getVMStats() {
+    return undefined;
+  }
   async execInContainer(_vmId: string, cmd: string[], _input?: string): Promise<ExecResult> {
     if (cmd[0] === "cat") return { stdout: "hello file", stderr: "", exitCode: 0 };
     if (cmd[0] === "ls") return { stdout: "file.txt\n", stderr: "", exitCode: 0 };

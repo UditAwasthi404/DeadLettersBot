@@ -918,6 +918,91 @@ output.notice-banner {
   text-transform: capitalize;
 }
 
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 9px;
+  margin-right: 8px;
+  border: 1px solid var(--separator-strong);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.status-running {
+  color: #8fc5ff;
+  border-color: rgba(10, 132, 255, 0.35);
+  background: rgba(10, 132, 255, 0.1);
+}
+
+.status-completed {
+  color: #7cdda0;
+  border-color: rgba(48, 209, 88, 0.35);
+  background: rgba(48, 209, 88, 0.08);
+}
+
+.status-error,
+.status-stalled {
+  color: #ffaaa4;
+  border-color: rgba(255, 69, 58, 0.35);
+  background: rgba(255, 69, 58, 0.08);
+}
+
+.subagent-entry > .memory-toolbar > div {
+  justify-content: flex-start;
+}
+
+.subagent-entry h3 {
+  margin: 16px 0 4px;
+}
+
+.subagent-result {
+  max-height: 300px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--separator);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+  font: inherit;
+}
+
+.subagent-steer-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--separator);
+}
+
+.subagent-steer-form label {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.subagent-steer-form textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--separator-strong);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  padding: 9px 10px;
+  font: inherit;
+}
+
+.subagent-steer-form textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.22);
+}
+
 .memory-actions {
   justify-content: flex-end;
   margin-top: 8px;
@@ -1130,6 +1215,24 @@ output.notice-banner {
   color: #ffb4ab;
 }
 
+.auth-card .cl-rootBox,
+.auth-card .cl-cardBox,
+.auth-card .cl-card {
+  width: 100%;
+  max-width: none;
+}
+
+.auth-card .cl-card {
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.auth-card .cl-footer {
+  display: none;
+}
+
 .auth-switch {
   justify-self: center;
   border: 0;
@@ -1235,11 +1338,112 @@ fieldset label {
 }
 
 @media (max-width: 720px) {
+  .sidebar {
+    width: 68px;
+    padding-inline: 6px;
+    align-items: stretch;
+  }
+
+  .brand {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .brand > span:last-child,
+  .nav-item > :not(.glyph),
+  .roster-head > span,
+  .bot-name,
+  .account-row > span,
+  .sidebar-search {
+    display: none;
+  }
+
+  .sidebar-nav {
+    gap: 4px;
+  }
+
+  .nav-item {
+    justify-content: center;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .nav-item .glyph {
+    width: 18px;
+    height: 18px;
+  }
+
+  .roster-head {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .icon-button {
+    width: 30px;
+    height: 30px;
+  }
+
+  .roster {
+    align-items: center;
+  }
+
+  .bot-row {
+    justify-content: center;
+    width: 44px;
+    padding: 6px;
+  }
+
+  .account-row {
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  .chat-header {
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  html[data-platform="win32"] .chat-header {
+    padding-right: 112px;
+  }
+
+  .header-actions {
+    gap: 4px;
+  }
+
+  .memory-view {
+    padding-inline: 14px;
+  }
+
   .mcp-server-form {
     grid-template-columns: 1fr;
   }
 
   .memory-toolbar {
     flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 480px) {
+  .sidebar {
+    width: 56px;
+    padding-inline: 4px;
+  }
+
+  .header-actions button {
+    padding-inline: 8px;
+  }
+
+  .messages {
+    padding-inline: 14px;
+  }
+
+  .composer {
+    margin-inline: 10px;
+  }
+
+  .screen-view {
+    padding-inline: 12px;
   }
 }

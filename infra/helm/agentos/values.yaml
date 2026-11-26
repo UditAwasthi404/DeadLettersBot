@@ -17,6 +17,7 @@ agent:
   contextTokens: 128000
   memorySynthesisEnabled: false
   mcpStrictMode: false
+  dynamicToolOffloading: true
 
 ingress:
   enabled: false
@@ -28,6 +29,12 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+
+certManager:
+  enabled: false
+  issuerName: ""
+  issuerKind: ClusterIssuer
+  secretName: agentos-tls
 
 secrets:
   jwtSecret: ""
