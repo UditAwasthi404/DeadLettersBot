@@ -2,6 +2,14 @@
 /** Playwright CDP bridge to Chromium inside the account VM. */
 
 import { type Browser, type Page, chromium } from "playwright";
+import {
+  type ComputerRuntime,
+  emptyRuntime,
+  performClick,
+  runComputerAction,
+  wheelScroll,
+} from "./browser-actions.ts";
+import { parseComputerRequest } from "./computer-use.ts";
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -56,13 +64,23 @@ const RECORDING_SCRIPT = `(() => {
   }, true);
 })();`;
 
+export interface BrowserSessionOptions {
+  /** Move the real X pointer so the agent screen shows the cursor. Screen pixels, not CSS pixels. */
+  osPointer?: (point: { x: number; y: number }) => Promise<void> | void;
+}
+
 export class BrowserSession {
   private browser: Browser | null = null;
   private page: Page | null = null;
+  private runtime: ComputerRuntime = emptyRuntime();
+  private pointerDisabled = false;
+  private chrome = { x: 0, y: 0, known: false };
   private recording: {
     events: BrowserRecordEvent[];
     stopListen: () => void;
   } | null = null;
+
+  constructor(private readonly options: BrowserSessionOptions = {}) {}
 
   async connect(ipAddress: string, port: number): Promise<void> {
     await this.connectTo(`http://${ipAddress}:${port}`);
@@ -72,6 +90,8 @@ export class BrowserSession {
     this.browser = await chromium.connectOverCDP(endpoint, { headers });
     const existing = this.browser.contexts()[0]?.pages()[0];
     this.page = existing ?? (await (await this.browser.newContext()).newPage());
+    this.page.setDefaultTimeout(8_000);
+    this.page.setDefaultNavigationTimeout(20_000);
   }
 
   async disconnect(): Promise<void> {
@@ -95,18 +115,65 @@ export class BrowserSession {
   }
 
   async click(selector: string): Promise<unknown> {
+    return this.clickTarget({ selector });
+  }
+
+  async clickTarget(input: {
+    selector?: string;
+    query?: string;
+    x?: number;
+    y?: number;
+  }): Promise<unknown> {
     try {
-      await this.requirePage().click(selector);
-      return { ok: true };
+      const outcome = await performClick(this.requirePage(), input, this.runtime, {
+        movePointer: (point) => this.aim(point.x, point.y),
+      });
+      this.runtime = outcome.runtime;
+      return outcome.image ? { ...outcome.result, image: outcome.image } : outcome.result;
     } catch (err) {
       return { error: errMsg(err) };
     }
   }
 
   async type(selector: string, text: string): Promise<unknown> {
+    return this.typeText({ selector, text });
+  }
+
+  async typeText(input: {
+    selector?: string;
+    query?: string;
+    text: string;
+    submit?: boolean;
+  }): Promise<unknown> {
     try {
-      await this.requirePage().fill(selector, text);
-      return { ok: true };
+      const outcome = await runComputerAction(
+        this.requirePage(),
+        {
+          action: "type",
+          text: input.text,
+          ...(input.selector ? { query: input.selector } : {}),
+          ...(input.query ? { query: input.query } : {}),
+          ...(input.submit ? { submit: true } : {}),
+        },
+        this.runtime,
+        { movePointer: (point) => this.aim(point.x, point.y) },
+      );
+      this.runtime = outcome.runtime;
+      return outcome.image ? { ...outcome.result, image: outcome.image } : outcome.result;
+    } catch (err) {
+      return { error: errMsg(err) };
+    }
+  }
+
+  async computer(args: Record<string, unknown>): Promise<unknown> {
+    const parsed = parseComputerRequest(args);
+    if (!parsed.ok) return { error: parsed.error };
+    try {
+      const outcome = await runComputerAction(this.requirePage(), parsed.request, this.runtime, {
+        movePointer: (point) => this.aim(point.x, point.y),
+      });
+      this.runtime = outcome.runtime;
+      return outcome.image ? { ...outcome.result, image: outcome.image } : outcome.result;
     } catch (err) {
       return { error: errMsg(err) };
     }
@@ -114,8 +181,14 @@ export class BrowserSession {
 
   async screenshot(): Promise<unknown> {
     try {
-      const buf = await this.requirePage().screenshot({ type: "jpeg", quality: 60 });
-      return { dataUrl: `data:image/jpeg;base64,${buf.toString("base64")}` };
+      const outcome = await runComputerAction(
+        this.requirePage(),
+        { action: "screenshot" },
+        this.runtime,
+        { movePointer: (point) => this.aim(point.x, point.y) },
+      );
+      this.runtime = outcome.runtime;
+      return outcome.image ? { ...outcome.result, image: outcome.image } : outcome.result;
     } catch (err) {
       return { error: errMsg(err) };
     }
@@ -158,16 +231,55 @@ export class BrowserSession {
 
   async scroll(direction: "up" | "down", px?: number): Promise<unknown> {
     try {
-      await this.requirePage().evaluate(
-        ({ dir, amount }) => {
-          window.scrollBy(0, dir === "down" ? amount : -amount);
-        },
-        { dir: direction, amount: px ?? 500 },
-      );
-      return { ok: true };
+      return await wheelScroll(this.requirePage(), direction, px);
     } catch (err) {
       return { error: errMsg(err) };
     }
+  }
+
+  /** Best-effort OS cursor. One failure disables further attempts so a missing helper cannot stall the loop. */
+  private aim(cssX: number, cssY: number): void {
+    if (!this.options.osPointer || this.pointerDisabled) return;
+    void this.aimScreen(cssX, cssY);
+  }
+
+  private async aimScreen(cssX: number, cssY: number): Promise<void> {
+    try {
+      const screen = await this.screenPoint(cssX, cssY);
+      await this.options.osPointer?.(screen);
+    } catch {
+      this.pointerDisabled = true;
+    }
+  }
+
+  private async screenPoint(cssX: number, cssY: number): Promise<{ x: number; y: number }> {
+    if (!this.chrome.known) {
+      const page = this.requirePage();
+      try {
+        const session = await page.context().newCDPSession(page);
+        try {
+          const target = (await session.send("Browser.getWindowForTarget")) as {
+            windowId: number;
+          };
+          const placed = (await session.send("Browser.getWindowBounds", {
+            windowId: target.windowId,
+          })) as { bounds?: { left?: number; top?: number; height?: number } };
+          const inner = await page.evaluate(() => globalThis.innerHeight);
+          const top = placed.bounds?.top ?? 0;
+          const height = placed.bounds?.height ?? inner;
+          this.chrome = {
+            x: placed.bounds?.left ?? 0,
+            y: top + Math.max(0, height - inner),
+            known: true,
+          };
+        } finally {
+          await session.detach();
+        }
+      } catch {
+        this.chrome = { x: 0, y: 0, known: true };
+      }
+    }
+    return { x: this.chrome.x + cssX, y: this.chrome.y + cssY };
   }
 
   async waitForElement(selector: string, timeoutMs?: number): Promise<unknown> {

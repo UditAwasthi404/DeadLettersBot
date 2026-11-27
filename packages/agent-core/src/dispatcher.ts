@@ -5,6 +5,7 @@ import type { BrowserSession } from "@agentos/tools";
 import {
   appendFile,
   deleteFile,
+  detachImage,
   fetchURL,
   listDirectory,
   readFile,
@@ -49,6 +50,7 @@ const UNTRUSTED_TOOL_SOURCES: Record<string, string> = {
   BrowserExtractContent: "browser_page",
   BrowserEvaluate: "browser_evaluation",
   BrowserScreenshot: "browser_screenshot",
+  Computer: "computer_screen",
   SearchWeb: "web_search",
   FetchURL: "fetched_web_document",
   GetDynamicTools: "mcp_tool_catalog",
@@ -130,6 +132,7 @@ export async function dispatchTool(
         break;
       }
 
+      case "Computer":
       case "BrowserNavigate":
       case "BrowserClick":
       case "BrowserType":
@@ -143,12 +146,24 @@ export async function dispatchTool(
           break;
         }
         const b = deps.browser;
-        if (tc.name === "BrowserNavigate") {
+        if (tc.name === "Computer") {
+          raw = await b.computer(tc.args);
+        } else if (tc.name === "BrowserNavigate") {
           raw = await b.navigate(String(tc.args.url ?? ""));
         } else if (tc.name === "BrowserClick") {
-          raw = await b.click(String(tc.args.selector ?? ""));
+          raw = await b.clickTarget({
+            ...(tc.args.selector !== undefined ? { selector: String(tc.args.selector) } : {}),
+            ...(tc.args.query !== undefined ? { query: String(tc.args.query) } : {}),
+            ...(typeof tc.args.x === "number" ? { x: tc.args.x } : {}),
+            ...(typeof tc.args.y === "number" ? { y: tc.args.y } : {}),
+          });
         } else if (tc.name === "BrowserType") {
-          raw = await b.type(String(tc.args.selector ?? ""), String(tc.args.text ?? ""));
+          raw = await b.typeText({
+            ...(tc.args.selector !== undefined ? { selector: String(tc.args.selector) } : {}),
+            ...(tc.args.query !== undefined ? { query: String(tc.args.query) } : {}),
+            text: String(tc.args.text ?? ""),
+            submit: tc.args.submit === true,
+          });
         } else if (tc.name === "BrowserScreenshot") {
           raw = await b.screenshot();
         } else if (tc.name === "BrowserExtractContent") {
@@ -222,12 +237,19 @@ export async function dispatchTool(
         throw new PermissionDeniedError("unadvertised tool");
     }
 
-    const flagged = withErrorFlag(raw);
+    const split = detachImage(raw);
+    const flagged = withErrorFlag(split.result);
     const source = UNTRUSTED_TOOL_SOURCES[tc.name];
     const result =
       !flagged.isError && source ? wrapUntrusted(source, flagged.result) : flagged.result;
     const { isError } = flagged;
-    return { toolCallId: tc.id, name: tc.name, result, isError };
+    return {
+      toolCallId: tc.id,
+      name: tc.name,
+      result,
+      isError,
+      ...(split.images ? { images: split.images } : {}),
+    };
   } catch (err) {
     if (err instanceof PermissionDeniedError) {
       return {

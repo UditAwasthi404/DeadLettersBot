@@ -1,5 +1,11 @@
 export { BrowserSession, recordingAccepts } from "./browser-tools.ts";
 export {
+  COMPUTER_DESCRIPTION,
+  COMPUTER_PARAMETERS,
+  detachImage,
+  presentToolResult,
+} from "./computer-use.ts";
+export {
   appendFile,
   deleteFile,
   listDirectory,
