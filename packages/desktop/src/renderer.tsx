@@ -472,6 +472,11 @@ interface Frame {
   permissionLevel?: number;
   code?: string;
   message?: string;
+  step?: number;
+  stepBudget?: number;
+  label?: string;
+  plan?: string;
+  thumbnail?: string;
 }
 
 function App({ clerk }: { clerk?: ClerkBridge } = {}) {
@@ -627,8 +632,16 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     resolve?.(confirmed);
   }
   const [allowLocalSession, setAllowLocalSession] = useState(false);
-  const [screenMode, setScreenMode] = useState<null | "view" | "handoff">(null);
+  const [screenMode, setScreenMode] = useState<null | "view" | "control" | "handoff">(null);
   const [agentActivity, setAgentActivity] = useState("");
+  const [livePlan, setLivePlan] = useState("");
+  const [stepProgress, setStepProgress] = useState<{ step: number; stepBudget: number } | null>(
+    null,
+  );
+  const [pausedRun, setPausedRun] = useState(false);
+  const [timeline, setTimeline] = useState<
+    Array<{ id: string; label: string; thumbnail?: string }>
+  >([]);
   const tokenHold = useRef<{ runId: string; agentId?: string; text: string } | null>(null);
   const tokenPaint = useRef(0);
   const [handoff, setHandoff] = useState<{
@@ -686,6 +699,23 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             agentId: frame.agentId,
           },
         ]);
+      } else if (frame.type === "activity") {
+        if (typeof frame.step === "number" && typeof frame.stepBudget === "number")
+          setStepProgress({ step: frame.step, stepBudget: frame.stepBudget });
+        if (typeof frame.plan === "string") setLivePlan(frame.plan);
+        if (frame.label) setAgentActivity(frame.label);
+        if (frame.label && frame.label !== "Working" && frame.label !== "Following the plan") {
+          setTimeline((old) =>
+            [
+              {
+                id: crypto.randomUUID(),
+                label: frame.label ?? "Working",
+                ...(typeof frame.thumbnail === "string" ? { thumbnail: frame.thumbnail } : {}),
+              },
+              ...old,
+            ].slice(0, 12),
+          );
+        }
       } else if (frame.type === "toolStart") {
         setAgentActivity(activityLabel(frame.toolName, frame.params));
         setItems((old) => [
@@ -742,6 +772,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       } else if (frame.type === "settled") {
         setActiveRun("");
         setAgentActivity("");
+        setPausedRun(false);
       } else if (frame.type === "error") {
         setError(`${frame.code ?? "error"}: ${frame.message ?? "request failed"}`);
         setActiveRun("");
@@ -1045,7 +1076,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       if (symbol === null) return;
       session.key(symbol, false);
     };
-    if (screenMode === "handoff") {
+    if (screenMode === "handoff" || screenMode === "control") {
       canvas.addEventListener("pointerdown", point);
       canvas.addEventListener("pointermove", point);
       canvas.addEventListener("pointerup", point);
@@ -3270,12 +3301,65 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </Dialog.Root>
           {screenMode && screenBotId && (
             <section className="screen-view">
-              <p className="screen-status">
-                <i className={agentActivity ? "working-dot" : ""} />
-                {screenMode === "handoff"
-                  ? handoff?.reason
-                  : agentActivity || "Viewing the agent screen. The turn keeps running."}
-              </p>
+              <div className="screen-toolbar">
+                <p className="screen-status">
+                  <i className={agentActivity ? "working-dot" : ""} />
+                  {screenMode === "handoff"
+                    ? handoff?.reason
+                    : screenMode === "control"
+                      ? "You have the pointer. Resume to hand it back."
+                      : agentActivity || "Viewing the agent screen. The turn keeps running."}
+                  {stepProgress ? ` · step ${stepProgress.step}/${stepProgress.stepBudget}` : ""}
+                </p>
+                {screenMode !== "handoff" && activeRun ? (
+                  <div className="screen-controls">
+                    <AppButton
+                      type="button"
+                      onClick={() => {
+                        setPausedRun(true);
+                        setScreenMode("control");
+                        void window.agentOS.send({
+                          type: "pause",
+                          agentId: screenBotId,
+                          runId: activeRun,
+                        });
+                      }}
+                    >
+                      Take over
+                    </AppButton>
+                    <AppButton
+                      type="button"
+                      onClick={() => {
+                        const next = !pausedRun;
+                        setPausedRun(next);
+                        if (!next && screenMode === "control") setScreenMode("view");
+                        void window.agentOS.send({
+                          type: next ? "pause" : "resume",
+                          agentId: screenBotId,
+                          runId: activeRun,
+                        });
+                      }}
+                    >
+                      {pausedRun ? "Resume" : "Pause"}
+                    </AppButton>
+                  </div>
+                ) : null}
+              </div>
+              {livePlan ? <p className="screen-plan">{livePlan}</p> : null}
+              {timeline.length ? (
+                <div className="screen-timeline">
+                  {timeline.map((item) => (
+                    <figure key={item.id}>
+                      {item.thumbnail ? (
+                        <img alt="" src={`data:image/jpeg;base64,${item.thumbnail}`} />
+                      ) : (
+                        <span />
+                      )}
+                      <figcaption>{item.label}</figcaption>
+                    </figure>
+                  ))}
+                </div>
+              ) : null}
               <canvas ref={screenRef} width={1280} height={800} />
               {screenMode === "handoff" ? (
                 <AppButton type="button" onClick={() => void returnControl()}>

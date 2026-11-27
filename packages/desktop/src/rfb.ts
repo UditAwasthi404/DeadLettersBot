@@ -33,6 +33,8 @@ export class RawVncSession {
   private rawLeft = 0;
   private requestTimer: ReturnType<typeof setTimeout> | null = null;
   private lastUpdateRequest = 0;
+  private updateBytes = 0;
+  private nextWait = FRAME_INTERVAL_MS;
   private readonly ctx: CanvasRenderingContext2D | null;
 
   constructor(
@@ -143,6 +145,7 @@ export class RawVncSession {
           const head = this.take(4);
           if (!head) return;
           this.rectsLeft = readU16(head, 2);
+          this.updateBytes = 0;
           this.stage = "rect";
           continue;
         }
@@ -161,6 +164,7 @@ export class RawVncSession {
       }
       if (this.stage === "rect") {
         if (this.rectsLeft === 0) {
+          this.nextWait = this.updateBytes < 8_192 ? 200 : FRAME_INTERVAL_MS;
           this.requestUpdate(true);
           this.stage = "server";
           continue;
@@ -187,6 +191,7 @@ export class RawVncSession {
         const src = this.take(4);
         if (!src) return;
         this.copyRect(readU16(src, 0), readU16(src, 2));
+        this.updateBytes += this.rectW * this.rectH * 4;
         this.rectsLeft -= 1;
         this.stage = "rect";
         continue;
@@ -194,6 +199,7 @@ export class RawVncSession {
       if (this.stage !== "raw") throw new Error("unhandled VNC stage");
       if (!this.fillRaw()) return;
       this.blit();
+      this.updateBytes += this.raw.byteLength;
       this.rectsLeft -= 1;
       this.stage = "rect";
     }
@@ -250,7 +256,7 @@ export class RawVncSession {
       send();
       return;
     }
-    const wait = Math.max(0, FRAME_INTERVAL_MS - (performance.now() - this.lastUpdateRequest));
+    const wait = Math.max(0, this.nextWait - (performance.now() - this.lastUpdateRequest));
     if (wait === 0) {
       send();
       return;

@@ -1950,6 +1950,55 @@ output.notice-banner {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.screen-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.screen-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.screen-plan {
+  margin: 0;
+  color: var(--text-2);
+  white-space: pre-wrap;
+}
+
+.screen-timeline {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.screen-timeline figure {
+  flex: none;
+  width: 112px;
+  margin: 0;
+}
+
+.screen-timeline img,
+.screen-timeline span {
+  display: block;
+  width: 112px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #111;
+}
+
+.screen-timeline figcaption {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .screen-view p {

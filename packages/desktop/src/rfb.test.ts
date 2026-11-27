@@ -95,7 +95,7 @@ describe("raw VNC handshake", () => {
     const mark = sent.length;
     session.push(rawPixel(0, 0, 1, 2, 3, 4));
     expect(sent.slice(mark).some((message) => message[0] === 3 && message[1] === 1)).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 250));
     expect(sent.slice(mark).some((message) => message[0] === 3 && message[1] === 1)).toBe(true);
     session.dispose();
   });

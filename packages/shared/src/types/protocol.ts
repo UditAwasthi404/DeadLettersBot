@@ -24,6 +24,18 @@ export interface InterruptFrame {
   runId: string;
 }
 
+export interface PauseFrame {
+  type: "pause";
+  agentId: string;
+  runId: string;
+}
+
+export interface ResumeFrame {
+  type: "resume";
+  agentId: string;
+  runId: string;
+}
+
 export interface ApproveFrame {
   type: "approve";
   agentId: string;
@@ -50,6 +62,8 @@ export interface LocalExecResultFrame {
 export type ClientFrame =
   | SendPromptFrame
   | InterruptFrame
+  | PauseFrame
+  | ResumeFrame
   | ApproveFrame
   | ReturnToBotFrame
   | LocalExecResultFrame;
@@ -67,6 +81,18 @@ export interface TokenFrame {
   agentId: string;
   runId: string;
   delta: string;
+}
+
+export interface ActivityFrame {
+  type: "activity";
+  agentId: string;
+  runId: string;
+  step: number;
+  stepBudget: number;
+  label: string;
+  plan?: string;
+  /** Small JPEG, base64, only when it is already under the UI budget. */
+  thumbnail?: string;
 }
 
 export interface ToolStartFrame {
@@ -144,6 +170,7 @@ export interface LocalExecRequestFrame {
 export type ServerFrame =
   | AcceptedFrame
   | TokenFrame
+  | ActivityFrame
   | ToolStartFrame
   | ToolEndFrame
   | ApprovalRequiredFrame
