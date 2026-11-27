@@ -35,8 +35,12 @@ if [[ ! "$display" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 if ! command -v xdotool >/dev/null 2>&1; then
-  echo "xdotool is not installed" >&2
-  exit 1
+  if [[ "$(id -u)" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y --no-install-recommends xdotool
+  else
+    echo "xdotool is not installed; the runtime will try a built-in X11 pointer" >&2
+    exit 1
+  fi
 fi
 
 export DISPLAY=":${display}"
