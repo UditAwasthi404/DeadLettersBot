@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, ipcMain, session, shell } from "electron";
@@ -6,6 +7,24 @@ import WebSocket from "ws";
 import { type LocalMachineAccess, runLocalCommand } from "./local-daemon";
 
 const SESSION_URL = "https://session.agentos.desktop";
+
+/** GPU processes thrash under a hypervisor and make the whole window feel stuck. */
+function disableGpuInVirtualMachine(): void {
+  if (process.env.AGENTOS_DISABLE_GPU === "0") return;
+  let virtual = process.env.AGENTOS_DISABLE_GPU === "1";
+  if (!virtual && process.platform === "linux") {
+    try {
+      virtual = readFileSync("/proc/cpuinfo", "utf8").includes("hypervisor");
+    } catch {
+      virtual = false;
+    }
+  }
+  if (!virtual) return;
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu");
+}
+
+disableGpuInVirtualMachine();
 const RECONNECT_CAP_MS = 30_000;
 
 let windowRef: BrowserWindow | null = null;
@@ -430,9 +449,7 @@ ipcMain.handle("vnc:open", (_event, botId: string) => {
     });
     sock.on("message", (data) => {
       if (epoch !== vncEpoch) return;
-      const bytes = Buffer.isBuffer(data)
-        ? new Uint8Array(data)
-        : new TextEncoder().encode(String(data));
+      const bytes = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
       windowRef?.webContents.send("vnc:data", bytes);
     });
     sock.on("close", (code, reason) => {

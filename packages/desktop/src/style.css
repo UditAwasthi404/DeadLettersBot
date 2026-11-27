@@ -1932,8 +1932,7 @@ output.notice-banner {
   flex-direction: column;
   gap: 12px;
   padding: 16px 24px 20px;
-  background: rgba(5, 5, 9, 0.82);
-  backdrop-filter: blur(18px);
+  background: #050509;
 }
 
 .screen-view canvas {
@@ -1944,6 +1943,13 @@ output.notice-banner {
   border: 1px solid var(--glass-border);
   border-radius: 16px;
   box-shadow: var(--shadow);
+  contain: paint;
+}
+
+.screen-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .screen-view p {

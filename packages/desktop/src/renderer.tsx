@@ -628,6 +628,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
   const [allowLocalSession, setAllowLocalSession] = useState(false);
   const [screenMode, setScreenMode] = useState<null | "view" | "handoff">(null);
+  const [agentActivity, setAgentActivity] = useState("");
+  const tokenHold = useRef<{ runId: string; agentId?: string; text: string } | null>(null);
+  const tokenPaint = useRef(0);
   const [handoff, setHandoff] = useState<{
     agentId: string;
     runId: string;
@@ -636,30 +639,43 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const screenBotId = screenMode === "handoff" ? handoff?.agentId : botId;
 
   useEffect(() => {
+    const flushTokens = (reason: "paint" | "boundary") => {
+      const pending = tokenHold.current;
+      tokenHold.current = null;
+      if (tokenPaint.current) {
+        cancelAnimationFrame(tokenPaint.current);
+        tokenPaint.current = 0;
+      }
+      if (!pending?.text) return;
+      setItems((old) => appendAssistantDelta(old, pending));
+      if (reason === "paint")
+        setAgentActivity((current) => (current === "Replying" ? current : "Replying"));
+    };
     const stopFrame = window.agentOS.onFrame((unknownFrame) => {
       const frame = unknownFrame as Frame;
       if (frame.runId) setActiveRun(frame.runId);
       if (frame.type === "token" && frame.runId && frame.delta) {
-        setItems((old) => {
-          const idx = old.findIndex((x) => x.role === "assistant" && x.runId === frame.runId);
-          if (idx < 0)
-            return [
-              ...old,
-              {
-                id: crypto.randomUUID(),
-                role: "assistant",
-                content: frame.delta ?? "",
-                runId: frame.runId,
-                agentId: frame.agentId,
-              },
-            ];
-          const next = old.slice();
-          const current = next[idx];
-          if (!current) return old;
-          next[idx] = { ...current, content: current.content + frame.delta };
-          return next;
-        });
-      } else if (frame.type === "message") {
+        const pending = tokenHold.current;
+        if (pending && pending.runId === frame.runId) pending.text += frame.delta;
+        else {
+          flushTokens("boundary");
+          tokenHold.current = {
+            runId: frame.runId,
+            agentId: frame.agentId,
+            text: frame.delta,
+          };
+          setAgentActivity((current) => (current === "Replying" ? current : "Replying"));
+        }
+        if (!tokenPaint.current) {
+          tokenPaint.current = requestAnimationFrame(() => {
+            tokenPaint.current = 0;
+            flushTokens("paint");
+          });
+        }
+        return;
+      }
+      flushTokens("boundary");
+      if (frame.type === "message") {
         setItems((old) => [
           ...old,
           {
@@ -671,25 +687,31 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           },
         ]);
       } else if (frame.type === "toolStart") {
+        setAgentActivity(activityLabel(frame.toolName, frame.params));
         setItems((old) => [
           ...old,
           {
             id: crypto.randomUUID(),
             role: "tool",
             toolName: frame.toolName,
-            content: JSON.stringify(frame.params ?? {}, null, 2),
+            content: previewPayload(frame.params),
             runId: frame.runId,
             agentId: frame.agentId,
           },
         ]);
       } else if (frame.type === "toolEnd") {
+        setAgentActivity((current) =>
+          frame.toolName === "Computer" || frame.toolName === "BrowserScreenshot"
+            ? "Checking the screen"
+            : current,
+        );
         setItems((old) => [
           ...old,
           {
             id: crypto.randomUUID(),
             role: "tool",
             toolName: `${frame.toolName ?? "Tool"} result`,
-            content: JSON.stringify(frame.result ?? {}, null, 2),
+            content: previewPayload(frame.result),
             runId: frame.runId,
             agentId: frame.agentId,
           },
@@ -719,17 +741,24 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         setScreenMode("handoff");
       } else if (frame.type === "settled") {
         setActiveRun("");
+        setAgentActivity("");
       } else if (frame.type === "error") {
         setError(`${frame.code ?? "error"}: ${frame.message ?? "request failed"}`);
         setActiveRun("");
+        setAgentActivity("");
       }
     });
     const stopStatus = window.agentOS.onStatus(setStatus);
+    const stopPaint = () => {
+      if (tokenPaint.current) cancelAnimationFrame(tokenPaint.current);
+      tokenPaint.current = 0;
+    };
     let active = true;
     if (clerk?.enabled) {
       setSessionReady(true);
       return () => {
         active = false;
+        stopPaint();
         stopFrame();
         stopStatus();
         void window.agentOS.disconnect();
@@ -760,6 +789,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     });
     return () => {
       active = false;
+      stopPaint();
       stopFrame();
       stopStatus();
       void window.agentOS.disconnect();
@@ -974,14 +1004,35 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     void window.agentOS.openVnc(screenBotId).catch((err) => {
       if (!closed) setError(err instanceof Error ? err.message : String(err));
     });
+    let pointerFrame = 0;
+    let pendingPointer: { x: number; y: number; buttons: number } | null = null;
+    const sendPointer = (immediate: boolean) => {
+      const next = pendingPointer;
+      if (!next) return;
+      if (!immediate) {
+        if (pointerFrame) return;
+        pointerFrame = requestAnimationFrame(() => {
+          pointerFrame = 0;
+          const point = pendingPointer;
+          pendingPointer = null;
+          if (point) session.pointer(point.x, point.y, point.buttons);
+        });
+        return;
+      }
+      if (pointerFrame) cancelAnimationFrame(pointerFrame);
+      pointerFrame = 0;
+      pendingPointer = null;
+      session.pointer(next.x, next.y, next.buttons);
+    };
     const point = (event: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return;
-      session.pointer(
-        ((event.clientX - rect.left) / rect.width) * canvas.width,
-        ((event.clientY - rect.top) / rect.height) * canvas.height,
-        event.buttons,
-      );
+      pendingPointer = {
+        x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+        y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+        buttons: event.buttons,
+      };
+      sendPointer(event.type !== "pointermove");
     };
     const downKey = (event: KeyboardEvent) => {
       const symbol = keysym(event.key);
@@ -1010,6 +1061,8 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       canvas.removeEventListener("pointerup", point);
       window.removeEventListener("keydown", downKey);
       window.removeEventListener("keyup", upKey);
+      if (pointerFrame) cancelAnimationFrame(pointerFrame);
+      session.dispose();
       void window.agentOS.closeVnc();
     };
   }, [screenMode, screenBotId]);
@@ -2495,7 +2548,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const workspaceSubtitle =
     workspace === "chat"
       ? activeRun
-        ? "Working"
+        ? agentActivity || "Working"
         : (selectedBot?.role ?? "Agent conversation")
       : (selectedBot?.name ?? "Workspace");
 
@@ -3217,10 +3270,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </Dialog.Root>
           {screenMode && screenBotId && (
             <section className="screen-view">
-              <p>
+              <p className="screen-status">
+                <i className={agentActivity ? "working-dot" : ""} />
                 {screenMode === "handoff"
                   ? handoff?.reason
-                  : "Viewing the agent screen. The turn keeps running."}
+                  : agentActivity || "Viewing the agent screen. The turn keeps running."}
               </p>
               <canvas ref={screenRef} width={1280} height={800} />
               {screenMode === "handoff" ? (
@@ -5116,6 +5170,62 @@ async function fileToBase64(file: File): Promise<string> {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x2000));
   }
   return btoa(binary);
+}
+
+function appendAssistantDelta(
+  items: ChatItem[],
+  pending: { runId: string; agentId?: string; text: string },
+): ChatItem[] {
+  const idx = items.findIndex((item) => item.role === "assistant" && item.runId === pending.runId);
+  if (idx < 0) {
+    return [
+      ...items,
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: pending.text,
+        runId: pending.runId,
+        agentId: pending.agentId,
+      },
+    ];
+  }
+  const next = items.slice();
+  const current = next[idx];
+  if (!current) return items;
+  next[idx] = { ...current, content: current.content + pending.text };
+  return next;
+}
+
+function activityLabel(toolName: string | undefined, params: unknown): string {
+  const args =
+    params && typeof params === "object"
+      ? (params as { action?: unknown; query?: unknown; key?: unknown })
+      : {};
+  const query = typeof args.query === "string" ? args.query.slice(0, 40) : "";
+  if (toolName === "Computer") {
+    const action = typeof args.action === "string" ? args.action : "screenshot";
+    if (action === "screenshot" || action === "find")
+      return query ? `Looking for “${query}”` : "Looking at the screen";
+    if (action === "click" || action === "double_click")
+      return query ? `Clicking “${query}”` : "Clicking";
+    if (action === "right_click") return "Right-clicking";
+    if (action === "type") return "Typing";
+    if (action === "key") return `Pressing ${typeof args.key === "string" ? args.key : "a key"}`;
+    if (action === "scroll") return "Scrolling";
+    if (action === "drag") return "Dragging";
+    if (action === "move") return "Moving the pointer";
+  }
+  if (toolName === "BrowserClick") return query ? `Clicking “${query}”` : "Clicking";
+  if (toolName === "BrowserType") return "Typing";
+  if (toolName === "BrowserNavigate") return "Opening a page";
+  if (toolName === "BrowserScreenshot") return "Looking at the screen";
+  if (toolName === "BrowserScroll") return "Scrolling";
+  return toolName ? `Using ${toolName}` : "Working";
+}
+
+function previewPayload(value: unknown): string {
+  const text = JSON.stringify(value ?? {}, null, 2);
+  return text.length > 800 ? `${text.slice(0, 800)}…` : text;
 }
 
 function asBytes(value: unknown): Uint8Array {
