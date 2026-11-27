@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { BrowserWindow, app, ipcMain, session, shell } from "electron";
+import { BrowserWindow, app, ipcMain, nativeTheme, session, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import WebSocket from "ws";
 import { type LocalMachineAccess, runLocalCommand } from "./local-daemon";
@@ -430,9 +430,14 @@ ipcMain.handle("vnc:open", (_event, botId: string) => {
     });
     sock.on("message", (data) => {
       if (epoch !== vncEpoch) return;
+      // Copy into a fresh Uint8Array so IPC structured-clone cannot keep a Buffer view.
       const bytes = Buffer.isBuffer(data)
-        ? new Uint8Array(data)
-        : new TextEncoder().encode(String(data));
+        ? Uint8Array.from(data)
+        : data instanceof ArrayBuffer
+          ? new Uint8Array(data.slice(0))
+          : ArrayBuffer.isView(data)
+            ? Uint8Array.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
+            : new TextEncoder().encode(String(data));
       windowRef?.webContents.send("vnc:data", bytes);
     });
     sock.on("close", (code, reason) => {
@@ -448,9 +453,16 @@ ipcMain.handle("vnc:open", (_event, botId: string) => {
     });
   });
 });
-ipcMain.handle("vnc:send", (_event, bytes: Uint8Array) => {
+ipcMain.handle("vnc:send", (_event, bytes: Uint8Array | ArrayBuffer | number[]) => {
   if (!vncSocket || vncSocket.readyState !== WebSocket.OPEN) return;
-  vncSocket.send(Buffer.from(bytes));
+  const payload =
+    bytes instanceof ArrayBuffer
+      ? Buffer.from(new Uint8Array(bytes))
+      : Array.isArray(bytes)
+        ? Buffer.from(bytes)
+        : Buffer.from(bytes);
+  if (payload.byteLength === 0) return;
+  vncSocket.send(payload);
 });
 ipcMain.handle("vnc:close", () => {
   stopVnc();
@@ -458,6 +470,20 @@ ipcMain.handle("vnc:close", () => {
 
 ipcMain.handle("app:restart", () => {
   autoUpdater.quitAndInstall();
+});
+
+ipcMain.handle("app:set-theme", (_event, theme: "light" | "dark") => {
+  if (theme !== "light" && theme !== "dark") return;
+  nativeTheme.themeSource = theme;
+  const light = theme === "light";
+  windowRef?.setBackgroundColor(light ? "#eef2f0" : "#0e1110");
+  if (process.platform !== "darwin") {
+    windowRef?.setTitleBarOverlay({
+      color: light ? "#f3f6f4" : "#0e1110",
+      symbolColor: light ? "#1f2a27" : "#eef3f0",
+      height: 52,
+    });
+  }
 });
 
 ipcMain.handle("app:open-external", async (event, value: unknown) => {

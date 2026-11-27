@@ -4,6 +4,7 @@ declare global {
   interface Window {
     agentOS: {
       platform: string;
+      setNativeTheme?(theme: "light" | "dark"): Promise<void>;
       apiRequest(request: {
         baseUrl: string;
         token: string;

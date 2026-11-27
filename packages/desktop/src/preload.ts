@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("agentOS", {
   platform: process.platform,
+  setNativeTheme: (theme: "light" | "dark") => ipcRenderer.invoke("app:set-theme", theme),
   apiRequest: (request: {
     baseUrl: string;
     token: string;
