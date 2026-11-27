@@ -20,17 +20,18 @@ export function AgentAvatar({
 }: {
   name?: string;
   kind?: AvatarKind;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "xl";
   className?: string;
 }) {
   const Icon = ICONS[kind];
   const tone = kind === "agent" ? toneFor(name ?? "agent") : 0;
+  const iconSize = size === "sm" ? 12 : size === "xl" ? 32 : 15;
   return (
     <span
       className={`agent-avatar agent-avatar--${kind} agent-avatar--${size} tone-${tone}${className ? ` ${className}` : ""}`}
       aria-hidden="true"
     >
-      <Icon size={size === "sm" ? 12 : 15} />
+      <Icon size={iconSize} />
     </span>
   );
 }

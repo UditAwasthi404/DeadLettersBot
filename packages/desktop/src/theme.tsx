@@ -86,7 +86,7 @@ export function ThemeController({ children }: { children: React.ReactNode }) {
 
   return (
     <ThemeModeContext.Provider value={value}>
-      <Theme appearance={resolved} accentColor="teal" grayColor="sage" radius="medium">
+      <Theme appearance={resolved} accentColor="teal" grayColor="sand" radius="medium">
         {children}
       </Theme>
     </ThemeModeContext.Provider>

@@ -44,7 +44,9 @@
       "Bash(cd \"D:/CODE/DeadLettersBot/packages/desktop/src\" && grep -n \"<Popover.Trigger\\\\|<Dialog.Trigger\\\\|<AlertDialog.Trigger\\\\|<Tooltip.Trigger\\\\|<Popover.Close\" renderer.tsx)",
       "Bash(cd \"D:/CODE/DeadLettersBot\" && pnpm --filter @agentos/desktop typecheck 2>&1 | tail -5 && cd packages/tools && node .preview-debug.mjs 2>&1 | tail -20)",
       "Bash(cd \"D:/CODE/DeadLettersBot/packages/tools\" && node .preview-shot.mjs 2>&1 | tail -30)",
-      "Bash(cd \"D:/CODE/DeadLettersBot/packages/desktop/src\" && sed -n '249,348p' renderer.tsx; echo \"--- view ---\"; sed -n '3005,3100p' renderer.tsx)"
+      "Bash(cd \"D:/CODE/DeadLettersBot/packages/desktop/src\" && sed -n '249,348p' renderer.tsx; echo \"--- view ---\"; sed -n '3005,3100p' renderer.tsx)",
+      "Bash(cat \"D:\\\\CODE\\\\DeadLettersBot\\\\packages\\\\desktop\\\\package.json\"; echo \"---\"; find \"D:\\\\CODE\\\\DeadLettersBot\\\\packages\\\\desktop\\\\src\" -type f 2>/dev/null | head -100)",
+      "Bash(grep -n \"chat-scroll\\\\|composer\\\\|messages\\\\|message-\\\\|assistant-\\\\|user-\\\\|tool-\\\\|theme\\\\|Theme\\\\|appearance\\\\|accentColor\\\\|CreateRoot\\\\|Render\" \"D:\\\\CODE\\\\DeadLettersBot\\\\packages\\\\desktop\\\\src\\\\renderer.tsx\" | head -120)"
     ]
   }
 }

@@ -1,5 +1,5 @@
 import { Button } from "@radix-ui/themes";
-import { Check, Copy, Wrench } from "lucide-react";
+import { Check, Copy, ShieldAlert, Wrench } from "lucide-react";
 import * as React from "react";
 import { AgentAvatar } from "./AgentAvatar.tsx";
 
@@ -45,17 +45,28 @@ function CopyButton({ text }: { text: string }) {
 
 export function ChatMessage({ item, index, botName, onDecide, onError }: ChatMessageProps) {
   if (item.role === "tool") {
+    const awaitingApproval = item.approval !== undefined;
     return (
-      <article className="message tool" style={{ "--stagger": index } as React.CSSProperties}>
-        <details open={item.approval !== undefined}>
+      <article
+        className={`message tool${awaitingApproval ? " tool--approval" : ""}`}
+        style={{ "--stagger": index } as React.CSSProperties}
+      >
+        <details open={awaitingApproval}>
           <summary>
-            <Wrench size={13} aria-hidden="true" />
+            {awaitingApproval ? (
+              <ShieldAlert size={13} aria-hidden="true" />
+            ) : (
+              <Wrench size={13} aria-hidden="true" />
+            )}
             {item.toolName}
           </summary>
+          {awaitingApproval && (
+            <p className="tool-approval-note">Review this request before the agent continues.</p>
+          )}
           <pre>{item.content}</pre>
           {item.approval && (
             <div className="approval-actions">
-              <Button type="button" onClick={() => onDecide(item, "allow_once")}>
+              <Button type="button" className="primary" onClick={() => onDecide(item, "allow_once")}>
                 Allow once
               </Button>
               <Button type="button" onClick={() => onDecide(item, "always_allow")}>

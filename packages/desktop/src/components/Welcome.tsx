@@ -1,11 +1,12 @@
 import { Button } from "@radix-ui/themes";
 import { ArrowUpRight, Link2, ListChecks, Sparkles } from "lucide-react";
-import heroImage from "../assets/welcome-hero.webp";
+import heroImage from "../assets/agent-desk.jpg";
+import { AgentAvatar } from "./AgentAvatar.tsx";
 
 const SUGGESTIONS = [
-  { label: "Summarize what you can do", Icon: Sparkles },
-  { label: "Check my connected accounts", Icon: Link2 },
-  { label: "Plan the next routine", Icon: ListChecks },
+  { label: "What can you help me with?", Icon: Sparkles },
+  { label: "Review my connected accounts", Icon: Link2 },
+  { label: "Plan a recurring routine", Icon: ListChecks },
 ];
 
 export function Welcome({
@@ -22,6 +23,7 @@ export function Welcome({
       <div className="welcome-hero">
         <img src={heroImage} alt="" />
         <span className="welcome-hero-glow" aria-hidden="true" />
+        <AgentAvatar name={botName ?? "AgentOS"} size="xl" />
       </div>
       <span className="welcome-eyebrow">
         <span className="welcome-eyebrow-dot" aria-hidden="true" />
@@ -29,8 +31,8 @@ export function Welcome({
       </span>
       <h1>{botName ? `Message ${botName}` : "What can I help with?"}</h1>
       <p>
-        Send a task to the selected agent. Tool activity, files, and approval requests stay in this
-        conversation.
+        Ask for anything. Tools, files, and approvals stay together in this conversation —
+        quiet, clear, and on your computer.
       </p>
       <div className="suggestion-row">
         {SUGGESTIONS.map(({ label, Icon }) => (

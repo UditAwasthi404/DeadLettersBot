@@ -50,6 +50,25 @@ export class RawVncSession {
     }
   }
 
+  /** Map a browser client point through object-fit:contain letterboxing into framebuffer pixels. */
+  mapClientPoint(clientX: number, clientY: number): { x: number; y: number } | null {
+    if (this.width < 1 || this.height < 1 || this.stage === "failed") return null;
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return null;
+    const scale = Math.min(rect.width / this.width, rect.height / this.height);
+    const drawW = this.width * scale;
+    const drawH = this.height * scale;
+    const offsetX = (rect.width - drawW) / 2;
+    const offsetY = (rect.height - drawH) / 2;
+    const localX = clientX - rect.left - offsetX;
+    const localY = clientY - rect.top - offsetY;
+    if (localX < 0 || localY < 0 || localX > drawW || localY > drawH) return null;
+    return {
+      x: (localX / drawW) * this.width,
+      y: (localY / drawH) * this.height,
+    };
+  }
+
   pointer(x: number, y: number, buttons: number): void {
     if (this.width < 1 || this.height < 1 || this.stage === "failed") return;
     const msg = new Uint8Array(6);

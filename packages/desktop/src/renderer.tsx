@@ -12,7 +12,7 @@ import {
 } from "@radix-ui/themes";
 import {
   ArrowDown,
-  ArrowRight,
+  ArrowUp,
   Bookmark,
   Bot as BotIcon,
   BrainCircuit,
@@ -23,6 +23,7 @@ import {
   LoaderCircle,
   MessageSquare,
   Monitor,
+  MoreHorizontal,
   Paperclip,
   Plug,
   Plus,
@@ -31,6 +32,7 @@ import {
   Square,
   Trash2,
   Webhook,
+  X,
 } from "lucide-react";
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
@@ -39,8 +41,10 @@ import type { ClerkBridge } from "./ClerkBoundary.tsx";
 import { ConnectorBrandIcon } from "./ConnectorBrandIcon.tsx";
 import { ErrorBoundary } from "./ErrorBoundary.tsx";
 import { UpdateBanner } from "./UpdateBanner.tsx";
+import { AgentAvatar } from "./components/AgentAvatar.tsx";
 import { AgentScreen, type ScreenPhase } from "./components/AgentScreen.tsx";
 import { AppButton } from "./components/AppButton.tsx";
+import { AuthShell } from "./components/AuthShell.tsx";
 import { BotRow } from "./components/BotRow.tsx";
 import { ChatMessage } from "./components/ChatMessage.tsx";
 import { EmptyState } from "./components/EmptyState.tsx";
@@ -283,6 +287,31 @@ function subagentToolLabels(allowedTools: string[]): string[] {
     tools.has("SearchWeb") || tools.has("FetchURL") ? "Web search" : "",
     tools.has("ConnectorCall") ? "Read-only connectors" : "",
   ].filter(Boolean);
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google: "Google",
+  mistral: "Mistral",
+  ollama: "Ollama",
+  local: "Local",
+};
+
+function providerLabel(id: string): string {
+  return PROVIDER_LABELS[id] ?? id.replace(/^\w/, (letter) => letter.toUpperCase());
+}
+
+const CONNECTOR_LABELS: Record<string, string> = {
+  gmail: "Gmail",
+  "google-calendar": "Google Calendar",
+  "google-drive": "Google Drive",
+  microsoft: "Microsoft",
+  salesforce: "Salesforce",
+};
+
+function connectorServiceLabel(service: string): string {
+  return CONNECTOR_LABELS[service] ?? providerLabel(service);
 }
 
 type ConnectorEventTrigger = Extract<RoutineItem["trigger"], { type: "connector_event" }>;
@@ -1042,15 +1071,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     const point = (event: PointerEvent) => {
       const active = screenSessionRef.current;
       if (!active) return;
-      const rect = canvas.getBoundingClientRect();
-      if (rect.width < 1 || rect.height < 1) return;
-      active.pointer(
-        ((event.clientX - rect.left) / rect.width) * canvas.width,
-        ((event.clientY - rect.top) / rect.height) * canvas.height,
-        event.buttons,
-      );
+      const mapped = active.mapClientPoint(event.clientX, event.clientY);
+      if (!mapped) return;
+      active.pointer(mapped.x, mapped.y, event.buttons);
     };
     const pointerDown = (event: PointerEvent) => {
+      event.preventDefault();
       canvas.focus();
       try {
         canvas.setPointerCapture(event.pointerId);
@@ -1059,9 +1085,8 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       }
       point(event);
     };
-    const pointerMove = (event: PointerEvent) => {
-      if (event.buttons) point(event);
-    };
+    // Always stream moves so hover works; not only while a button is held.
+    const pointerMove = (event: PointerEvent) => point(event);
     const pointerUp = (event: PointerEvent) => {
       point(event);
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
@@ -1091,12 +1116,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       if (symbol === null) return;
       active.key(symbol, false);
     };
+    const blockContext = (event: Event) => event.preventDefault();
     canvas.addEventListener("pointerdown", pointerDown);
     canvas.addEventListener("pointermove", pointerMove);
     canvas.addEventListener("pointerup", pointerUp);
     canvas.addEventListener("pointercancel", pointerCancel);
     canvas.addEventListener("keydown", downKey);
     canvas.addEventListener("keyup", upKey);
+    canvas.addEventListener("contextmenu", blockContext);
     return () => {
       canvas.removeEventListener("pointerdown", pointerDown);
       canvas.removeEventListener("pointermove", pointerMove);
@@ -1104,6 +1131,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       canvas.removeEventListener("pointercancel", pointerCancel);
       canvas.removeEventListener("keydown", downKey);
       canvas.removeEventListener("keyup", upKey);
+      canvas.removeEventListener("contextmenu", blockContext);
     };
   }, [screenInteractive, screenMode, screenCanvas]);
 
@@ -2589,12 +2617,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   : workspace === "model"
                     ? "Model & privacy"
                     : (selectedBot?.name ?? "Choose a bot");
-  const workspaceSubtitle =
-    workspace === "chat"
-      ? activeRun
-        ? "Working"
-        : (selectedBot?.role ?? "Agent conversation")
-      : (selectedBot?.name ?? "Workspace");
+  const headerTitle = selectedBot?.name ?? workspaceTitle;
+  const headerSubtitle = selectedBot
+    ? workspace === "chat" && activeRun
+      ? "Working"
+      : selectedBot.role
+    : "Workspace";
 
   const navItems = [
     {
@@ -2685,14 +2713,21 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   return (
     <div className="app-shell">
       {!signedIn && clerk?.enabled && (
-        <section className="auth-gate" aria-label="Account">
+        <AuthShell>
           <div className="auth-card">
-            <div className="auth-mark">A</div>
-            <h1>{clerk.signedIn ? "Signing in" : "Sign in"}</h1>
+            <h1>
+              {clerk.signedIn
+                ? "Signing you in"
+                : clerkScreen === "in"
+                  ? "Welcome back"
+                  : "Create your account"}
+            </h1>
             <p>
-              {clerk.loaded
-                ? "Sign in with Clerk. Gmail, Drive, and the other connectors stay separate and are connected later."
-                : "Loading sign-in…"}
+              {clerk.signedIn
+                ? "One moment while we connect to your gateway."
+                : clerk.loaded
+                  ? "Sign in to reach your workspace. Connectors stay separate and are added later."
+                  : "Preparing a secure sign-in…"}
             </p>
             {clerk.loaded && (
               <label htmlFor="agentos-control-01">
@@ -2728,10 +2763,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               </p>
             )}
           </div>
-        </section>
+        </AuthShell>
       )}
       {!signedIn && !clerk?.enabled && (
-        <section className="auth-gate" aria-label="Account">
+        <AuthShell>
           <form
             className="auth-card"
             onSubmit={(event) => {
@@ -2741,14 +2776,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               else void connect();
             }}
           >
-            <div className="auth-mark">A</div>
             <h1>{authMode === "create" ? "Create your account" : "Sign in"}</h1>
             <p>
-              {sessionReady
-                ? authMode === "create"
-                  ? "This creates the first account on the gateway and keeps you signed in on this computer."
-                  : "Use the token from the account that already exists on this gateway."
-                : "Opening your saved session…"}
+              {!sessionReady
+                ? "Opening your saved session…"
+                : authMode === "create"
+                  ? "Set up the first account on this gateway. You’ll stay signed in on this computer."
+                  : "Paste the account token issued by your gateway."}
             </p>
             {sessionReady && authMode === "create" && (
               <>
@@ -2847,13 +2881,17 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 </AppButton>
               ))}
           </form>
-        </section>
+        </AuthShell>
       )}
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">A</span>
-          <span>AgentOS</span>
+          <span>
+            AgentOS
+            <small className="brand-sub">Workspace</small>
+          </span>
         </div>
+        <div className="sidebar-label">Workspace</div>
         <nav className="sidebar-nav" aria-label="Workspace">
           {navItems.map((item) => (
             <NavItem
@@ -2868,7 +2906,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           ))}
         </nav>
         <div className="roster-head">
-          <span>Bots</span>
+          <span>
+            Bots
+            {bots.length > 0 && <span className="roster-count">{bots.length}</span>}
+          </span>
           <AppButton
             type="button"
             className="icon-button"
@@ -2887,6 +2928,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           className="app-field sidebar-search"
           value={botQuery}
           onChange={(event) => setBotQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setBotQuery("");
+              event.currentTarget.blur();
+            }
+          }}
           placeholder="Search bots"
           aria-label="Search bots"
         />
@@ -2994,12 +3041,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             onRestart={() => void window.agentOS.restartToUpdate()}
           />
           <header className="chat-header">
-            <div className="title-block">
-              <strong>{workspaceTitle}</strong>
-              <span>
-                {activeRun && workspace === "chat" && <i className="working-dot" />}
-                {workspaceSubtitle}
-              </span>
+            <div className="header-leading">
+              {selectedBot && <AgentAvatar name={selectedBot.name} size="sm" />}
+              <div className="title-block">
+                <strong>{headerTitle}</strong>
+                <span>
+                  {activeRun && workspace === "chat" && <i className="working-dot" />}
+                  {headerSubtitle}
+                </span>
+              </div>
             </div>
             <div className="header-actions">
               {showJumpToLatest && workspace === "chat" && (
@@ -3097,9 +3147,6 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 title="Security & approvals"
                 subtitle="Choose how this bot handles tool permissions and exceptions."
               >
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
-                </AppButton>
               </PanelHeader>
               <article className="memory-entry security-policy-card">
                 <h3>Default permission level</h3>
@@ -3213,27 +3260,45 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           )}
           {workspace === "local" && (
             <section className="messages memory-view">
-              <h2>Local computer execution</h2>
-              {(
-                [
-                  ["always_confirm", "Always require approval"],
-                  ["always_allow", "Always allow"],
-                  ["never", "Never allow"],
-                ] as const
-              ).map(([value, label]) => (
-                <label key={value} className="skill-approval-toggle choice-card">
-                  <input
-                    type="radio"
-                    name="local-machine-access"
-                    checked={localAccess === value}
-                    onChange={() => void saveLocalAccess(value)}
-                  />
-                  {label}
-                </label>
-              ))}
-              <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                Back to chat
-              </AppButton>
+              <PanelHeader
+                title="This computer"
+                subtitle="Decide what this bot may do on your machine. Commands always run locally."
+              >
+              </PanelHeader>
+              <div className="policy-list">
+                {(
+                  [
+                    [
+                      "always_confirm",
+                      "Ask every time",
+                      "The agent pauses and shows the exact command before anything runs.",
+                    ],
+                    [
+                      "always_allow",
+                      "Allow without asking",
+                      "Commands run as soon as the agent asks. Best for a trusted, dedicated setup.",
+                    ],
+                    [
+                      "never",
+                      "Never allow",
+                      "The agent cannot run anything on this computer. Nothing is executed.",
+                    ],
+                  ] as const
+                ).map(([value, label, description]) => (
+                  <label key={value} className="policy-card">
+                    <input
+                      type="radio"
+                      name="local-machine-access"
+                      checked={localAccess === value}
+                      onChange={() => void saveLocalAccess(value)}
+                    />
+                    <span>
+                      <strong>{label}</strong>
+                      <small>{description}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
             </section>
           )}
           <Dialog.Root
@@ -3299,58 +3364,64 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           )}
           {workspace === "model" && (
             <section className="messages memory-view">
-              <h2>Model settings · {bots.find((bot) => bot.id === botId)?.name}</h2>
-              <div className="form-field">
-                <span>Primary provider</span>
-                <AppSelect
-                  aria-label="Primary provider"
-                  value={inferenceProviderId}
-                  onChange={(event) => setInferenceProviderId(event.target.value)}
-                >
-                  <option value="">Account default</option>
-                  {inferenceProviders.map((provider) => (
-                    <option key={provider} value={provider}>
-                      {provider}
-                    </option>
-                  ))}
-                </AppSelect>
-              </div>
-              <label htmlFor="agentos-control-10">
-                Model override (optional)
-                <TextField.Root
-                  id="agentos-control-10"
-                  value={inferenceModel}
-                  onChange={(event) => setInferenceModel(event.target.value)}
-                  placeholder="Use provider default"
-                  maxLength={200}
-                  className="app-field"
-                />
-              </label>
-              <h2>Privacy</h2>
-              <label className="skill-approval-toggle">
-                <input
-                  type="checkbox"
-                  checked={retainData}
-                  onChange={(event) => void saveRetainData(event.target.checked)}
-                />
-                Allow AgentOS to retain conversation data for product improvement
-              </label>
-              <p>
-                Disabling this does not delete existing data. Use Memory → Export and then delete
-                entries to remove stored facts.
-              </p>
-              <div className="memory-actions">
-                <AppButton
-                  type="button"
-                  className="primary"
-                  onClick={() => void saveInferenceSettings()}
-                >
-                  Save model settings
-                </AppButton>
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
-                </AppButton>
-              </div>
+              <PanelHeader
+                title="Model & privacy"
+                subtitle={`How ${bots.find((bot) => bot.id === botId)?.name ?? "this bot"} thinks and what it keeps.`}
+              >
+              </PanelHeader>
+              <article className="memory-entry">
+                <h3>Inference</h3>
+                <div className="form-field">
+                  <span>Primary provider</span>
+                  <AppSelect
+                    aria-label="Primary provider"
+                    value={inferenceProviderId}
+                    onChange={(event) => setInferenceProviderId(event.target.value)}
+                  >
+                    <option value="">Account default</option>
+                    {inferenceProviders.map((provider) => (
+                      <option key={provider} value={provider}>
+                        {providerLabel(provider)}
+                      </option>
+                    ))}
+                  </AppSelect>
+                </div>
+                <label htmlFor="agentos-control-10">
+                  Model override (optional)
+                  <TextField.Root
+                    id="agentos-control-10"
+                    value={inferenceModel}
+                    onChange={(event) => setInferenceModel(event.target.value)}
+                    placeholder="Use provider default"
+                    maxLength={200}
+                    className="app-field"
+                  />
+                </label>
+                <div className="memory-actions">
+                  <AppButton
+                    type="button"
+                    className="primary"
+                    onClick={() => void saveInferenceSettings()}
+                  >
+                    Save model settings
+                  </AppButton>
+                </div>
+              </article>
+              <article className="memory-entry">
+                <h3>Privacy</h3>
+                <label className="skill-approval-toggle">
+                  <input
+                    type="checkbox"
+                    checked={retainData}
+                    onChange={(event) => void saveRetainData(event.target.checked)}
+                  />
+                  Allow AgentOS to retain conversation data for product improvement
+                </label>
+                <p>
+                  Turning this off does not delete existing data. Open Memory → Export, then delete
+                  entries to remove stored facts.
+                </p>
+              </article>
             </section>
           )}
           {workspace === "subagents" ? (
@@ -3358,9 +3429,6 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               <PanelHeader title="Subagents" subtitle="Background tasks started by your agents.">
                 <AppButton type="button" onClick={() => void loadSubagents(false)}>
                   Refresh
-                </AppButton>
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
                 </AppButton>
               </PanelHeader>
               {!subagentItems.length && (
@@ -3398,18 +3466,18 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                           : ""}
                       </p>
                     )}
-                    {item.result && (
-                      <details>
-                        <summary>Result</summary>
-                        <pre className="subagent-result">{item.result}</pre>
-                      </details>
-                    )}
                     {item.usage && (
                       <small>
                         Tokens: {item.usage.totalTokens.toLocaleString()} total ·{" "}
                         {item.usage.promptTokens.toLocaleString()} prompt ·{" "}
                         {item.usage.completionTokens.toLocaleString()} completion
                       </small>
+                    )}
+                    {item.result && (
+                      <details>
+                        <summary>Result</summary>
+                        <pre className="subagent-result">{item.result}</pre>
+                      </details>
                     )}
                     {active && (
                       <>
@@ -3472,9 +3540,6 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 <AppButton type="button" onClick={() => void loadWebhooks()}>
                   Refresh
                 </AppButton>
-                <AppButton type="button" onClick={() => setWebhookOpen(false)}>
-                  Back to chat
-                </AppButton>
               </PanelHeader>
               <p className="empty-note">
                 Deliveries are signed with HMAC-SHA256. Terminal delivery history is retained for 30
@@ -3490,38 +3555,50 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   </AppButton>
                 </output>
               )}
-              <form className="mcp-server-form" onSubmit={(event) => void createWebhook(event)}>
-                <TextField.Root
-                  aria-label="Webhook HTTPS URL"
-                  type="url"
-                  value={webhookUrl}
-                  onChange={(event) => setWebhookUrl(event.target.value)}
-                  placeholder="https://example.com/agentos-events"
-                  required
-                  className="app-field"
-                />
-                <fieldset>
+              <form
+                className="mcp-server-form webhook-form"
+                onSubmit={(event) => void createWebhook(event)}
+              >
+                <label className="form-field">
+                  Endpoint URL
+                  <TextField.Root
+                    aria-label="Webhook HTTPS URL"
+                    type="url"
+                    value={webhookUrl}
+                    onChange={(event) => setWebhookUrl(event.target.value)}
+                    placeholder="https://example.com/agentos-events"
+                    required
+                    className="app-field"
+                  />
+                </label>
+                <fieldset className="webhook-events">
                   <legend>Events</legend>
-                  {(["turn.settled", "routine.completed", "approval.required"] as const).map(
-                    (eventName) => (
-                      <label key={eventName}>
-                        <input
-                          type="checkbox"
-                          checked={webhookEvents.includes(eventName)}
-                          onChange={(event) =>
-                            setWebhookEvents((current) =>
-                              event.target.checked
-                                ? [...current, eventName]
-                                : current.filter((item) => item !== eventName),
-                            )
-                          }
-                        />
-                        {eventName}
-                      </label>
-                    ),
-                  )}
+                  <div className="webhook-event-options">
+                    {(["turn.settled", "routine.completed", "approval.required"] as const).map(
+                      (eventName) => (
+                        <label key={eventName}>
+                          <input
+                            type="checkbox"
+                            checked={webhookEvents.includes(eventName)}
+                            onChange={(event) =>
+                              setWebhookEvents((current) =>
+                                event.target.checked
+                                  ? [...current, eventName]
+                                  : current.filter((item) => item !== eventName),
+                              )
+                            }
+                          />
+                          {eventName}
+                        </label>
+                      ),
+                    )}
+                  </div>
                 </fieldset>
-                <AppButton type="submit" disabled={!token || webhookEvents.length === 0}>
+                <AppButton
+                  type="submit"
+                  className="primary"
+                  disabled={!token || webhookEvents.length === 0}
+                >
                   Create webhook
                 </AppButton>
               </form>
@@ -3541,7 +3618,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     <small>Created {new Date(subscription.createdAt).toLocaleString()}</small>
                   </div>
                   <p>Events: {subscription.events.join(", ")}</p>
-                  <AppButton type="button" onClick={() => void removeWebhook(subscription)}>
+                  <AppButton
+                    type="button"
+                    className="danger-quiet"
+                    onClick={() => void removeWebhook(subscription)}
+                  >
                     Delete subscription
                   </AppButton>
                 </article>
@@ -3586,9 +3667,6 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 <AppButton type="button" onClick={() => void loadConnectors()}>
                   Refresh
                 </AppButton>
-                <AppButton type="button" onClick={() => setConnectorOpen(false)}>
-                  Back to chat
-                </AppButton>
               </PanelHeader>
               <div className="connector-grid">
                 {CONNECTOR_CARDS.map((card) => {
@@ -3630,12 +3708,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   );
                 })}
               </div>
+              {connectorItems.length > 0 && <h3>Connected accounts</h3>}
               {connectorItems.map((connector) => (
                 <article className="memory-entry connector-connected-row" key={connector.service}>
                   <div className="connector-card-head">
                     <ConnectorBrandIcon service={connector.service} size={24} />
                     <div>
-                      <strong>{connector.service}</strong>
+                      <strong>{connectorServiceLabel(connector.service)}</strong>
                       <small>Connected {new Date(connector.connectedAt).toLocaleString()}</small>
                     </div>
                   </div>
@@ -3710,7 +3789,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   {server.lastError && <output>{server.lastError}</output>}
                   <p>{server.cachedTools?.length ?? 0} discovered tools</p>
                   <div className="memory-actions">
-                    <AppButton type="button" onClick={() => void removeMcpServer(server)}>
+                    <AppButton
+                      type="button"
+                      className="danger-quiet"
+                      onClick={() => void removeMcpServer(server)}
+                    >
                       Remove
                     </AppButton>
                   </div>
@@ -3720,7 +3803,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           ) : workspace === "automation" ? (
             <section className="messages memory-view">
               <PanelHeader
-                title="Skills and routines"
+                title="Skills & routines"
                 subtitle="Procedures this workspace can run on a schedule or an event."
               >
                 <div className="toolbar-actions">
@@ -3777,9 +3860,6 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                       </DropdownMenu.Item>
                     </DropdownMenu.Content>
                   </DropdownMenu.Root>
-                  <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                    Back to chat
-                  </AppButton>
                 </div>
               </PanelHeader>
               {routineWebhookSetup && (
@@ -4289,25 +4369,36 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                         Test {skillTests[skill.id]?.status}
                       </AppButton>
                     )}
-                    <AppButton type="button" onClick={() => void deleteSkill(skill)}>
-                      Delete
-                    </AppButton>
-                    <AppSelect
-                      aria-label={`Copy ${skill.name} to another bot`}
-                      value=""
-                      onChange={(event) => {
-                        if (event.target.value) void assignSkill(skill, event.target.value);
-                      }}
-                    >
-                      <option value="">Copy to bot…</option>
-                      {bots
-                        .filter((bot) => bot.id !== skill.ownerBotId)
-                        .map((bot) => (
-                          <option key={bot.id} value={bot.id}>
-                            {bot.name}
-                          </option>
-                        ))}
-                    </AppSelect>
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="icon-button action-more"
+                          aria-label={`More actions for ${skill.name}`}
+                          title="More actions"
+                        >
+                          <MoreHorizontal size={16} aria-hidden="true" />
+                        </Button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Content align="end" sideOffset={6}>
+                        <DropdownMenu.Label>Copy to</DropdownMenu.Label>
+                        {bots
+                          .filter((bot) => bot.id !== skill.ownerBotId)
+                          .map((bot) => (
+                            <DropdownMenu.Item
+                              key={bot.id}
+                              onSelect={() => void assignSkill(skill, bot.id)}
+                            >
+                              {bot.name}
+                            </DropdownMenu.Item>
+                          ))}
+                        <DropdownMenu.Separator />
+                        <DropdownMenu.Item color="red" onSelect={() => void deleteSkill(skill)}>
+                          Delete skill
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Root>
                   </div>
                 </article>
               ))}
@@ -4574,25 +4665,40 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     </AppButton>
                     <AppButton
                       type="button"
-                      onClick={() => void updateRoutine(routine, { test: true })}
-                    >
-                      Test run
-                    </AppButton>
-                    <AppButton type="button" onClick={() => void loadRoutineHistory(routine)}>
-                      History
-                    </AppButton>
-                    <AppButton
-                      type="button"
                       onClick={() => void updateRoutine(routine, { enabled: !routine.enabled })}
                     >
                       {routine.enabled ? "Pause" : "Resume"}
                     </AppButton>
-                    <AppButton
-                      type="button"
-                      onClick={() => void updateRoutine(routine, { delete: true })}
-                    >
-                      Delete
-                    </AppButton>
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="icon-button action-more"
+                          aria-label={`More actions for ${routine.name}`}
+                          title="More actions"
+                        >
+                          <MoreHorizontal size={16} aria-hidden="true" />
+                        </Button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Content align="end" sideOffset={6}>
+                        <DropdownMenu.Item
+                          onSelect={() => void updateRoutine(routine, { test: true })}
+                        >
+                          Test run
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={() => void loadRoutineHistory(routine)}>
+                          History
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Separator />
+                        <DropdownMenu.Item
+                          color="red"
+                          onSelect={() => void updateRoutine(routine, { delete: true })}
+                        >
+                          Delete routine
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Root>
                   </div>
                 </article>
               ))}
@@ -4605,9 +4711,6 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 </AppButton>
                 <AppButton type="button" onClick={() => void exportMemories()}>
                   Export JSON
-                </AppButton>
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
                 </AppButton>
               </PanelHeader>
               {!!memoryReviewSuggestions.length && (
@@ -4695,7 +4798,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     <AppButton type="button" onClick={() => void editMemory(memory)}>
                       Edit
                     </AppButton>
-                    <AppButton type="button" onClick={() => void deleteMemory(memory)}>
+                    <AppButton
+                      type="button"
+                      className="danger-quiet"
+                      onClick={() => void deleteMemory(memory)}
+                    >
                       Delete
                     </AppButton>
                   </div>
@@ -4772,13 +4879,16 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                       {file.name}
                       <AppButton
                         type="button"
+                        className="attachment-remove"
+                        aria-label={`Remove ${file.name}`}
+                        title="Remove attachment"
                         onClick={() =>
                           setPendingFiles((current) =>
                             current.filter((item) => item.id !== file.id),
                           )
                         }
                       >
-                        ×
+                        <X size={12} aria-hidden="true" />
                       </AppButton>
                     </span>
                   ))}
@@ -4845,12 +4955,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   className="primary"
                   disabled={sendingPrompt || !botId || (!draft.trim() && pendingFiles.length === 0)}
                   aria-busy={sendingPrompt}
+                  aria-label={sendingPrompt ? "Sending message" : "Send message"}
+                  title="Send · Enter"
                 >
-                  {sendingPrompt ? "Sending…" : "Send"}
                   {sendingPrompt ? (
                     <LoaderCircle className="glyph spin" aria-hidden="true" />
                   ) : (
-                    <ArrowRight className="glyph" aria-hidden="true" />
+                    <ArrowUp className="glyph" aria-hidden="true" />
                   )}
                 </Button>
               </div>

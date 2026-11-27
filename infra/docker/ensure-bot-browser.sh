@@ -193,6 +193,88 @@ if ! display_alive "$display"; then
   exit 1
 fi
 
+# Real desktop session: openbox decorations + docked terminal so take-control is usable.
+mkdir -p "$HOME/.config/openbox"
+if [[ ! -f "$HOME/.config/openbox/rc.xml" ]]; then
+  cat >"$HOME/.config/openbox/rc.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <resistance><strength>10</strength><screen_edge_strength>20</screen_edge_strength></resistance>
+  <focus><focusNew>yes</focusNew><followMouse>no</followMouse><focusLast>yes</focusLast></focus>
+  <theme>
+    <name>Clearlooks</name>
+    <titleLayout>NLIMC</titleLayout>
+    <keepBorder>yes</keepBorder>
+    <animateIconify>no</animateIconify>
+    <font place="ActiveWindow"><name>sans</name><size>11</size><weight>Bold</weight><slant>Normal</slant></font>
+    <font place="InactiveWindow"><name>sans</name><size>11</size><weight>Normal</weight><slant>Normal</slant></font>
+  </theme>
+  <desktops><number>1</number><firstdesk>1</firstdesk><popupTime>0</popupTime></desktops>
+  <keyboard>
+    <chainQuitKey>C-g</chainQuitKey>
+    <keybind key="A-F4"><action name="Close"/></keybind>
+    <keybind key="A-Escape"><action name="Lower"/><action name="FocusToBottom"/><action name="Unfocus"/></keybind>
+    <keybind key="A-Tab"><action name="NextWindow"><dialog>list</dialog><finalactions><action name="Focus"/><action name="Raise"/><action name="Unshade"/></finalactions></action></keybind>
+    <keybind key="A-S-Tab"><action name="PreviousWindow"><dialog>list</dialog><finalactions><action name="Focus"/><action name="Raise"/><action name="Unshade"/></finalactions></action></keybind>
+    <keybind key="W-Up"><action name="MaximizeFull"/></keybind>
+  </keyboard>
+  <mouse>
+    <dragThreshold>3</dragThreshold>
+    <doubleClickTime>400</doubleClickTime>
+    <context name="Frame">
+      <mousebind button="A-Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="A-Left" action="Drag"><action name="Move"/></mousebind>
+      <mousebind button="A-Right" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+    <context name="Titlebar">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
+      <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximize"/></mousebind>
+    </context>
+    <context name="Maximize">
+      <mousebind button="Left" action="Click"><action name="Focus"/><action name="Raise"/><action name="ToggleMaximize"/></mousebind>
+    </context>
+    <context name="Close">
+      <mousebind button="Left" action="Click"><action name="Close"/></mousebind>
+    </context>
+    <context name="Desktop">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    </context>
+  </mouse>
+</openbox_config>
+XML
+fi
+
+wm_pid_file="$state_dir/openbox-$bot_id.pid"
+if [[ -r "$wm_pid_file" ]] && kill -0 "$(cat "$wm_pid_file")" 2>/dev/null; then
+  :
+elif command -v openbox >/dev/null 2>&1; then
+  nohup env DISPLAY=":$display" openbox --sm-disable \
+    >"$state_dir/openbox-$bot_id.log" 2>&1 9>&- &
+  echo $! >"$wm_pid_file"
+  sleep 0.35
+fi
+
+if command -v xsetroot >/dev/null 2>&1; then
+  DISPLAY=":$display" xsetroot -solid "#121614" >/dev/null 2>&1 || true
+fi
+
+term_pid_file="$state_dir/xterm-$bot_id.pid"
+if [[ -r "$term_pid_file" ]] && kill -0 "$(cat "$term_pid_file")" 2>/dev/null; then
+  :
+elif command -v xterm >/dev/null 2>&1; then
+  # Dock a usable terminal across the bottom third of the 1280x800 desktop.
+  nohup env DISPLAY=":$display" xterm \
+    -geometry 158x16+0+560 \
+    -fa Monospace -fs 12 \
+    -bg "#0b0f0d" -fg "#d5ebe0" -cr "#7dffa6" \
+    -title "Terminal" \
+    -xrm 'XTerm*scrollBar:true' \
+    -xrm 'XTerm*rightScrollBar:true' \
+    >"$state_dir/xterm-$bot_id.log" 2>&1 9>&- &
+  echo $! >"$term_pid_file"
+fi
+
 chromium_bin="chromium"
 if [[ -x /usr/lib/chromium/chromium ]]; then
   chromium_bin=/usr/lib/chromium/chromium
@@ -200,19 +282,29 @@ elif [[ -x /usr/local/bin/chromium ]]; then
   chromium_bin=/usr/local/bin/chromium
 fi
 
+profile_dir="$state_dir/profile-$bot_id"
+mkdir -p "$profile_dir"
+# Stale Singleton* files survive container recreate and block Chromium with a modal.
+rm -f "$profile_dir/SingletonLock" "$profile_dir/SingletonCookie" "$profile_dir/SingletonSocket"
+
 if ! cdp_ready "$local_port"; then
   # If an older ensure left Chromium on the public port, free it before proxying.
   if cdp_ready "$port" && ! cdp_ready "$local_port"; then
     pkill -f "--remote-debugging-port=$port" 2>/dev/null || true
     sleep 0.3
   fi
+  # Leave room for the docked terminal; openbox supplies the title bar + resize.
   nohup env DISPLAY=":$display" "$chromium_bin" \
     --no-sandbox \
     --disable-dev-shm-usage \
     --disable-gpu \
+    --disable-features=TranslateUI \
+    --disable-session-crashed-bubble \
+    --window-position=0,0 \
+    --window-size=1280,540 \
     --remote-debugging-port="$local_port" \
     --remote-allow-origins='*' \
-    --user-data-dir="$state_dir/profile-$bot_id" \
+    --user-data-dir="$profile_dir" \
     about:blank >"$state_dir/chromium-$bot_id.log" 2>&1 9>&- &
 fi
 

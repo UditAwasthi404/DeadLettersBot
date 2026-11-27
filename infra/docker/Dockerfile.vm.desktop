@@ -1,0 +1,18 @@
+FROM agentos/vm-manager:latest
+USER root
+RUN set -eux; \
+  if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+    sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources; \
+  fi; \
+  if [ -f /etc/apt/sources.list ]; then \
+    sed -i 's|http://|https://|g' /etc/apt/sources.list; \
+  fi; \
+  apt-get update; \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    openbox xterm x11-utils x11-xserver-utils; \
+  rm -rf /var/lib/apt/lists/*
+COPY infra/docker/ensure-bot-browser.sh /usr/local/bin/agentos-ensure-browser
+COPY infra/docker/ensure-bot-vnc.sh /usr/local/bin/agentos-ensure-vnc
+RUN sed -i 's/\r$//' /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-ensure-vnc \
+ && chmod 0755 /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-ensure-vnc
+USER agent

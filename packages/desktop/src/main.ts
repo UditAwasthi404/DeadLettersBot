@@ -45,7 +45,7 @@ function createWindow(): void {
     height: 840,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: "#0e1110",
+    backgroundColor: "#141414",
     ...(darwin
       ? {
           titleBarStyle: "hiddenInset" as const,
@@ -53,7 +53,7 @@ function createWindow(): void {
         }
       : {
           titleBarStyle: "hidden" as const,
-          titleBarOverlay: { color: "#0e1110", symbolColor: "#eef3f0", height: 52 },
+          titleBarOverlay: { color: "#1b1b1c", symbolColor: "#a7a6a3", height: 56 },
         }),
     webPreferences: {
       preload: join(__dirname, "preload.js"),
@@ -476,12 +476,12 @@ ipcMain.handle("app:set-theme", (_event, theme: "light" | "dark") => {
   if (theme !== "light" && theme !== "dark") return;
   nativeTheme.themeSource = theme;
   const light = theme === "light";
-  windowRef?.setBackgroundColor(light ? "#eef2f0" : "#0e1110");
+  windowRef?.setBackgroundColor(light ? "#f2f1ee" : "#141414");
   if (process.platform !== "darwin") {
     windowRef?.setTitleBarOverlay({
-      color: light ? "#f3f6f4" : "#0e1110",
-      symbolColor: light ? "#1f2a27" : "#eef3f0",
-      height: 52,
+      color: light ? "#faf9f7" : "#1b1b1c",
+      symbolColor: light ? "#58585d" : "#a7a6a3",
+      height: 56,
     });
   }
 });
