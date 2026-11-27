@@ -121,13 +121,15 @@ export function applyStepUsage(
   const stepSource = provider ? "provider" : "estimate";
   const prior = total.source ?? (total.totalTokens > 0 ? "estimate" : undefined);
   const source = !prior ? stepSource : prior === stepSource ? prior : "estimate";
+  const cachedPromptTokens = (total.cachedPromptTokens ?? 0) + (provider?.cachedPromptTokens ?? 0);
+  const cacheWritePromptTokens =
+    (total.cacheWritePromptTokens ?? 0) + (provider?.cacheWritePromptTokens ?? 0);
   return {
     promptTokens,
     completionTokens,
     totalTokens: promptTokens + completionTokens,
-    cachedPromptTokens: (total.cachedPromptTokens ?? 0) + (provider?.cachedPromptTokens ?? 0),
-    cacheWritePromptTokens:
-      (total.cacheWritePromptTokens ?? 0) + (provider?.cacheWritePromptTokens ?? 0),
+    ...(cachedPromptTokens > 0 ? { cachedPromptTokens } : {}),
+    ...(cacheWritePromptTokens > 0 ? { cacheWritePromptTokens } : {}),
     source,
   };
 }

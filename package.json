@@ -17,6 +17,7 @@
     "lint:fix": "biome check --write .",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "eval:suite": "node scripts/run-eval-suite.mjs",
     "api:types": "pnpm --filter @agentos/sdk generate:api-types",
     "db:generate": "pnpm --filter @agentos/shared db:generate",
     "db:migrate": "pnpm --filter @agentos/shared db:migrate"

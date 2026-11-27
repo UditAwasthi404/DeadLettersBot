@@ -145,6 +145,15 @@ function createMockRedis() {
     async get(key: string) {
       return kv.get(key) ?? null;
     },
+    async eval(script: string, _numberOfKeys: number, key: string, token: string) {
+      if (kv.get(key) !== token) return 0;
+      if (script.includes("pexpire")) return 1;
+      if (script.includes("del")) {
+        kv.delete(key);
+        return 1;
+      }
+      return 0;
+    },
     async publish() {
       return 0;
     },
@@ -178,8 +187,12 @@ function createMockRedis() {
     async getdel() {
       return null;
     },
-    async zadd(key: string, score: number, member: string) {
+    async zadd(key: string, ...args: Array<string | number>) {
+      const hasNx = args[0] === "NX";
+      const score = Number(args[hasNx ? 1 : 0]);
+      const member = String(args[hasNx ? 2 : 1]);
       const arr = zsets.get(key) ?? [];
+      if (hasNx && arr.some((item) => item.member === member)) return 0;
       arr.push({ score, member });
       arr.sort((a, b) => a.score - b.score);
       zsets.set(key, arr);

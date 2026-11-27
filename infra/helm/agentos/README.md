@@ -1,6 +1,6 @@
 # AgentOS Helm chart
 
-This chart packages one `box-host` replica with PostgreSQL, Redis, MinIO, and the Kubernetes account-VM manager. It creates persistent volume claims for stateful services and one durable home volume per account VM. Kubernetes Secrets hold application, database, object-store, and inference credentials. An Ingress is optional.
+This chart packages `box-host` with PostgreSQL, Redis, MinIO, and the Kubernetes account-VM manager. It creates persistent volume claims for stateful services and one durable home volume per account VM. Kubernetes Secrets hold application, database, object-store, and inference credentials. An Ingress is optional. One host replica is the default; optional CPU-based autoscaling is available after multi-host runtime acceptance.
 
 Create a private values file (do not commit it) with unique secrets and a published AgentOS image:
 
@@ -52,4 +52,4 @@ Optional gateway and state-store ingress policies can be enabled with `networkPo
 
 ## Runtime limitation
 
-VM execution and browser routing use Kubernetes pods when deployed by this chart; Compose continues to use Docker. The host service account can create, inspect, execute commands in, and delete VM pods and their PVCs within the release namespace. The chart keeps one host replica because queue draining still has a process-local ownership guard; HPA and multi-host scheduling require distributed turn ownership. A real cluster acceptance is still required, and storage deletion behavior follows the cluster's StorageClass reclaim policy.
+VM execution and browser routing use Kubernetes pods when deployed by this chart; Compose continues to use Docker. The host service account can create, inspect, execute commands in, and delete VM pods and their PVCs within the release namespace. Multi-host queue ownership uses renewable Redis leases, account-scoped WebSocket fanout, and stale-turn recovery. File-change, cron, and connector-event workers also use distributed ownership. To enable CPU-based scaling, set `autoscaling.enabled: true`, then configure `minReplicas`, `maxReplicas`, and `targetCPUUtilizationPercentage`; the cluster must have the metrics API available. Live multi-host and fresh-cluster acceptance remain required, and storage deletion behavior follows the cluster's StorageClass reclaim policy.

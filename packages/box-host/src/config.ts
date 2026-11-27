@@ -1,3 +1,5 @@
+import { parseVMEgressAllowlist } from "@agentos/vm-manager";
+
 const PROVIDERS = new Set(["openai", "anthropic", "xai", "ollama", "mock"]);
 
 /** Trim Windows CR/LF and write the cleaned value back so later reads match validation. */
@@ -140,6 +142,7 @@ export function validateRuntimeConfig(): void {
   positiveInteger("VM_MEMORY_BYTES", 2_147_483_648, errors, Number.MAX_SAFE_INTEGER);
   positiveInteger("VM_CPU_NANOS", 2_000_000_000, errors, Number.MAX_SAFE_INTEGER);
   positiveInteger("VM_PIDS_LIMIT", 512, errors, 1_000_000);
+  nonNegativeInteger("VM_PREWARM_POOL_SIZE", 0, errors, 20);
   positiveInteger("VM_IDLE_TIMEOUT_MS", 600_000, errors, Number.MAX_SAFE_INTEGER);
   const vmBackend = cleanedEnv("VM_BACKEND");
   if (vmBackend && !["docker", "kubernetes", "noop"].includes(vmBackend))
@@ -148,6 +151,8 @@ export function validateRuntimeConfig(): void {
     errors.push("VM_BACKEND must be set to docker or kubernetes in production");
   if (production && vmBackend === "noop")
     errors.push("VM_BACKEND=noop cannot be used in production");
+  if (Number(process.env.VM_PREWARM_POOL_SIZE ?? 0) > 0 && vmBackend && vmBackend !== "docker")
+    errors.push("VM_PREWARM_POOL_SIZE is supported only by the Docker backend");
   if (
     process.env.VM_K8S_STORAGE_SIZE &&
     !/^[1-9]\d*(?:Ki|Mi|Gi|Ti|K|M|G|T)?$/.test(process.env.VM_K8S_STORAGE_SIZE)
@@ -165,6 +170,7 @@ export function validateRuntimeConfig(): void {
   booleanValue("BOX_HOSTED_FOR_AUTOMATION_SYNC", errors);
   booleanValue("CLERK_MOCK", errors);
   const vmEgressPolicy = cleanedEnv("VM_EGRESS_POLICY");
+  const vmEgressAllowlist = cleanedEnv("VM_EGRESS_ALLOWLIST");
   if (
     vmEgressPolicy &&
     vmEgressPolicy !== "allow_all" &&
@@ -172,8 +178,28 @@ export function validateRuntimeConfig(): void {
     vmEgressPolicy !== "allowlist"
   )
     errors.push("VM_EGRESS_POLICY must be allow_all, deny_all, or allowlist (default allow_all)");
-  if (vmEgressPolicy === "allowlist" && vmBackend !== "kubernetes")
-    errors.push("VM_EGRESS_POLICY=allowlist is supported only by the Kubernetes backend");
+  if (vmEgressPolicy === "allowlist") {
+    if (vmBackend && vmBackend !== "docker" && vmBackend !== "kubernetes")
+      errors.push("VM_EGRESS_POLICY=allowlist requires the Docker or Kubernetes backend");
+    if ((vmBackend ?? "docker") === "docker") {
+      const prewarmPoolSize = Number(cleanedEnv("VM_PREWARM_POOL_SIZE") ?? "0");
+      if (Number.isFinite(prewarmPoolSize) && prewarmPoolSize > 0)
+        errors.push("VM_PREWARM_POOL_SIZE cannot be used with Docker VM_EGRESS_POLICY=allowlist");
+      if (!vmEgressAllowlist) {
+        errors.push("VM_EGRESS_ALLOWLIST is required for Docker VM_EGRESS_POLICY=allowlist");
+      } else {
+        try {
+          parseVMEgressAllowlist(vmEgressAllowlist);
+        } catch (err) {
+          errors.push(err instanceof Error ? err.message : "VM_EGRESS_ALLOWLIST is invalid");
+        }
+      }
+    } else if (vmEgressAllowlist) {
+      errors.push("VM_EGRESS_ALLOWLIST is for Docker; configure Kubernetes rules in Helm values");
+    }
+  } else if (vmEgressAllowlist) {
+    errors.push("VM_EGRESS_ALLOWLIST requires VM_EGRESS_POLICY=allowlist");
+  }
   if (process.env.SUBAGENT_STALL_MS !== undefined && process.env.SUBAGENT_STALL_MS !== "") {
     const stallMs = Number(process.env.SUBAGENT_STALL_MS);
     if (!Number.isInteger(stallMs) || stallMs < 1_000 || stallMs > 86_400_000)

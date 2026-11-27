@@ -1,7 +1,7 @@
 export type SkillDraft = {
   name: string;
   description: string;
-  steps: Array<{ instruction: string }>;
+  steps: Array<{ instruction: string; approvalRequired?: boolean }>;
 };
 
 export function parseSkillDraft(text: string): SkillDraft {
@@ -13,7 +13,7 @@ export function parseSkillDraft(text: string): SkillDraft {
   const parsed = JSON.parse(raw.slice(start, end + 1)) as {
     name?: unknown;
     description?: unknown;
-    steps?: Array<{ instruction?: unknown } | string>;
+    steps?: Array<{ instruction?: unknown; approvalRequired?: unknown } | string>;
   };
   if (typeof parsed.name !== "string" || !parsed.name.trim() || parsed.name.trim().length > 120)
     throw new Error("skill draft name is invalid");
@@ -30,7 +30,12 @@ export function parseSkillDraft(text: string): SkillDraft {
           : "";
     if (!instruction.trim() || instruction.length > 4000)
       throw new Error("skill draft step is invalid");
-    return { instruction: instruction.trim() };
+    return {
+      instruction: instruction.trim(),
+      ...(typeof step === "object" && step !== null && step.approvalRequired === true
+        ? { approvalRequired: true }
+        : {}),
+    };
   });
   return { name: parsed.name.trim(), description, steps };
 }

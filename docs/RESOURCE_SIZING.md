@@ -12,12 +12,24 @@ These are planning estimates from the current Compose and VM defaults, not measu
 
 Disk needs depend on conversation blobs, browser profiles, database growth, and retention. Keep PostgreSQL and S3-compatible blob backups off-host, monitor free space, and size persistent volumes from observed growth rather than these initial values.
 
+## Indicative cloud compute costs
+
+List-price snapshot checked 2026-11-26. These estimates use 730 hours per month and Linux/on-demand rates where applicable; they cover one VM only, not a production topology. The shapes are close starting points rather than exact matches, and none has been benchmarked with AgentOS.
+
+| Provider and region | Example shape | Compute rate | 730-hour monthly estimate | Exclusions and notes |
+| --- | --- | ---: | ---: | --- |
+| AWS `us-east-1` | `c7g.xlarge`, 4 vCPU, 8 GiB, Arm64 | $0.1450/hour | $105.85 | EC2 compute only. EBS, public IPv4, data transfer, and managed services are extra. Check the current [AWS Price List](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-1/index.json) and [On-Demand pricing](https://aws.amazon.com/ec2/pricing/on-demand/) before purchase. |
+| Google Cloud `us-central1` | `e2-standard-4`, 4 vCPU, 16 GiB | $0.13402284/hour | $97.84 | Instance compute only. Persistent disks, external IPs, and network transfer are extra. See [Compute Engine prices](https://cloud.google.com/products/compute/pricing/general-purpose?hl=en). |
+| Hetzner U.S. (`ASH`/`HIL`) | `CPX31`, 4 vCPU, 8 GB | $0.1178/hour | $73.49 monthly cap | Public IPv4 and applicable taxes are extra. The provider caps the bill at the listed monthly amount; see [Hetzner’s June 2026 price adjustment](https://docs.hetzner.com/general/infrastructure-and-availability/price-adjustment/). |
+
+The monthly figures are compute-only comparisons. AgentOS also needs storage, backups, ingress, and outbound traffic, and a managed database or object store changes the total. Recheck provider calculators and regional availability immediately before provisioning.
+
 ## Scaling inputs
 
 - Active browser sessions drive CPU and RAM; idle bots do not need a live Chromium process.
 - Inference calls consume provider capacity and network bandwidth. The model provider's own rate limits and pricing are outside these host estimates.
-- PostgreSQL and MinIO storage grow with transcript, memory, skill, and attachment volume. Attachments are not yet supported by the desktop client.
+- PostgreSQL and MinIO storage grow with transcript, memory, skill, and attachment volume. Desktop attachments are stored in the conversation blob bucket; budget additional storage and transfer for them.
 - Redis stores queues and short-lived coordination state; configure persistence and memory limits for the chosen deployment.
 - Prometheus/Grafana add their own storage and memory use when the observability profile is enabled.
 
-There are no validated AWS, GCP, or Hetzner cost estimates yet. Convert the measured CPU, RAM, disk, and egress profile into current provider prices before purchasing capacity.
+These list-price estimates do not establish production capacity. Measure CPU, RAM, disk, and egress under the intended task mix, then recalculate provider costs before purchasing capacity.

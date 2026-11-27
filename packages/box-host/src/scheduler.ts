@@ -30,7 +30,9 @@ export async function enqueue(
   if (lane === "agent" && payload.priority) {
     score = Date.now() - PRIORITY_OFFSET;
   }
-  await redis.zadd(queueKey(agentId, lane), score, JSON.stringify(payload));
+  // Recovery polls may enqueue the same pending turn from several hosts. Preserve
+  // its original queue position instead of moving it to the back each time.
+  await redis.zadd(queueKey(agentId, lane), "NX", score, JSON.stringify(payload));
 }
 
 /** Pop highest-priority item: user → agent → background. */

@@ -1,15 +1,19 @@
-import { ClerkProvider, SignIn, SignUp, useAuth, useClerk } from "@clerk/react";
 import {
   AlertDialog,
   Badge,
   Button,
   Dialog,
+  DropdownMenu,
   Popover,
   Select,
+  Tabs,
+  TextArea,
   TextField,
   Theme,
+  Tooltip,
 } from "@radix-ui/themes";
 import {
+  ArrowDown,
   ArrowRight,
   Bookmark,
   Computer,
@@ -27,22 +31,22 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import React, { useEffect, useRef, useState } from "react";
+import * as React from "react";
+import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import type { ClerkBridge } from "./ClerkBoundary.tsx";
+import { ConnectorBrandIcon } from "./ConnectorBrandIcon.tsx";
+import { ErrorBoundary } from "./ErrorBoundary.tsx";
 import { UpdateBanner } from "./UpdateBanner.tsx";
 import { RawVncSession } from "./rfb.ts";
 import "@radix-ui/themes/styles.css";
 import "./style.css";
 
-type ClerkBridge = {
-  enabled: true;
-  loaded: boolean;
-  signedIn: boolean;
-  getToken: () => Promise<string | null>;
-  signOut: () => Promise<void>;
-};
+const AssistantMarkdown = React.lazy(() => import("./AssistantMarkdown.tsx"));
+const ClerkBoundary = React.lazy(() =>
+  import("./ClerkBoundary.tsx").then((module) => ({ default: module.ClerkBoundary })),
+);
+const ClerkAuthScreen = React.lazy(() => import("./ClerkAuthScreen.tsx"));
 
 function clerkPublishableKey(): string {
   const mock = import.meta.env.CLERK_MOCK ?? import.meta.env.VITE_CLERK_MOCK;
@@ -68,6 +72,94 @@ function AppButton({ className, variant, size, ...props }: AppButtonProps) {
       variant={variant ?? (primary ? "solid" : "ghost")}
       size={size ?? "2"}
     />
+  );
+}
+
+type AppSelectProps = {
+  value?: string | number;
+  defaultValue?: string | number;
+  onChange?: React.ChangeEventHandler<HTMLSelectElement>;
+  children: React.ReactNode;
+  className?: string;
+  "aria-label"?: string;
+  disabled?: boolean;
+  required?: boolean;
+  name?: string;
+};
+
+function AppSelect({
+  value,
+  defaultValue,
+  onChange,
+  children,
+  className,
+  "aria-label": ariaLabel,
+  disabled,
+  required,
+  name,
+}: AppSelectProps) {
+  const options = React.Children.toArray(children).filter(
+    (child): child is React.ReactElement<React.OptionHTMLAttributes<HTMLOptionElement>> =>
+      React.isValidElement(child) && child.type === "option",
+  );
+  // Radix Select.Item forbids value=""; map empty options to a sentinel and never
+  // pass a controlled value that is missing from the item list (that blanks the UI).
+  const emptyOptionValue = "__agentos_empty_option__";
+  const placeholder = options.find((option) => option.props.value === "");
+  const selectedValue = value == null ? undefined : String(value);
+  const initialValue = defaultValue == null ? undefined : String(defaultValue);
+  const itemValues = new Set(
+    options.map((option, index) => {
+      const raw = String(option.props.value ?? index);
+      return raw === "" ? emptyOptionValue : raw;
+    }),
+  );
+  const fallbackValue = itemValues.values().next().value as string | undefined;
+  const resolve = (raw: string | undefined): string | undefined => {
+    if (raw === undefined) return undefined;
+    if (itemValues.size === 0) return undefined;
+    const candidate = raw === "" ? emptyOptionValue : raw;
+    if (itemValues.has(candidate)) return candidate;
+    if (placeholder) return emptyOptionValue;
+    return fallbackValue;
+  };
+  const resolvedValue = resolve(selectedValue);
+  const resolvedDefault = resolve(initialValue);
+  const controlled = value !== undefined;
+
+  return (
+    <Select.Root
+      value={controlled ? resolvedValue : undefined}
+      defaultValue={controlled ? undefined : resolvedDefault}
+      onValueChange={(nextValue) => {
+        const nextTarget = { value: nextValue === emptyOptionValue ? "" : nextValue };
+        onChange?.({ target: nextTarget } as React.ChangeEvent<HTMLSelectElement>);
+      }}
+      disabled={disabled || itemValues.size === 0}
+      required={required}
+      name={name}
+    >
+      <Select.Trigger
+        className={`app-select${className ? ` ${className}` : ""}`}
+        aria-label={ariaLabel}
+        placeholder={
+          placeholder ? String(placeholder.props.children ?? "Choose an option") : undefined
+        }
+      />
+      <Select.Content position="popper">
+        {options.map((option, index) => {
+          const rawValue = String(option.props.value ?? index);
+          const optionValue = rawValue === "" ? emptyOptionValue : rawValue;
+          return (
+            <Select.Item key={optionValue} value={optionValue} disabled={option.props.disabled}>
+              {option.props.children ??
+                option.props.label ??
+                (rawValue === "" ? "Default" : rawValue)}
+            </Select.Item>
+          );
+        })}
+      </Select.Content>
+    </Select.Root>
   );
 }
 
@@ -112,6 +204,7 @@ interface MemoryReviewSuggestion {
   turnId: string;
   action: "update" | "delete";
   existingContent: string;
+  currentContent: string | null;
   proposedContent: string | null;
   reason: string | null;
   createdAt: string;
@@ -183,6 +276,16 @@ function routineTriggerLabel(trigger: RoutineItem["trigger"], bots: Bot[]): stri
     ? (bots.find((bot) => bot.id === trigger.senderBotId)?.name ?? "selected bot")
     : "any bot";
   return `Inter-bot message from ${senderName}`;
+}
+
+function subagentToolLabels(allowedTools: string[]): string[] {
+  const tools = new Set(allowedTools);
+  return [
+    tools.has("ReadFile") || tools.has("ListDirectory") ? "Workspace files" : "",
+    [...tools].some((tool) => tool.startsWith("Browser")) ? "Browser" : "",
+    tools.has("SearchWeb") || tools.has("FetchURL") ? "Web search" : "",
+    tools.has("ConnectorCall") ? "Read-only connectors" : "",
+  ].filter(Boolean);
 }
 
 type ConnectorEventTrigger = Extract<RoutineItem["trigger"], { type: "connector_event" }>;
@@ -393,8 +496,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const [automationOpen, setAutomationOpen] = useState(false);
   const [skillItems, setSkillItems] = useState<SkillItem[]>([]);
   const [skillCreateOpen, setSkillCreateOpen] = useState(false);
-  const [skillCreateName, setSkillCreateName] = useState("");
-  const [skillCreateInstructions, setSkillCreateInstructions] = useState("");
+  const [skillCreateDescription, setSkillCreateDescription] = useState("");
+  const [skillManualName, setSkillManualName] = useState("");
+  const [skillManualInstructions, setSkillManualInstructions] = useState("");
+  const [skillDrafting, setSkillDrafting] = useState(false);
   const [editingSkillId, setEditingSkillId] = useState("");
   const [skillDraftName, setSkillDraftName] = useState("");
   const [skillDraftDescription, setSkillDraftDescription] = useState("");
@@ -463,6 +568,8 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const [mcpUrl, setMcpUrl] = useState("");
   const [mcpApiKey, setMcpApiKey] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const screenRef = useRef<HTMLCanvasElement>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingAttachment[]>([]);
   const [sendingPrompt, setSendingPrompt] = useState(false);
@@ -739,7 +846,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the item list is the scroll trigger; the ref is stable.
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const node = scrollRef.current;
+    if (!node) return;
+    if (shouldAutoScrollRef.current) {
+      node.scrollTop = node.scrollHeight;
+      setShowJumpToLatest(false);
+    } else {
+      setShowJumpToLatest(node.scrollHeight - node.scrollTop - node.clientHeight > 80);
+    }
   }, [items]);
 
   useEffect(() => window.agentOS.onUpdateReady(() => setUpdateReady(true)), []);
@@ -1006,12 +1120,22 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   async function loadMemories() {
     if (!botId) return;
     try {
-      const [rows, suggestions] = (await Promise.all([
-        window.agentOS.apiRequest({ baseUrl, token, path: `/v1/bots/${botId}/memory` }),
-        window.agentOS.apiRequest({ baseUrl, token, path: `/v1/bots/${botId}/memory/reviews` }),
-      ])) as [MemoryEntry[], MemoryReviewSuggestion[]];
+      const rows = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: `/v1/bots/${botId}/memory`,
+      })) as MemoryEntry[];
       setMemoryEntries(rows);
-      setMemoryReviewSuggestions(suggestions);
+      try {
+        const suggestions = (await window.agentOS.apiRequest({
+          baseUrl,
+          token,
+          path: `/v1/bots/${botId}/memory/reviews`,
+        })) as MemoryReviewSuggestion[];
+        setMemoryReviewSuggestions(suggestions);
+      } catch {
+        setMemoryReviewSuggestions([]);
+      }
       showWorkspace("memory");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1129,18 +1253,63 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   function openSkillCreate() {
-    setSkillCreateName("");
-    setSkillCreateInstructions("");
+    setSkillCreateDescription("");
+    setSkillManualName("");
+    setSkillManualInstructions("");
     setSkillCreateOpen(true);
   }
 
-  async function createSkill(event: React.FormEvent) {
+  async function draftSkillFromDescription(event: React.FormEvent) {
     event.preventDefault();
-    const steps = skillCreateInstructions
-      ?.split("\n")
+    const description = skillCreateDescription.trim();
+    if (!description || description.length > 6000) {
+      setError("Describe the task in 1 to 6,000 characters.");
+      return;
+    }
+    setSkillDrafting(true);
+    setError("");
+    try {
+      const draft = (await window.agentOS.apiRequest({
+        baseUrl,
+        token,
+        path: "/v1/skills/draft",
+        method: "POST",
+        body: { description },
+      })) as {
+        name: string;
+        description: string;
+        steps: Array<{ instruction: string; approvalRequired?: boolean }>;
+      };
+      setTaughtDraft({
+        name: draft.name,
+        description: draft.description,
+        steps: draft.steps.map((step) => ({
+          id: crypto.randomUUID(),
+          instruction: step.instruction,
+          approvalRequired: step.approvalRequired ?? false,
+          onError: "stop",
+          maxAttempts: 3,
+          customPrompt: "",
+        })),
+      });
+      setSkillCreateOpen(false);
+      setSkillCreateDescription("");
+      showWorkspace("automation");
+      setNotice("Draft created. Review the steps and approval points before saving.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSkillDrafting(false);
+    }
+  }
+
+  async function createSkillManually(event: React.FormEvent) {
+    event.preventDefault();
+    const instructions = skillManualInstructions
+      .split("\n")
       .map((instruction) => instruction.trim())
       .filter(Boolean);
-    if (!skillCreateName.trim() || !steps?.length) {
+    if (!skillManualName.trim() || !instructions.length) {
       setError("Add a skill name and at least one instruction.");
       return;
     }
@@ -1151,9 +1320,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         path: "/v1/skills",
         method: "POST",
         body: {
-          name: skillCreateName.trim(),
-          description: steps[0] ?? "",
-          steps: steps.map((instruction) => ({ instruction })),
+          name: skillManualName.trim(),
+          description: instructions[0] ?? "",
+          steps: instructions.map((instruction) => ({ instruction })),
         },
       });
       setSkillCreateOpen(false);
@@ -1833,14 +2002,18 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         path: "/v1/skills/draft",
         method: "POST",
         body: { events: stopped.events },
-      })) as { name: string; description: string; steps: Array<{ instruction: string }> };
+      })) as {
+        name: string;
+        description: string;
+        steps: Array<{ instruction: string; approvalRequired?: boolean }>;
+      };
       setTaughtDraft({
         name: draft.name,
         description: draft.description,
         steps: draft.steps.map((step) => ({
           id: crypto.randomUUID(),
           instruction: step.instruction,
-          approvalRequired: false,
+          approvalRequired: step.approvalRequired ?? false,
           onError: "stop" as const,
           maxAttempts: 3,
           customPrompt: "",
@@ -1854,8 +2027,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
 
   async function saveTaughtDraft() {
-    if (!taughtDraft?.name.trim() || taughtDraft.steps.some((step) => !step.instruction.trim())) {
-      setError("The draft skill needs a name and an instruction on every step.");
+    if (
+      !taughtDraft?.name.trim() ||
+      !taughtDraft.steps.length ||
+      taughtDraft.steps.some(
+        (step) => !step.instruction.trim() || step.instruction.trim().length > 4000,
+      ) ||
+      taughtDraft.description.length > 2000
+    ) {
+      setError("Add a name, description under 2,000 characters, and 1–20 valid steps.");
       return;
     }
     try {
@@ -1867,7 +2047,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         body: {
           name: taughtDraft.name.trim(),
           description: taughtDraft.description.trim(),
-          steps: taughtDraft.steps.map((step) => ({ instruction: step.instruction.trim() })),
+          steps: taughtDraft.steps.map((step) => ({
+            instruction: step.instruction.trim(),
+            approvalRequired: step.approvalRequired,
+          })),
         },
       });
       setTaughtDraft(null);
@@ -2243,7 +2426,31 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     setLocalOpen(next === "local");
     setModelOpen(next === "model");
     setConnectOpen(false);
-    if (next !== "chat") setScreenMode((mode) => (mode === "handoff" ? mode : null));
+    if (next === "chat") {
+      shouldAutoScrollRef.current = true;
+      setShowJumpToLatest(false);
+      requestAnimationFrame(() => {
+        const node = scrollRef.current;
+        if (node) node.scrollTop = node.scrollHeight;
+      });
+    } else {
+      setScreenMode((mode) => (mode === "handoff" ? mode : null));
+    }
+  }
+
+  function handleConversationScroll() {
+    const node = scrollRef.current;
+    if (!node) return;
+    const atLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 80;
+    shouldAutoScrollRef.current = atLatest;
+    setShowJumpToLatest(!atLatest);
+  }
+
+  function jumpToLatest() {
+    shouldAutoScrollRef.current = true;
+    setShowJumpToLatest(false);
+    const node = scrollRef.current;
+    if (node) node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
   }
 
   const selectedBot = bots.find((bot) => bot.id === botId);
@@ -2316,19 +2523,23 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 : "Loading sign-in…"}
             </p>
             {clerk.loaded && (
-              <label>
+              <label htmlFor="agentos-control-01">
                 Gateway
-                <input
+                <TextField.Root
+                  id="agentos-control-01"
                   value={baseUrl}
                   onChange={(event) => setBaseUrl(event.target.value)}
                   spellCheck={false}
                   autoComplete="url"
+                  className="app-field"
                 />
               </label>
             )}
             {clerk.loaded && !clerk.signedIn && (
               <>
-                {clerkScreen === "in" ? <SignIn routing="hash" /> : <SignUp routing="hash" />}
+                <React.Suspense fallback={<p>Loading secure sign-in…</p>}>
+                  <ClerkAuthScreen mode={clerkScreen} />
+                </React.Suspense>
                 <AppButton
                   type="button"
                   className="auth-switch"
@@ -2369,51 +2580,59 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             </p>
             {sessionReady && authMode === "create" && (
               <>
-                <label>
+                <label htmlFor="agentos-control-02">
                   Name
-                  <input
+                  <TextField.Root
+                    id="agentos-control-02"
                     ref={accountNameRef}
                     value={accountName}
                     onChange={(event) => setAccountName(event.target.value)}
                     placeholder="Your name"
                     maxLength={80}
                     autoComplete="name"
+                    className="app-field"
                   />
                 </label>
-                <label>
+                <label htmlFor="agentos-control-03">
                   Email
-                  <input
+                  <TextField.Root
+                    id="agentos-control-03"
                     value={accountEmail}
                     onChange={(event) => setAccountEmail(event.target.value)}
                     placeholder="you@example.com"
                     type="email"
                     autoComplete="email"
                     spellCheck={false}
+                    className="app-field"
                   />
                 </label>
               </>
             )}
             {sessionReady && authMode === "token" && (
-              <label>
+              <label htmlFor="agentos-control-04">
                 Account token
-                <input
+                <TextField.Root
+                  id="agentos-control-04"
                   value={token}
                   onChange={(event) => setToken(event.target.value)}
                   type="password"
                   placeholder="Paste token"
                   autoComplete="current-password"
                   spellCheck={false}
+                  className="app-field"
                 />
               </label>
             )}
             {sessionReady && (
-              <label>
+              <label htmlFor="agentos-control-05">
                 Gateway
-                <input
+                <TextField.Root
+                  id="agentos-control-05"
                   value={baseUrl}
                   onChange={(event) => setBaseUrl(event.target.value)}
                   spellCheck={false}
                   autoComplete="url"
+                  className="app-field"
                 />
               </label>
             )}
@@ -2464,113 +2683,131 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           <span>AgentOS</span>
         </div>
         <nav className="sidebar-nav" aria-label="Workspace">
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "chat" ? "active" : ""}`}
-            title="Chat"
-            aria-current={workspace === "chat" ? "page" : undefined}
-            onClick={() => showWorkspace("chat")}
-          >
-            <MessageSquare className="glyph" aria-hidden="true" />
-            Chat
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "memory" ? "active" : ""}`}
-            title="Memory"
-            aria-current={workspace === "memory" ? "page" : undefined}
-            disabled={!botId}
-            onClick={() => void loadMemories()}
-          >
-            <Bookmark className="glyph" aria-hidden="true" />
-            Memory
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "security" ? "active" : ""}`}
-            title="Security & approvals"
-            aria-current={workspace === "security" ? "page" : undefined}
-            disabled={!botId || !token}
-            onClick={() => void loadSecuritySettings()}
-          >
-            <ShieldCheck className="glyph" aria-hidden="true" />
-            Security
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "automation" ? "active" : ""}`}
-            title="Automations"
-            aria-current={workspace === "automation" ? "page" : undefined}
-            disabled={!token}
-            onClick={() => void loadAutomations()}
-          >
-            <ListChecks className="glyph" aria-hidden="true" />
-            Automations
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "subagents" ? "active" : ""}`}
-            title="Subagents"
-            aria-current={workspace === "subagents" ? "page" : undefined}
-            disabled={!token}
-            onClick={() => void loadSubagents()}
-          >
-            <GitFork className="glyph" aria-hidden="true" />
-            Subagents
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "connectors" ? "active" : ""}`}
-            title="Connectors"
-            aria-current={workspace === "connectors" ? "page" : undefined}
-            disabled={!token}
-            onClick={() => void loadConnectors()}
-          >
-            <Link2 className="glyph" aria-hidden="true" />
-            Connectors
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "webhooks" ? "active" : ""}`}
-            title="Webhooks"
-            aria-current={workspace === "webhooks" ? "page" : undefined}
-            disabled={!token}
-            onClick={() => void loadWebhooks()}
-          >
-            <Sparkles className="glyph" aria-hidden="true" />
-            Webhooks
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "model" ? "active" : ""}`}
-            title="Model settings"
-            aria-current={workspace === "model" ? "page" : undefined}
-            disabled={!botId}
-            onClick={() => void loadInferenceSettings()}
-          >
-            <Settings2 className="glyph" aria-hidden="true" />
-            Model
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className={`nav-item ${workspace === "local" ? "active" : ""}`}
-            title="This computer"
-            aria-current={workspace === "local" ? "page" : undefined}
-            disabled={!botId}
-            onClick={() => void openLocalSettings()}
-          >
-            <Computer className="glyph" aria-hidden="true" />
-            This computer
-          </Button>
+          <Tooltip content="Chat" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "chat" ? "active" : ""}`}
+              title="Chat"
+              aria-current={workspace === "chat" ? "page" : undefined}
+              onClick={() => showWorkspace("chat")}
+            >
+              <MessageSquare className="glyph" aria-hidden="true" />
+              Chat
+            </Button>
+          </Tooltip>
+          <Tooltip content="Memory" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "memory" ? "active" : ""}`}
+              title="Memory"
+              aria-current={workspace === "memory" ? "page" : undefined}
+              disabled={!botId}
+              onClick={() => void loadMemories()}
+            >
+              <Bookmark className="glyph" aria-hidden="true" />
+              Memory
+            </Button>
+          </Tooltip>
+          <Tooltip content="Security & approvals" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "security" ? "active" : ""}`}
+              title="Security & approvals"
+              aria-current={workspace === "security" ? "page" : undefined}
+              disabled={!botId || !token}
+              onClick={() => void loadSecuritySettings()}
+            >
+              <ShieldCheck className="glyph" aria-hidden="true" />
+              Security
+            </Button>
+          </Tooltip>
+          <Tooltip content="Automations" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "automation" ? "active" : ""}`}
+              title="Automations"
+              aria-current={workspace === "automation" ? "page" : undefined}
+              disabled={!token}
+              onClick={() => void loadAutomations()}
+            >
+              <ListChecks className="glyph" aria-hidden="true" />
+              Automations
+            </Button>
+          </Tooltip>
+          <Tooltip content="Subagents" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "subagents" ? "active" : ""}`}
+              title="Subagents"
+              aria-current={workspace === "subagents" ? "page" : undefined}
+              disabled={!token}
+              onClick={() => void loadSubagents()}
+            >
+              <GitFork className="glyph" aria-hidden="true" />
+              Subagents
+            </Button>
+          </Tooltip>
+          <Tooltip content="Connectors" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "connectors" ? "active" : ""}`}
+              title="Connectors"
+              aria-current={workspace === "connectors" ? "page" : undefined}
+              disabled={!token}
+              onClick={() => void loadConnectors()}
+            >
+              <Link2 className="glyph" aria-hidden="true" />
+              Connectors
+            </Button>
+          </Tooltip>
+          <Tooltip content="Webhooks" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "webhooks" ? "active" : ""}`}
+              title="Webhooks"
+              aria-current={workspace === "webhooks" ? "page" : undefined}
+              disabled={!token}
+              onClick={() => void loadWebhooks()}
+            >
+              <Sparkles className="glyph" aria-hidden="true" />
+              Webhooks
+            </Button>
+          </Tooltip>
+          <Tooltip content="Model settings" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "model" ? "active" : ""}`}
+              title="Model settings"
+              aria-current={workspace === "model" ? "page" : undefined}
+              disabled={!botId}
+              onClick={() => void loadInferenceSettings()}
+            >
+              <Settings2 className="glyph" aria-hidden="true" />
+              Model
+            </Button>
+          </Tooltip>
+          <Tooltip content="This computer" side="right" delayDuration={250}>
+            <Button
+              type="button"
+              variant="ghost"
+              className={`nav-item ${workspace === "local" ? "active" : ""}`}
+              title="This computer"
+              aria-current={workspace === "local" ? "page" : undefined}
+              disabled={!botId}
+              onClick={() => void openLocalSettings()}
+            >
+              <Computer className="glyph" aria-hidden="true" />
+              This computer
+            </Button>
+          </Tooltip>
         </nav>
         <div className="roster-head">
           <span>Bots</span>
@@ -2588,8 +2825,8 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             <Plus aria-hidden="true" size={16} />
           </AppButton>
         </div>
-        <input
-          className="sidebar-search"
+        <TextField.Root
+          className="app-field sidebar-search"
           value={botQuery}
           onChange={(event) => setBotQuery(event.target.value)}
           placeholder="Search bots"
@@ -2646,22 +2883,26 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   void connect();
                 }}
               >
-                <label>
+                <label htmlFor="agentos-control-06">
                   Gateway URL
-                  <input
+                  <TextField.Root
+                    id="agentos-control-06"
                     value={baseUrl}
                     onChange={(event) => setBaseUrl(event.target.value)}
                     spellCheck={false}
+                    className="app-field"
                   />
                 </label>
-                <label>
+                <label htmlFor="agentos-control-07">
                   Bearer token
-                  <input
+                  <TextField.Root
+                    id="agentos-control-07"
                     value={token}
                     onChange={(event) => setToken(event.target.value)}
                     type="password"
                     placeholder="Account token"
                     autoComplete="current-password"
+                    className="app-field"
                   />
                 </label>
                 <div className="popover-actions">
@@ -2688,1946 +2929,2181 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         </div>
       </aside>
       <main className="chat-panel">
-        <UpdateBanner ready={updateReady} onRestart={() => void window.agentOS.restartToUpdate()} />
-        <header className="chat-header">
-          <div className="title-block">
-            <strong>{workspaceTitle}</strong>
-            <span>
-              {activeRun && workspace === "chat" && <i className="working-dot" />}
-              {workspaceSubtitle}
-            </span>
-          </div>
-          <div className="header-actions">
-            {activeRun && (
-              <AppButton
-                type="button"
-                className="stop-button"
-                onClick={() =>
-                  void window.agentOS.send({ type: "interrupt", agentId: botId, runId: activeRun })
-                }
-              >
-                <Square size={11} fill="currentColor" aria-hidden="true" />
-                Stop
-              </AppButton>
-            )}
-            <AppButton
-              type="button"
-              className={screenMode === "view" ? "primary" : ""}
-              onClick={() => setScreenMode((mode) => (mode === "view" ? null : "view"))}
-              disabled={!botId || screenMode === "handoff"}
-            >
-              <Monitor className="glyph" aria-hidden="true" />
-              {screenMode === "view" ? "Hide screen" : "Agent screen"}
-            </AppButton>
-          </div>
-        </header>
-        <Dialog.Root open={botDraftOpen} onOpenChange={setBotDraftOpen}>
-          <Dialog.Content maxWidth="460px">
-            <Dialog.Title>New bot</Dialog.Title>
-            <Dialog.Description>
-              Give this agent a name. You can change its model after it is created.
-            </Dialog.Description>
-            <form
-              className="skill-editor"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void createBot(botDraftName);
-              }}
-            >
-              <label>
-                Name
-                <input
-                  value={botDraftName}
-                  onChange={(event) => setBotDraftName(event.target.value)}
-                  placeholder="Name"
-                  maxLength={80}
-                  required
-                />
-              </label>
-              <div className="memory-actions">
-                <Dialog.Close>
-                  <AppButton type="button">Cancel</AppButton>
-                </Dialog.Close>
-                <AppButton
-                  type="submit"
-                  className="primary"
-                  disabled={!botDraftName.trim() || !token}
-                >
-                  Create
-                </AppButton>
-              </div>
-            </form>
-          </Dialog.Content>
-        </Dialog.Root>
-        {workspace === "security" && (
-          <section className="messages memory-view security-view">
-            <div className="memory-toolbar">
-              <div>
-                <h2>Security & approvals</h2>
-                <p className="empty-note">
-                  Choose how this bot handles tool permissions and exceptions.
-                </p>
-              </div>
-              <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                Back to chat
-              </AppButton>
+        <ErrorBoundary key={workspace} fallbackTitle="This panel hit a display error">
+          <UpdateBanner
+            ready={updateReady}
+            onRestart={() => void window.agentOS.restartToUpdate()}
+          />
+          <header className="chat-header">
+            <div className="title-block">
+              <strong>{workspaceTitle}</strong>
+              <span>
+                {activeRun && workspace === "chat" && <i className="working-dot" />}
+                {workspaceSubtitle}
+              </span>
             </div>
-            <article className="memory-entry security-policy-card">
-              <h3>Default permission level</h3>
-              <div className="approval-default-field">
-                <span>For tools without an Auto Review rule</span>
-                <Select.Root
-                  value={String(approvalDefaultLevel)}
-                  onValueChange={(value) =>
-                    setApprovalDefaultLevel(Number(value) as PermissionLevel)
+            <div className="header-actions">
+              {showJumpToLatest && workspace === "chat" && (
+                <AppButton
+                  type="button"
+                  className="jump-to-latest"
+                  aria-label="Jump to latest message"
+                  title="Jump to latest message"
+                  onClick={jumpToLatest}
+                >
+                  <ArrowDown size={14} aria-hidden="true" />
+                  Latest
+                </AppButton>
+              )}
+              {activeRun && (
+                <AppButton
+                  type="button"
+                  className="stop-button"
+                  onClick={() =>
+                    void window.agentOS.send({
+                      type: "interrupt",
+                      agentId: botId,
+                      runId: activeRun,
+                    })
                   }
                 >
-                  <Select.Trigger aria-label="Default permission level" />
-                  <Select.Content position="popper">
-                    <Select.Item value="0">Use each tool's default</Select.Item>
-                    <Select.Item value="1">Ask once per tool</Select.Item>
-                    <Select.Item value="2">Ask every time</Select.Item>
-                    <Select.Item value="3">Require screen handoff</Select.Item>
-                  </Select.Content>
-                </Select.Root>
-              </div>
-              <p>
-                Higher levels add more review. Screen handoff pauses the bot and gives you control
-                of its browser session.
-              </p>
-            </article>
-            <article className="memory-entry security-policy-card">
-              <h3>Auto Review rules</h3>
-              <p>
-                Match an exact tool name. “Ask every time” opens the approval dialog for each call;
-                “Always allow” skips approval for that tool. If several rules match, “Ask every
-                time” takes precedence.
-              </p>
-              <form className="approval-rule-form" onSubmit={addApprovalRule}>
-                <div className="approval-rule-field">
-                  <span>Tool name</span>
-                  <TextField.Root
-                    value={approvalToolName}
-                    onChange={(event) => setApprovalToolName(event.target.value)}
-                    placeholder="RunShell or BrowserNavigate"
-                    maxLength={128}
-                    aria-label="Exact tool name"
-                  />
-                </div>
-                <div className="approval-rule-field">
-                  <span>Rule</span>
-                  <Select.Root
-                    value={approvalRuleMode}
-                    onValueChange={(value) => setApprovalRuleMode(value as AutoReviewRule["mode"])}
-                  >
-                    <Select.Trigger aria-label="Auto Review action" />
-                    <Select.Content position="popper">
-                      <Select.Item value="require">Ask every time</Select.Item>
-                      <Select.Item value="always_allow">Always allow</Select.Item>
-                    </Select.Content>
-                  </Select.Root>
-                </div>
-                <AppButton type="submit" disabled={!approvalToolName.trim()}>
-                  <Plus size={15} aria-hidden="true" />
-                  Add rule
+                  <Square size={11} fill="currentColor" aria-hidden="true" />
+                  Stop
                 </AppButton>
-              </form>
-              {approvalRules.length ? (
-                <div className="approval-rule-list">
-                  {approvalRules.map((rule, index) => (
-                    <div className="approval-rule-row" key={`${rule.actionPattern}-${index}`}>
-                      <code>{rule.actionPattern}</code>
-                      <Badge color={rule.mode === "require" ? "amber" : "green"} variant="soft">
-                        {rule.mode === "require" ? "Ask every time" : "Always allow"}
-                      </Badge>
-                      <AppButton
-                        type="button"
-                        aria-label={`Remove rule ${rule.actionPattern}`}
-                        title="Remove rule"
-                        onClick={() =>
-                          setApprovalRules((current) => current.filter((_, item) => item !== index))
-                        }
-                      >
-                        <Trash2 size={15} aria-hidden="true" />
-                      </AppButton>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="empty-note">No custom rules. The tool defaults will apply.</p>
               )}
-              <div className="memory-actions">
-                <AppButton
-                  type="button"
-                  className="primary"
-                  disabled={!token || approvalSaving}
-                  onClick={() => void saveApprovalSettings()}
-                >
-                  {approvalSaving ? "Saving…" : "Save approval settings"}
-                </AppButton>
-              </div>
-            </article>
-          </section>
-        )}
-        {workspace === "local" && (
-          <section className="messages memory-view">
-            <h2>Local computer execution</h2>
-            {(
-              [
-                ["always_confirm", "Always require approval"],
-                ["always_allow", "Always allow"],
-                ["never", "Never allow"],
-              ] as const
-            ).map(([value, label]) => (
-              <label key={value} className="skill-approval-toggle choice-card">
-                <input
-                  type="radio"
-                  name="local-machine-access"
-                  checked={localAccess === value}
-                  onChange={() => void saveLocalAccess(value)}
-                />
-                {label}
-              </label>
-            ))}
-            <AppButton type="button" onClick={() => showWorkspace("chat")}>
-              Back to chat
-            </AppButton>
-          </section>
-        )}
-        <Dialog.Root
-          open={pendingLocal !== null}
-          onOpenChange={(open) => {
-            // Keep the approval request visible until the user explicitly allows or blocks it.
-            if (open) return;
-          }}
-        >
-          {pendingLocal && (
-            <Dialog.Content
-              className="local-exec-dialog"
-              maxWidth="460px"
-              onEscapeKeyDown={(event) => event.preventDefault()}
-              onPointerDownOutside={(event) => event.preventDefault()}
-              onInteractOutside={(event) => event.preventDefault()}
-            >
-              <Dialog.Title>Run on this computer?</Dialog.Title>
-              <Dialog.Description>
-                The agent is asking to run this command on your desktop. Review it before allowing.
-              </Dialog.Description>
-              <pre>{pendingLocal.command}</pre>
-              <p>{pendingLocal.cwd || "The desktop's default directory"}</p>
-              <label className="skill-approval-toggle">
-                <input
-                  type="checkbox"
-                  checked={allowLocalSession}
-                  onChange={(event) => setAllowLocalSession(event.target.checked)}
-                />
-                Always allow this session
-              </label>
-              <div className="approval-actions">
-                <AppButton
-                  type="button"
-                  className="primary"
-                  onClick={() => void replyLocal(allowLocalSession ? "allow_session" : "allow")}
-                >
-                  Run
-                </AppButton>
-                <AppButton type="button" className="deny" onClick={() => void replyLocal("deny")}>
-                  Block
-                </AppButton>
-              </div>
-            </Dialog.Content>
-          )}
-        </Dialog.Root>
-        {screenMode && screenBotId && (
-          <section className="screen-view">
-            <p>
-              {screenMode === "handoff"
-                ? handoff?.reason
-                : "Viewing the agent screen. The turn keeps running."}
-            </p>
-            <canvas ref={screenRef} width={1280} height={800} />
-            {screenMode === "handoff" ? (
-              <AppButton type="button" onClick={() => void returnControl()}>
-                Return to Bot
-              </AppButton>
-            ) : (
-              <AppButton type="button" onClick={() => setScreenMode(null)}>
-                Close
-              </AppButton>
-            )}
-          </section>
-        )}
-        {workspace === "model" && (
-          <section className="messages memory-view">
-            <h2>Model settings · {bots.find((bot) => bot.id === botId)?.name}</h2>
-            <label>
-              Primary provider
-              <select
-                value={inferenceProviderId}
-                onChange={(event) => setInferenceProviderId(event.target.value)}
-              >
-                <option value="">Account default</option>
-                {inferenceProviders.map((provider) => (
-                  <option key={provider} value={provider}>
-                    {provider}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Model override (optional)
-              <input
-                value={inferenceModel}
-                onChange={(event) => setInferenceModel(event.target.value)}
-                placeholder="Use provider default"
-                maxLength={200}
-              />
-            </label>
-            <h2>Privacy</h2>
-            <label className="skill-approval-toggle">
-              <input
-                type="checkbox"
-                checked={retainData}
-                onChange={(event) => void saveRetainData(event.target.checked)}
-              />
-              Allow AgentOS to retain conversation data for product improvement
-            </label>
-            <p>
-              Disabling this does not delete existing data. Use Memory → Export and then delete
-              entries to remove stored facts.
-            </p>
-            <div className="memory-actions">
               <AppButton
                 type="button"
-                className="primary"
-                onClick={() => void saveInferenceSettings()}
+                className={screenMode === "view" ? "primary" : ""}
+                onClick={() => setScreenMode((mode) => (mode === "view" ? null : "view"))}
+                disabled={!botId || screenMode === "handoff"}
               >
-                Save model settings
-              </AppButton>
-              <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                Back to chat
+                <Monitor className="glyph" aria-hidden="true" />
+                {screenMode === "view" ? "Hide screen" : "Agent screen"}
               </AppButton>
             </div>
-          </section>
-        )}
-        {workspace === "subagents" ? (
-          <section className="messages memory-view">
-            <div className="memory-toolbar">
-              <div>
-                <h2>Subagents</h2>
-                <p className="empty-note">Background tasks started by your agents.</p>
-              </div>
-              <div>
-                <AppButton type="button" onClick={() => void loadSubagents(false)}>
-                  Refresh
-                </AppButton>
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
-                </AppButton>
-              </div>
-            </div>
-            {!subagentItems.length && (
-              <p className="empty-note">No background tasks have been started.</p>
-            )}
-            {subagentItems.map((item) => {
-              const active = item.status === "queued" || item.status === "running";
-              return (
-                <article className="memory-entry subagent-entry" key={item.id}>
-                  <div className="memory-toolbar">
-                    <div>
-                      <span className={`status-pill status-${item.status}`}>{item.status}</span>
-                      <small>Started {new Date(item.createdAt).toLocaleString()}</small>
-                    </div>
-                    <small>
-                      {item.lastProgressAt
-                        ? `Progress ${new Date(item.lastProgressAt).toLocaleString()}`
-                        : "Waiting for its first step"}
-                    </small>
-                  </div>
-                  <h3>Task</h3>
-                  <p>{item.taskDescription}</p>
-                  <small>Tools: {item.allowedTools.join(", ") || "none"}</small>
-                  {item.stallCount > 0 && (
-                    <p className="empty-note">
-                      {item.stallCount} stall {item.stallCount === 1 ? "event" : "events"}
-                      {item.stallEvents.at(-1)?.reason
-                        ? ` · ${item.stallEvents.at(-1)?.reason}`
-                        : ""}
-                    </p>
-                  )}
-                  {item.result && (
-                    <details>
-                      <summary>Result</summary>
-                      <pre className="subagent-result">{item.result}</pre>
-                    </details>
-                  )}
-                  {item.usage && (
-                    <small>
-                      Tokens: {item.usage.totalTokens.toLocaleString()} total ·{" "}
-                      {item.usage.promptTokens.toLocaleString()} prompt ·{" "}
-                      {item.usage.completionTokens.toLocaleString()} completion
-                    </small>
-                  )}
-                  {active && (
-                    <>
-                      <form
-                        className="subagent-steer-form"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          void steerSubagent(item);
-                        }}
-                      >
-                        <label htmlFor={`subagent-steer-${item.id}`}>Send guidance</label>
-                        <textarea
-                          id={`subagent-steer-${item.id}`}
-                          value={subagentSteering[item.id] ?? ""}
-                          onChange={(event) =>
-                            setSubagentSteering((current) => ({
-                              ...current,
-                              [item.id]: event.target.value,
-                            }))
-                          }
-                          maxLength={2000}
-                          rows={2}
-                          placeholder="Add context or redirect the task"
-                        />
-                        <div className="memory-actions">
-                          <AppButton type="submit" disabled={!subagentSteering[item.id]?.trim()}>
-                            Send guidance
-                          </AppButton>
-                          <AppButton
-                            type="button"
-                            className="deny"
-                            onClick={() => void cancelSubagent(item)}
-                          >
-                            Cancel task
-                          </AppButton>
-                        </div>
-                      </form>
-                      {item.steeringEvents.length > 0 && (
-                        <details>
-                          <summary>Guidance history ({item.steeringEvents.length})</summary>
-                          <ul>
-                            {item.steeringEvents.map((event, index) => (
-                              <li key={`${event.at}-${index}`}>
-                                {new Date(event.at).toLocaleString()} · {event.message}
-                              </li>
-                            ))}
-                          </ul>
-                        </details>
-                      )}
-                    </>
-                  )}
-                </article>
-              );
-            })}
-          </section>
-        ) : workspace === "webhooks" ? (
-          <section className="messages memory-view">
-            <div className="memory-toolbar">
-              <h2>Outbound webhooks</h2>
-              <div>
-                <AppButton type="button" onClick={() => void loadWebhooks()}>
-                  Refresh
-                </AppButton>
-                <AppButton type="button" onClick={() => setWebhookOpen(false)}>
-                  Back to chat
-                </AppButton>
-              </div>
-            </div>
-            <p className="empty-note">
-              Deliveries are signed with HMAC-SHA256. Terminal delivery history is retained for 30
-              days by default.
-            </p>
-            {newWebhookSecret && (
-              <output className="routine-webhook-setup">
-                <strong>Save this signing secret now</strong>
-                <p>AgentOS stores only an encrypted copy and will not show it again.</p>
-                <code>{newWebhookSecret}</code>
-                <AppButton type="button" onClick={() => setNewWebhookSecret("")}>
-                  Done
-                </AppButton>
-              </output>
-            )}
-            <form className="mcp-server-form" onSubmit={(event) => void createWebhook(event)}>
-              <input
-                aria-label="Webhook HTTPS URL"
-                type="url"
-                value={webhookUrl}
-                onChange={(event) => setWebhookUrl(event.target.value)}
-                placeholder="https://example.com/agentos-events"
-                required
-              />
-              <fieldset>
-                <legend>Events</legend>
-                {(["turn.settled", "routine.completed", "approval.required"] as const).map(
-                  (eventName) => (
-                    <label key={eventName}>
-                      <input
-                        type="checkbox"
-                        checked={webhookEvents.includes(eventName)}
-                        onChange={(event) =>
-                          setWebhookEvents((current) =>
-                            event.target.checked
-                              ? [...current, eventName]
-                              : current.filter((item) => item !== eventName),
-                          )
-                        }
-                      />
-                      {eventName}
-                    </label>
-                  ),
-                )}
-              </fieldset>
-              <AppButton type="submit" disabled={!token || webhookEvents.length === 0}>
-                Create webhook
-              </AppButton>
-            </form>
-            <h3>Subscriptions</h3>
-            {!webhookSubscriptions.length && (
-              <p className="empty-note">No webhook subscriptions.</p>
-            )}
-            {webhookSubscriptions.map((subscription) => (
-              <article className="memory-entry" key={subscription.id}>
-                <div>
-                  <strong>{subscription.url}</strong>
-                  <small>Created {new Date(subscription.createdAt).toLocaleString()}</small>
-                </div>
-                <p>Events: {subscription.events.join(", ")}</p>
-                <AppButton type="button" onClick={() => void removeWebhook(subscription)}>
-                  Delete subscription
-                </AppButton>
-              </article>
-            ))}
-            <h3>Recent deliveries</h3>
-            {!webhookDeliveries.length && <p className="empty-note">No deliveries recorded.</p>}
-            {webhookDeliveries.map((delivery) => (
-              <article className="memory-entry" key={delivery.id}>
-                <div>
-                  <strong>
-                    {delivery.event} · {delivery.status}
-                  </strong>
-                  <small>
-                    {new Date(delivery.createdAt).toLocaleString()} · attempt{" "}
-                    {delivery.attemptCount}
-                  </small>
-                </div>
-                <p>
-                  {delivery.lastStatusCode ? `HTTP ${delivery.lastStatusCode}` : "No HTTP response"}
-                  {delivery.lastError ? ` · ${delivery.lastError}` : ""}
-                </p>
-                {delivery.status === "failed" && (
-                  <AppButton type="button" onClick={() => void retryWebhookDelivery(delivery)}>
-                    Retry delivery
-                  </AppButton>
-                )}
-              </article>
-            ))}
-          </section>
-        ) : workspace === "connectors" ? (
-          <section className="messages memory-view">
-            <div className="memory-toolbar">
-              <h2>Connectors</h2>
-              <div>
-                <AppButton type="button" onClick={() => void loadConnectors()}>
-                  Refresh
-                </AppButton>
-                <AppButton type="button" onClick={() => setConnectorOpen(false)}>
-                  Back to chat
-                </AppButton>
-              </div>
-            </div>
-            <div className="connector-grid">
-              {CONNECTOR_CARDS.map((card) => {
-                const connected = connectorItems.some(
-                  (item) =>
-                    item.service === card.id ||
-                    (card.oauth === "microsoft" && item.service === "microsoft"),
-                );
-                return (
-                  <article
-                    className={`memory-entry connector-card ${connected ? "is-on" : ""}`}
-                    key={card.id}
-                  >
-                    <div>
-                      <strong>{card.label}</strong>
-                      <small>{connected ? "Connected" : "Not connected"}</small>
-                    </div>
-                    {card.oauth === "microsoft" && (
-                      <p>OneDrive, Outlook, Teams, and SharePoint share one Microsoft sign-in.</p>
-                    )}
-                    <div className="memory-actions">
-                      {connected ? (
-                        <AppButton type="button" onClick={() => void disconnectService(card.oauth)}>
-                          Disconnect
-                        </AppButton>
-                      ) : (
-                        <AppButton type="button" onClick={() => void connectService(card.oauth)}>
-                          Connect
-                        </AppButton>
-                      )}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-            {connectorItems.map((connector) => (
-              <article className="memory-entry" key={connector.service}>
-                <div>
-                  <strong>{connector.service}</strong>
-                  <small>Connected {new Date(connector.connectedAt).toLocaleString()}</small>
-                </div>
-                <p>Scopes: {connector.scopes.join(", ") || "provider defaults"}</p>
-                <div className="memory-actions">
-                  <AppButton
-                    type="button"
-                    onClick={() => void disconnectService(connector.service)}
-                  >
-                    Disconnect
-                  </AppButton>
-                </div>
-              </article>
-            ))}
-            <h3>MCP servers</h3>
-            <p className="empty-note">
-              Connect an HTTPS MCP endpoint with a public hostname. API keys are encrypted before
-              storage.
-            </p>
-            <form className="mcp-server-form" onSubmit={(event) => void addMcpServer(event)}>
-              <input
-                aria-label="MCP server name"
-                value={mcpName}
-                onChange={(event) => setMcpName(event.target.value)}
-                placeholder="Server name"
-                required
-                maxLength={120}
-              />
-              <input
-                aria-label="MCP server URL"
-                type="url"
-                value={mcpUrl}
-                onChange={(event) => setMcpUrl(event.target.value)}
-                placeholder="https://mcp.example.com"
-                required
-              />
-              <input
-                aria-label="MCP API key"
-                type="password"
-                autoComplete="new-password"
-                value={mcpApiKey}
-                onChange={(event) => setMcpApiKey(event.target.value)}
-                placeholder="Bearer API key (optional)"
-              />
-              <AppButton type="submit" disabled={!token}>
-                Add MCP server
-              </AppButton>
-            </form>
-            {!mcpItems.length && <p className="empty-note">No MCP servers configured.</p>}
-            {mcpItems.map((server) => (
-              <article className="memory-entry" key={server.id}>
-                <div>
-                  <strong>{server.name}</strong>
-                  <small>
-                    {server.lastHealth} ·{" "}
-                    {server.lastCheckedAt
-                      ? `checked ${new Date(server.lastCheckedAt).toLocaleString()}`
-                      : "not checked"}
-                  </small>
-                </div>
-                <p>{server.url}</p>
-                {server.lastError && <output>{server.lastError}</output>}
-                <p>{server.cachedTools?.length ?? 0} discovered tools</p>
-                <div className="memory-actions">
-                  <AppButton type="button" onClick={() => void removeMcpServer(server)}>
-                    Remove
-                  </AppButton>
-                </div>
-              </article>
-            ))}
-          </section>
-        ) : workspace === "automation" ? (
-          <section className="messages memory-view">
-            <div className="memory-toolbar">
-              <div>
-                <h2>Skills and routines</h2>
-                <p className="page-subtitle">
-                  Procedures this workspace can run on a schedule or an event.
-                </p>
-              </div>
-              <div className="toolbar-actions">
-                <AppButton type="button" onClick={() => void toggleRecording()} disabled={!botId}>
-                  {recording ? "Stop recording" : "Record browser task"}
-                </AppButton>
-                <AppButton type="button" className="primary" onClick={openSkillCreate}>
-                  New skill
-                </AppButton>
-                <details className="menu">
-                  <summary>New routine</summary>
-                  <div className="menu-panel">
-                    <AppButton
-                      type="button"
-                      onClick={(event) => {
-                        event.currentTarget.closest("details")?.removeAttribute("open");
-                        openRoutineCreate("cron");
-                      }}
-                      disabled={!botId || !skillItems.length}
-                    >
-                      On a schedule
-                    </AppButton>
-                    <AppButton
-                      type="button"
-                      onClick={(event) => {
-                        event.currentTarget.closest("details")?.removeAttribute("open");
-                        openRoutineCreate("webhook");
-                      }}
-                      disabled={!botId || !skillItems.length}
-                    >
-                      From a webhook
-                    </AppButton>
-                    <AppButton
-                      type="button"
-                      onClick={(event) => {
-                        event.currentTarget.closest("details")?.removeAttribute("open");
-                        openRoutineCreate("inter_bot_message");
-                      }}
-                      disabled={
-                        !botId ||
-                        !skillItems.length ||
-                        bots.filter((bot) => bot.id !== botId).length === 0
-                      }
-                    >
-                      When another bot messages
-                    </AppButton>
-                    <AppButton
-                      type="button"
-                      onClick={(event) => {
-                        event.currentTarget.closest("details")?.removeAttribute("open");
-                        openRoutineCreate("file_change");
-                      }}
-                      disabled={!botId || !skillItems.length}
-                    >
-                      When a file changes
-                    </AppButton>
-                    <AppButton
-                      type="button"
-                      onClick={(event) => {
-                        event.currentTarget.closest("details")?.removeAttribute("open");
-                        beginConnectorRoutine();
-                      }}
-                      disabled={!botId || !skillItems.length}
-                    >
-                      When a Gmail or Calendar event arrives
-                    </AppButton>
-                  </div>
-                </details>
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
-                </AppButton>
-              </div>
-            </div>
-            {routineWebhookSetup && (
-              <output className="routine-webhook-setup">
-                <strong>Save this webhook secret now</strong>
-                <p>AgentOS stores only its hash, so it cannot be shown again.</p>
-                <code>POST {routineWebhookSetup.url}</code>
-                <code>X-Routine-Secret: {routineWebhookSetup.secret}</code>
-                <AppButton type="button" onClick={() => setRoutineWebhookSetup(null)}>
-                  Done
-                </AppButton>
-              </output>
-            )}
-            {newConnectorRoutineOpen && (
-              <form className="skill-editor" onSubmit={(event) => void saveConnectorRoutine(event)}>
-                <h3>New connector routine</h3>
-                <label>
-                  Routine name
-                  <input
-                    value={routineDraftName}
-                    onChange={(event) => setRoutineDraftName(event.target.value)}
-                    maxLength={120}
-                    required
-                  />
-                </label>
-                <label>
-                  Bot
-                  <select
-                    value={routineDraftBotId}
-                    onChange={(event) => {
-                      const nextBotId = event.target.value;
-                      setRoutineDraftBotId(nextBotId);
-                      const compatibleSkills = skillItems.filter(
-                        (skill) => !skill.ownerBotId || skill.ownerBotId === nextBotId,
-                      );
-                      setRoutineDraftSkillId(compatibleSkills[0]?.id ?? "");
-                    }}
-                  >
-                    {bots
-                      .filter((bot) => bot.role !== "subagent")
-                      .map((bot) => (
-                        <option key={bot.id} value={bot.id}>
-                          {bot.name}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-                <label>
-                  Skill
-                  <select
-                    value={routineDraftSkillId}
-                    onChange={(event) => setRoutineDraftSkillId(event.target.value)}
-                  >
-                    {skillItems
-                      .filter(
-                        (skill) => !skill.ownerBotId || skill.ownerBotId === routineDraftBotId,
-                      )
-                      .map((skill) => (
-                        <option key={skill.id} value={skill.id}>
-                          {skill.name}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-                <label>
-                  Connector
-                  <select
-                    value={routineDraftConnectorService}
-                    onChange={(event) =>
-                      setRoutineDraftConnectorService(
-                        event.target.value as "gmail" | "google-calendar",
-                      )
-                    }
-                  >
-                    <option value="gmail">Gmail</option>
-                    <option value="google-calendar">Google Calendar</option>
-                  </select>
-                </label>
-                {routineDraftConnectorService === "gmail" && (
-                  <label>
-                    Sender email (optional)
-                    <input
-                      type="email"
-                      value={routineDraftConnectorSender}
-                      onChange={(event) => setRoutineDraftConnectorSender(event.target.value)}
-                      maxLength={200}
-                      placeholder="name@example.com"
-                    />
-                  </label>
-                )}
-                <label>
-                  {routineDraftConnectorService === "gmail"
-                    ? "Subject contains (optional)"
-                    : "Event title contains"}
-                  <input
-                    value={routineDraftConnectorSubject}
-                    onChange={(event) => setRoutineDraftConnectorSubject(event.target.value)}
-                    maxLength={200}
-                    placeholder="Project update"
-                  />
-                </label>
-                {routineDraftConnectorService === "gmail" ? (
-                  <label>
-                    Gmail search query (optional)
-                    <input
-                      value={routineDraftConnectorQuery}
-                      onChange={(event) => setRoutineDraftConnectorQuery(event.target.value)}
-                      maxLength={200}
-                      placeholder="has:attachment"
-                    />
-                  </label>
-                ) : (
-                  <label>
-                    Calendar ID
-                    <input
-                      value={routineDraftCalendarId}
-                      onChange={(event) => setRoutineDraftCalendarId(event.target.value)}
-                      maxLength={200}
-                      placeholder="primary"
-                    />
-                  </label>
-                )}
-                <label>
-                  When a run fails
-                  <select
-                    value={routineDraftOnError}
-                    onChange={(event) =>
-                      setRoutineDraftOnError(
-                        event.target.value as "notify_user" | "retry" | "pause",
-                      )
-                    }
-                  >
-                    <option value="pause">Pause the routine</option>
-                    <option value="notify_user">Notify you</option>
-                    <option value="retry">Retry</option>
-                  </select>
-                </label>
-                <p>
-                  Connect the selected Google service first. The initial poll records a baseline;
-                  only new matching events trigger runs.
-                </p>
-                <div className="memory-actions">
-                  <AppButton type="submit" className="primary">
-                    Create routine
-                  </AppButton>
-                  <AppButton type="button" onClick={() => setNewConnectorRoutineOpen(false)}>
-                    Cancel
-                  </AppButton>
-                </div>
-              </form>
-            )}
-            {taughtDraft && (
+          </header>
+          <Dialog.Root open={botDraftOpen} onOpenChange={setBotDraftOpen}>
+            <Dialog.Content maxWidth="460px">
+              <Dialog.Title>New bot</Dialog.Title>
+              <Dialog.Description>
+                Give this agent a name. You can change its model after it is created.
+              </Dialog.Description>
               <form
                 className="skill-editor"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  void saveTaughtDraft();
+                  void createBot(botDraftName);
                 }}
               >
-                <strong>Review recorded skill</strong>
-                <label>
+                <label htmlFor="agentos-control-08">
                   Name
-                  <input
-                    value={taughtDraft.name}
-                    onChange={(event) =>
-                      setTaughtDraft({ ...taughtDraft, name: event.target.value })
-                    }
-                    maxLength={120}
+                  <TextField.Root
+                    id="agentos-control-08"
+                    value={botDraftName}
+                    onChange={(event) => setBotDraftName(event.target.value)}
+                    placeholder="Name"
+                    maxLength={80}
+                    required
+                    className="app-field"
                   />
                 </label>
-                <label>
-                  Description
-                  <textarea
-                    value={taughtDraft.description}
-                    onChange={(event) =>
-                      setTaughtDraft({ ...taughtDraft, description: event.target.value })
-                    }
-                    rows={2}
-                  />
-                </label>
-                {taughtDraft.steps.map((step, index) => (
-                  <label key={step.id}>
-                    Step {index + 1}
-                    <textarea
-                      value={step.instruction}
-                      onChange={(event) => {
-                        const steps = taughtDraft.steps.slice();
-                        const current = steps[index];
-                        if (!current) return;
-                        steps[index] = { ...current, instruction: event.target.value };
-                        setTaughtDraft({ ...taughtDraft, steps });
-                      }}
-                      rows={2}
-                    />
-                  </label>
-                ))}
                 <div className="memory-actions">
-                  <AppButton type="submit">Save skill</AppButton>
-                  <AppButton type="button" onClick={() => setTaughtDraft(null)}>
-                    Discard draft
+                  <Dialog.Close>
+                    <AppButton type="button">Cancel</AppButton>
+                  </Dialog.Close>
+                  <AppButton
+                    type="submit"
+                    className="primary"
+                    disabled={!botDraftName.trim() || !token}
+                  >
+                    Create
                   </AppButton>
                 </div>
               </form>
-            )}
-            <h3>Skills</h3>
-            {!skillItems.length && <p className="empty-note">No skills configured.</p>}
-            {skillItems.map((skill) => (
-              <article className="memory-entry" key={skill.id}>
-                <strong>{skill.name}</strong>
+            </Dialog.Content>
+          </Dialog.Root>
+          {workspace === "security" && (
+            <section className="messages memory-view security-view">
+              <div className="memory-toolbar">
+                <div>
+                  <h2>Security & approvals</h2>
+                  <p className="empty-note">
+                    Choose how this bot handles tool permissions and exceptions.
+                  </p>
+                </div>
+                <AppButton type="button" onClick={() => showWorkspace("chat")}>
+                  Back to chat
+                </AppButton>
+              </div>
+              <article className="memory-entry security-policy-card">
+                <h3>Default permission level</h3>
+                <div className="approval-default-field">
+                  <span>For tools without an Auto Review rule</span>
+                  <Select.Root
+                    value={
+                      ["0", "1", "2", "3"].includes(String(approvalDefaultLevel))
+                        ? String(approvalDefaultLevel)
+                        : "0"
+                    }
+                    onValueChange={(value) =>
+                      setApprovalDefaultLevel(Number(value) as PermissionLevel)
+                    }
+                  >
+                    <Select.Trigger aria-label="Default permission level" />
+                    <Select.Content position="popper">
+                      <Select.Item value="0">Use each tool's default</Select.Item>
+                      <Select.Item value="1">Ask once per tool</Select.Item>
+                      <Select.Item value="2">Ask every time</Select.Item>
+                      <Select.Item value="3">Require screen handoff</Select.Item>
+                    </Select.Content>
+                  </Select.Root>
+                </div>
                 <p>
-                  Version {skill.version ?? 1} · {skill.steps.length} steps
-                  {skill.description ? ` · ${skill.description}` : ""}
+                  Higher levels add more review. Screen handoff pauses the bot and gives you control
+                  of its browser session.
                 </p>
-                {editingSkillId === skill.id && (
-                  <div className="skill-editor">
-                    <label>
-                      Name
-                      <input
-                        value={skillDraftName}
-                        onChange={(event) => setSkillDraftName(event.target.value)}
-                        maxLength={120}
-                      />
-                    </label>
-                    <label>
-                      Description
-                      <textarea
-                        value={skillDraftDescription}
-                        onChange={(event) => setSkillDraftDescription(event.target.value)}
-                        rows={2}
-                      />
-                    </label>
-                    <strong>Steps</strong>
-                    {skillDraftSteps.map((step, index) => (
-                      <div
-                        className="skill-step-editor"
-                        key={`${skill.id}-step-${index}`}
-                        draggable
-                        onDragStart={() => setSkillDragIndex(index)}
-                        onDragOver={(event) => event.preventDefault()}
-                        onDrop={() => {
-                          if (skillDragIndex === null || skillDragIndex === index) return;
-                          setSkillDraftSteps((previous) => {
-                            const next = previous.slice();
-                            const [moved] = next.splice(skillDragIndex, 1);
-                            if (!moved) return previous;
-                            next.splice(index, 0, moved);
-                            return next;
-                          });
-                          setSkillDragIndex(null);
-                        }}
-                      >
-                        <label>
-                          Step {index + 1}
-                          <textarea
-                            value={step.instruction}
-                            onChange={(event) =>
-                              setSkillDraftSteps((previous) =>
-                                previous.map((item, itemIndex) =>
-                                  itemIndex === index
-                                    ? { ...item, instruction: event.target.value }
-                                    : item,
-                                ),
-                              )
-                            }
-                            rows={3}
-                            required
-                          />
-                        </label>
-                        <div>
-                          <label>
-                            Error handling
-                            <select
-                              value={step.onError}
-                              onChange={(event) =>
-                                setSkillDraftSteps((previous) =>
-                                  previous.map((item, itemIndex) =>
-                                    itemIndex === index
-                                      ? {
-                                          ...item,
-                                          onError: event.target.value as SkillStepDraft["onError"],
-                                        }
-                                      : item,
-                                  ),
-                                )
-                              }
-                            >
-                              <option value="stop">Stop</option>
-                              <option value="retry">Retry up to 3 times</option>
-                              <option value="skip">Skip step</option>
-                              <option value="notify_user">Notify user</option>
-                              <option value="custom_prompt">Use recovery prompt</option>
-                            </select>
-                          </label>
-                          {step.onError === "custom_prompt" && (
-                            <label>
-                              Recovery prompt
-                              <textarea
-                                value={step.customPrompt}
-                                onChange={(event) =>
-                                  setSkillDraftSteps((previous) =>
-                                    previous.map((item, itemIndex) =>
-                                      itemIndex === index
-                                        ? { ...item, customPrompt: event.target.value }
-                                        : item,
-                                    ),
-                                  )
-                                }
-                                rows={3}
-                                maxLength={2000}
-                                required
-                              />
-                            </label>
-                          )}
-                          {(step.onError === "retry" || step.onError === "custom_prompt") && (
-                            <label>
-                              Maximum failed actions (1–10)
-                              <input
-                                type="number"
-                                min={1}
-                                max={10}
-                                step={1}
-                                value={step.maxAttempts}
-                                onChange={(event) =>
-                                  setSkillDraftSteps((previous) =>
-                                    previous.map((item, itemIndex) =>
-                                      itemIndex === index
-                                        ? { ...item, maxAttempts: Number(event.target.value) }
-                                        : item,
-                                    ),
-                                  )
-                                }
-                              />
-                            </label>
-                          )}
-                          <label className="skill-approval-toggle">
-                            <input
-                              type="checkbox"
-                              checked={step.approvalRequired}
-                              onChange={(event) =>
-                                setSkillDraftSteps((previous) =>
-                                  previous.map((item, itemIndex) =>
-                                    itemIndex === index
-                                      ? { ...item, approvalRequired: event.target.checked }
-                                      : item,
-                                  ),
-                                )
-                              }
-                            />
-                            Require approval before this step
-                          </label>
-                        </div>
+              </article>
+              <article className="memory-entry security-policy-card">
+                <h3>Auto Review rules</h3>
+                <p>
+                  Match an exact tool name. “Ask every time” opens the approval dialog for each
+                  call; “Always allow” skips approval for that tool. If several rules match, “Ask
+                  every time” takes precedence.
+                </p>
+                <form className="approval-rule-form" onSubmit={addApprovalRule}>
+                  <div className="approval-rule-field">
+                    <span>Tool name</span>
+                    <TextField.Root
+                      value={approvalToolName}
+                      onChange={(event) => setApprovalToolName(event.target.value)}
+                      placeholder="RunShell or BrowserNavigate"
+                      maxLength={128}
+                      aria-label="Exact tool name"
+                      className="app-field"
+                    />
+                  </div>
+                  <div className="approval-rule-field">
+                    <span>Rule</span>
+                    <Select.Root
+                      value={
+                        approvalRuleMode === "always_allow" || approvalRuleMode === "require"
+                          ? approvalRuleMode
+                          : "require"
+                      }
+                      onValueChange={(value) =>
+                        setApprovalRuleMode(value as AutoReviewRule["mode"])
+                      }
+                    >
+                      <Select.Trigger aria-label="Auto Review action" />
+                      <Select.Content position="popper">
+                        <Select.Item value="require">Ask every time</Select.Item>
+                        <Select.Item value="always_allow">Always allow</Select.Item>
+                      </Select.Content>
+                    </Select.Root>
+                  </div>
+                  <AppButton type="submit" disabled={!approvalToolName.trim()}>
+                    <Plus size={15} aria-hidden="true" />
+                    Add rule
+                  </AppButton>
+                </form>
+                {approvalRules.length ? (
+                  <div className="approval-rule-list">
+                    {approvalRules.map((rule, index) => (
+                      <div className="approval-rule-row" key={`${rule.actionPattern}-${index}`}>
+                        <code>{rule.actionPattern}</code>
+                        <Badge color={rule.mode === "require" ? "amber" : "green"} variant="soft">
+                          {rule.mode === "require" ? "Ask every time" : "Always allow"}
+                        </Badge>
                         <AppButton
                           type="button"
+                          aria-label={`Remove rule ${rule.actionPattern}`}
+                          title="Remove rule"
                           onClick={() =>
-                            setSkillDraftSteps((previous) =>
-                              previous.filter((_, itemIndex) => itemIndex !== index),
+                            setApprovalRules((current) =>
+                              current.filter((_, item) => item !== index),
                             )
                           }
-                          disabled={skillDraftSteps.length < 2}
                         >
-                          Remove step
+                          <Trash2 size={15} aria-hidden="true" />
                         </AppButton>
                       </div>
                     ))}
-                    <div className="memory-actions">
+                  </div>
+                ) : (
+                  <p className="empty-note">No custom rules. The tool defaults will apply.</p>
+                )}
+                <div className="memory-actions">
+                  <AppButton
+                    type="button"
+                    className="primary"
+                    disabled={!token || approvalSaving}
+                    onClick={() => void saveApprovalSettings()}
+                  >
+                    {approvalSaving ? "Saving…" : "Save approval settings"}
+                  </AppButton>
+                </div>
+              </article>
+            </section>
+          )}
+          {workspace === "local" && (
+            <section className="messages memory-view">
+              <h2>Local computer execution</h2>
+              {(
+                [
+                  ["always_confirm", "Always require approval"],
+                  ["always_allow", "Always allow"],
+                  ["never", "Never allow"],
+                ] as const
+              ).map(([value, label]) => (
+                <label key={value} className="skill-approval-toggle choice-card">
+                  <input
+                    type="radio"
+                    name="local-machine-access"
+                    checked={localAccess === value}
+                    onChange={() => void saveLocalAccess(value)}
+                  />
+                  {label}
+                </label>
+              ))}
+              <AppButton type="button" onClick={() => showWorkspace("chat")}>
+                Back to chat
+              </AppButton>
+            </section>
+          )}
+          <Dialog.Root
+            open={pendingLocal !== null}
+            onOpenChange={(open) => {
+              // Keep the approval request visible until the user explicitly allows or blocks it.
+              if (open) return;
+            }}
+          >
+            {pendingLocal && (
+              <Dialog.Content
+                className="local-exec-dialog"
+                maxWidth="460px"
+                onEscapeKeyDown={(event) => event.preventDefault()}
+                onPointerDownOutside={(event) => event.preventDefault()}
+                onInteractOutside={(event) => event.preventDefault()}
+              >
+                <Dialog.Title>Run on this computer?</Dialog.Title>
+                <Dialog.Description>
+                  The agent is asking to run this command on your desktop. Review it before
+                  allowing.
+                </Dialog.Description>
+                <pre>{pendingLocal.command}</pre>
+                <p>{pendingLocal.cwd || "The desktop's default directory"}</p>
+                <label className="skill-approval-toggle">
+                  <input
+                    type="checkbox"
+                    checked={allowLocalSession}
+                    onChange={(event) => setAllowLocalSession(event.target.checked)}
+                  />
+                  Always allow this session
+                </label>
+                <div className="approval-actions">
+                  <AppButton
+                    type="button"
+                    className="primary"
+                    onClick={() => void replyLocal(allowLocalSession ? "allow_session" : "allow")}
+                  >
+                    Run
+                  </AppButton>
+                  <AppButton type="button" className="deny" onClick={() => void replyLocal("deny")}>
+                    Block
+                  </AppButton>
+                </div>
+              </Dialog.Content>
+            )}
+          </Dialog.Root>
+          {screenMode && screenBotId && (
+            <section className="screen-view">
+              <p>
+                {screenMode === "handoff"
+                  ? handoff?.reason
+                  : "Viewing the agent screen. The turn keeps running."}
+              </p>
+              <canvas ref={screenRef} width={1280} height={800} />
+              {screenMode === "handoff" ? (
+                <AppButton type="button" onClick={() => void returnControl()}>
+                  Return to Bot
+                </AppButton>
+              ) : (
+                <AppButton type="button" onClick={() => setScreenMode(null)}>
+                  Close
+                </AppButton>
+              )}
+            </section>
+          )}
+          {workspace === "model" && (
+            <section className="messages memory-view">
+              <h2>Model settings · {bots.find((bot) => bot.id === botId)?.name}</h2>
+              <div className="form-field">
+                <span>Primary provider</span>
+                <AppSelect
+                  aria-label="Primary provider"
+                  value={inferenceProviderId}
+                  onChange={(event) => setInferenceProviderId(event.target.value)}
+                >
+                  <option value="">Account default</option>
+                  {inferenceProviders.map((provider) => (
+                    <option key={provider} value={provider}>
+                      {provider}
+                    </option>
+                  ))}
+                </AppSelect>
+              </div>
+              <label htmlFor="agentos-control-10">
+                Model override (optional)
+                <TextField.Root
+                  id="agentos-control-10"
+                  value={inferenceModel}
+                  onChange={(event) => setInferenceModel(event.target.value)}
+                  placeholder="Use provider default"
+                  maxLength={200}
+                  className="app-field"
+                />
+              </label>
+              <h2>Privacy</h2>
+              <label className="skill-approval-toggle">
+                <input
+                  type="checkbox"
+                  checked={retainData}
+                  onChange={(event) => void saveRetainData(event.target.checked)}
+                />
+                Allow AgentOS to retain conversation data for product improvement
+              </label>
+              <p>
+                Disabling this does not delete existing data. Use Memory → Export and then delete
+                entries to remove stored facts.
+              </p>
+              <div className="memory-actions">
+                <AppButton
+                  type="button"
+                  className="primary"
+                  onClick={() => void saveInferenceSettings()}
+                >
+                  Save model settings
+                </AppButton>
+                <AppButton type="button" onClick={() => showWorkspace("chat")}>
+                  Back to chat
+                </AppButton>
+              </div>
+            </section>
+          )}
+          {workspace === "subagents" ? (
+            <section className="messages memory-view">
+              <div className="memory-toolbar">
+                <div>
+                  <h2>Subagents</h2>
+                  <p className="empty-note">Background tasks started by your agents.</p>
+                </div>
+                <div>
+                  <AppButton type="button" onClick={() => void loadSubagents(false)}>
+                    Refresh
+                  </AppButton>
+                  <AppButton type="button" onClick={() => showWorkspace("chat")}>
+                    Back to chat
+                  </AppButton>
+                </div>
+              </div>
+              {!subagentItems.length && (
+                <p className="empty-note">No background tasks have been started.</p>
+              )}
+              {subagentItems.map((item) => {
+                const active = item.status === "queued" || item.status === "running";
+                return (
+                  <article className="memory-entry subagent-entry" key={item.id}>
+                    <div className="memory-toolbar">
+                      <div>
+                        <span className={`status-pill status-${item.status}`}>{item.status}</span>
+                        <small>Started {new Date(item.createdAt).toLocaleString()}</small>
+                      </div>
+                      <small>
+                        {item.lastProgressAt
+                          ? `Progress ${new Date(item.lastProgressAt).toLocaleString()}`
+                          : "Waiting for its first step"}
+                      </small>
+                    </div>
+                    <h3>Task</h3>
+                    <p>{item.taskDescription}</p>
+                    <small>
+                      Access: {subagentToolLabels(item.allowedTools).join(" · ") || "No tools"}
+                    </small>
+                    {item.stallCount > 0 && (
+                      <p className="empty-note">
+                        {item.stallCount} stall {item.stallCount === 1 ? "event" : "events"}
+                        {item.stallEvents.at(-1)?.reason
+                          ? ` · ${item.stallEvents.at(-1)?.reason}`
+                          : ""}
+                      </p>
+                    )}
+                    {item.result && (
+                      <details>
+                        <summary>Result</summary>
+                        <pre className="subagent-result">{item.result}</pre>
+                      </details>
+                    )}
+                    {item.usage && (
+                      <small>
+                        Tokens: {item.usage.totalTokens.toLocaleString()} total ·{" "}
+                        {item.usage.promptTokens.toLocaleString()} prompt ·{" "}
+                        {item.usage.completionTokens.toLocaleString()} completion
+                      </small>
+                    )}
+                    {active && (
+                      <>
+                        <form
+                          className="subagent-steer-form"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            void steerSubagent(item);
+                          }}
+                        >
+                          <label htmlFor={`subagent-steer-${item.id}`}>Send guidance</label>
+                          <TextArea
+                            id={`subagent-steer-${item.id}`}
+                            value={subagentSteering[item.id] ?? ""}
+                            onChange={(event) =>
+                              setSubagentSteering((current) => ({
+                                ...current,
+                                [item.id]: event.target.value,
+                              }))
+                            }
+                            maxLength={2000}
+                            rows={2}
+                            placeholder="Add context or redirect the task"
+                            className="app-textarea"
+                          />
+                          <div className="memory-actions">
+                            <AppButton type="submit" disabled={!subagentSteering[item.id]?.trim()}>
+                              Send guidance
+                            </AppButton>
+                            <AppButton
+                              type="button"
+                              className="deny"
+                              onClick={() => void cancelSubagent(item)}
+                            >
+                              Cancel task
+                            </AppButton>
+                          </div>
+                        </form>
+                        {item.steeringEvents.length > 0 && (
+                          <details>
+                            <summary>Guidance history ({item.steeringEvents.length})</summary>
+                            <ul>
+                              {item.steeringEvents.map((event, index) => (
+                                <li key={`${event.at}-${index}`}>
+                                  {new Date(event.at).toLocaleString()} · {event.message}
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        )}
+                      </>
+                    )}
+                  </article>
+                );
+              })}
+            </section>
+          ) : workspace === "webhooks" ? (
+            <section className="messages memory-view">
+              <div className="memory-toolbar">
+                <h2>Outbound webhooks</h2>
+                <div>
+                  <AppButton type="button" onClick={() => void loadWebhooks()}>
+                    Refresh
+                  </AppButton>
+                  <AppButton type="button" onClick={() => setWebhookOpen(false)}>
+                    Back to chat
+                  </AppButton>
+                </div>
+              </div>
+              <p className="empty-note">
+                Deliveries are signed with HMAC-SHA256. Terminal delivery history is retained for 30
+                days by default.
+              </p>
+              {newWebhookSecret && (
+                <output className="routine-webhook-setup">
+                  <strong>Save this signing secret now</strong>
+                  <p>AgentOS stores only an encrypted copy and will not show it again.</p>
+                  <code>{newWebhookSecret}</code>
+                  <AppButton type="button" onClick={() => setNewWebhookSecret("")}>
+                    Done
+                  </AppButton>
+                </output>
+              )}
+              <form className="mcp-server-form" onSubmit={(event) => void createWebhook(event)}>
+                <TextField.Root
+                  aria-label="Webhook HTTPS URL"
+                  type="url"
+                  value={webhookUrl}
+                  onChange={(event) => setWebhookUrl(event.target.value)}
+                  placeholder="https://example.com/agentos-events"
+                  required
+                  className="app-field"
+                />
+                <fieldset>
+                  <legend>Events</legend>
+                  {(["turn.settled", "routine.completed", "approval.required"] as const).map(
+                    (eventName) => (
+                      <label key={eventName}>
+                        <input
+                          type="checkbox"
+                          checked={webhookEvents.includes(eventName)}
+                          onChange={(event) =>
+                            setWebhookEvents((current) =>
+                              event.target.checked
+                                ? [...current, eventName]
+                                : current.filter((item) => item !== eventName),
+                            )
+                          }
+                        />
+                        {eventName}
+                      </label>
+                    ),
+                  )}
+                </fieldset>
+                <AppButton type="submit" disabled={!token || webhookEvents.length === 0}>
+                  Create webhook
+                </AppButton>
+              </form>
+              <h3>Subscriptions</h3>
+              {!webhookSubscriptions.length && (
+                <p className="empty-note">No webhook subscriptions.</p>
+              )}
+              {webhookSubscriptions.map((subscription) => (
+                <article className="memory-entry" key={subscription.id}>
+                  <div>
+                    <strong>{subscription.url}</strong>
+                    <small>Created {new Date(subscription.createdAt).toLocaleString()}</small>
+                  </div>
+                  <p>Events: {subscription.events.join(", ")}</p>
+                  <AppButton type="button" onClick={() => void removeWebhook(subscription)}>
+                    Delete subscription
+                  </AppButton>
+                </article>
+              ))}
+              <h3>Recent deliveries</h3>
+              {!webhookDeliveries.length && <p className="empty-note">No deliveries recorded.</p>}
+              {webhookDeliveries.map((delivery) => (
+                <article className="memory-entry" key={delivery.id}>
+                  <div>
+                    <strong>
+                      {delivery.event} · {delivery.status}
+                    </strong>
+                    <small>
+                      {new Date(delivery.createdAt).toLocaleString()} · attempt{" "}
+                      {delivery.attemptCount}
+                    </small>
+                  </div>
+                  <p>
+                    {delivery.lastStatusCode
+                      ? `HTTP ${delivery.lastStatusCode}`
+                      : "No HTTP response"}
+                    {delivery.lastError ? ` · ${delivery.lastError}` : ""}
+                  </p>
+                  {delivery.status === "failed" && (
+                    <AppButton type="button" onClick={() => void retryWebhookDelivery(delivery)}>
+                      Retry delivery
+                    </AppButton>
+                  )}
+                </article>
+              ))}
+            </section>
+          ) : workspace === "connectors" ? (
+            <section className="messages memory-view">
+              <div className="memory-toolbar">
+                <h2>Connectors</h2>
+                <div>
+                  <AppButton type="button" onClick={() => void loadConnectors()}>
+                    Refresh
+                  </AppButton>
+                  <AppButton type="button" onClick={() => setConnectorOpen(false)}>
+                    Back to chat
+                  </AppButton>
+                </div>
+              </div>
+              <div className="connector-grid">
+                {CONNECTOR_CARDS.map((card) => {
+                  const connected = connectorItems.some(
+                    (item) =>
+                      item.service === card.id ||
+                      (card.oauth === "microsoft" && item.service === "microsoft"),
+                  );
+                  return (
+                    <article
+                      className={`memory-entry connector-card connector-card--${card.id} ${connected ? "is-on" : ""}`}
+                      key={card.id}
+                    >
+                      <div className="connector-card-head">
+                        <ConnectorBrandIcon service={card.id} size={28} title={card.label} />
+                        <div>
+                          <strong>{card.label}</strong>
+                          <small>{connected ? "Connected" : "Not connected"}</small>
+                        </div>
+                      </div>
+                      {card.oauth === "microsoft" && (
+                        <p>OneDrive, Outlook, Teams, and SharePoint share one Microsoft sign-in.</p>
+                      )}
+                      <div className="memory-actions">
+                        {connected ? (
+                          <AppButton
+                            type="button"
+                            onClick={() => void disconnectService(card.oauth)}
+                          >
+                            Disconnect
+                          </AppButton>
+                        ) : (
+                          <AppButton type="button" onClick={() => void connectService(card.oauth)}>
+                            Connect
+                          </AppButton>
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+              {connectorItems.map((connector) => (
+                <article className="memory-entry connector-connected-row" key={connector.service}>
+                  <div className="connector-card-head">
+                    <ConnectorBrandIcon service={connector.service} size={24} />
+                    <div>
+                      <strong>{connector.service}</strong>
+                      <small>Connected {new Date(connector.connectedAt).toLocaleString()}</small>
+                    </div>
+                  </div>
+                  <p>Scopes: {connector.scopes.join(", ") || "provider defaults"}</p>
+                  <div className="memory-actions">
+                    <AppButton
+                      type="button"
+                      onClick={() => void disconnectService(connector.service)}
+                    >
+                      Disconnect
+                    </AppButton>
+                  </div>
+                </article>
+              ))}
+              <h3>MCP servers</h3>
+              <p className="empty-note">
+                Connect an HTTPS MCP endpoint with a public hostname. API keys are encrypted before
+                storage.
+              </p>
+              <form className="mcp-server-form" onSubmit={(event) => void addMcpServer(event)}>
+                <TextField.Root
+                  aria-label="MCP server name"
+                  value={mcpName}
+                  onChange={(event) => setMcpName(event.target.value)}
+                  placeholder="Server name"
+                  required
+                  maxLength={120}
+                  className="app-field"
+                />
+                <TextField.Root
+                  aria-label="MCP server URL"
+                  type="url"
+                  value={mcpUrl}
+                  onChange={(event) => setMcpUrl(event.target.value)}
+                  placeholder="https://mcp.example.com"
+                  required
+                  className="app-field"
+                />
+                <TextField.Root
+                  aria-label="MCP API key"
+                  type="password"
+                  autoComplete="new-password"
+                  value={mcpApiKey}
+                  onChange={(event) => setMcpApiKey(event.target.value)}
+                  placeholder="Bearer API key (optional)"
+                  className="app-field"
+                />
+                <AppButton type="submit" disabled={!token}>
+                  Add MCP server
+                </AppButton>
+              </form>
+              {!mcpItems.length && <p className="empty-note">No MCP servers configured.</p>}
+              {mcpItems.map((server) => (
+                <article className="memory-entry" key={server.id}>
+                  <div>
+                    <strong>{server.name}</strong>
+                    <small>
+                      {server.lastHealth} ·{" "}
+                      {server.lastCheckedAt
+                        ? `checked ${new Date(server.lastCheckedAt).toLocaleString()}`
+                        : "not checked"}
+                    </small>
+                  </div>
+                  <p>{server.url}</p>
+                  {server.lastError && <output>{server.lastError}</output>}
+                  <p>{server.cachedTools?.length ?? 0} discovered tools</p>
+                  <div className="memory-actions">
+                    <AppButton type="button" onClick={() => void removeMcpServer(server)}>
+                      Remove
+                    </AppButton>
+                  </div>
+                </article>
+              ))}
+            </section>
+          ) : workspace === "automation" ? (
+            <section className="messages memory-view">
+              <div className="memory-toolbar">
+                <div>
+                  <h2>Skills and routines</h2>
+                  <p className="page-subtitle">
+                    Procedures this workspace can run on a schedule or an event.
+                  </p>
+                </div>
+                <div className="toolbar-actions">
+                  <AppButton type="button" onClick={() => void toggleRecording()} disabled={!botId}>
+                    {recording ? "Stop recording" : "Record browser task"}
+                  </AppButton>
+                  <AppButton type="button" className="primary" onClick={openSkillCreate}>
+                    New skill
+                  </AppButton>
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger>
+                      <Button type="button" variant="ghost" aria-label="Create a routine">
+                        New routine
+                      </Button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Content
+                      align="end"
+                      sideOffset={6}
+                      className="routine-menu-content"
+                    >
+                      <DropdownMenu.Item
+                        disabled={!botId || !skillItems.length}
+                        onSelect={() => openRoutineCreate("cron")}
+                      >
+                        On a schedule
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item
+                        disabled={!botId || !skillItems.length}
+                        onSelect={() => openRoutineCreate("webhook")}
+                      >
+                        From a webhook
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item
+                        disabled={
+                          !botId ||
+                          !skillItems.length ||
+                          bots.filter((bot) => bot.id !== botId).length === 0
+                        }
+                        onSelect={() => openRoutineCreate("inter_bot_message")}
+                      >
+                        When another bot messages
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item
+                        disabled={!botId || !skillItems.length}
+                        onSelect={() => openRoutineCreate("file_change")}
+                      >
+                        When a file changes
+                      </DropdownMenu.Item>
+                      <DropdownMenu.Item
+                        disabled={!botId || !skillItems.length}
+                        onSelect={() => beginConnectorRoutine()}
+                      >
+                        When a Gmail or Calendar event arrives
+                      </DropdownMenu.Item>
+                    </DropdownMenu.Content>
+                  </DropdownMenu.Root>
+                  <AppButton type="button" onClick={() => showWorkspace("chat")}>
+                    Back to chat
+                  </AppButton>
+                </div>
+              </div>
+              {routineWebhookSetup && (
+                <output className="routine-webhook-setup">
+                  <strong>Save this webhook secret now</strong>
+                  <p>AgentOS stores only its hash, so it cannot be shown again.</p>
+                  <code>POST {routineWebhookSetup.url}</code>
+                  <code>X-Routine-Secret: {routineWebhookSetup.secret}</code>
+                  <AppButton type="button" onClick={() => setRoutineWebhookSetup(null)}>
+                    Done
+                  </AppButton>
+                </output>
+              )}
+              {newConnectorRoutineOpen && (
+                <form
+                  className="skill-editor"
+                  onSubmit={(event) => void saveConnectorRoutine(event)}
+                >
+                  <h3>New connector routine</h3>
+                  <label htmlFor="agentos-control-11">
+                    Routine name
+                    <TextField.Root
+                      id="agentos-control-11"
+                      value={routineDraftName}
+                      onChange={(event) => setRoutineDraftName(event.target.value)}
+                      maxLength={120}
+                      required
+                      className="app-field"
+                    />
+                  </label>
+                  <div className="form-field">
+                    <span>Bot</span>
+                    <AppSelect
+                      aria-label="Bot"
+                      value={routineDraftBotId}
+                      onChange={(event) => {
+                        const nextBotId = event.target.value;
+                        setRoutineDraftBotId(nextBotId);
+                        const compatibleSkills = skillItems.filter(
+                          (skill) => !skill.ownerBotId || skill.ownerBotId === nextBotId,
+                        );
+                        setRoutineDraftSkillId(compatibleSkills[0]?.id ?? "");
+                      }}
+                    >
+                      {bots
+                        .filter((bot) => bot.role !== "subagent")
+                        .map((bot) => (
+                          <option key={bot.id} value={bot.id}>
+                            {bot.name}
+                          </option>
+                        ))}
+                    </AppSelect>
+                  </div>
+                  <div className="form-field">
+                    <span>Skill</span>
+                    <AppSelect
+                      aria-label="Skill"
+                      value={routineDraftSkillId}
+                      onChange={(event) => setRoutineDraftSkillId(event.target.value)}
+                    >
+                      {skillItems
+                        .filter(
+                          (skill) => !skill.ownerBotId || skill.ownerBotId === routineDraftBotId,
+                        )
+                        .map((skill) => (
+                          <option key={skill.id} value={skill.id}>
+                            {skill.name}
+                          </option>
+                        ))}
+                    </AppSelect>
+                  </div>
+                  <div className="form-field form-field--connector">
+                    <span>Connector</span>
+                    <div className="connector-select-row">
+                      <AppSelect
+                        aria-label="Connector"
+                        value={routineDraftConnectorService}
+                        onChange={(event) =>
+                          setRoutineDraftConnectorService(
+                            event.target.value as "gmail" | "google-calendar",
+                          )
+                        }
+                      >
+                        <option value="gmail">Gmail</option>
+                        <option value="google-calendar">Google Calendar</option>
+                      </AppSelect>
+                      <ConnectorBrandIcon
+                        service={routineDraftConnectorService}
+                        size={20}
+                        className="connector-brand-icon connector-brand-icon--inline"
+                      />
+                    </div>
+                  </div>
+                  {routineDraftConnectorService === "gmail" && (
+                    <label htmlFor="agentos-control-15">
+                      Sender email (optional)
+                      <TextField.Root
+                        id="agentos-control-15"
+                        type="email"
+                        value={routineDraftConnectorSender}
+                        onChange={(event) => setRoutineDraftConnectorSender(event.target.value)}
+                        maxLength={200}
+                        placeholder="name@example.com"
+                        className="app-field"
+                      />
+                    </label>
+                  )}
+                  <label htmlFor="agentos-control-16">
+                    {routineDraftConnectorService === "gmail"
+                      ? "Subject contains (optional)"
+                      : "Event title contains"}
+                    <TextField.Root
+                      id="agentos-control-16"
+                      value={routineDraftConnectorSubject}
+                      onChange={(event) => setRoutineDraftConnectorSubject(event.target.value)}
+                      maxLength={200}
+                      placeholder="Project update"
+                      className="app-field"
+                    />
+                  </label>
+                  {routineDraftConnectorService === "gmail" ? (
+                    <label htmlFor="agentos-control-17">
+                      Gmail search query (optional)
+                      <TextField.Root
+                        id="agentos-control-17"
+                        value={routineDraftConnectorQuery}
+                        onChange={(event) => setRoutineDraftConnectorQuery(event.target.value)}
+                        maxLength={200}
+                        placeholder="has:attachment"
+                        className="app-field"
+                      />
+                    </label>
+                  ) : (
+                    <label htmlFor="agentos-control-18">
+                      Calendar ID
+                      <TextField.Root
+                        id="agentos-control-18"
+                        value={routineDraftCalendarId}
+                        onChange={(event) => setRoutineDraftCalendarId(event.target.value)}
+                        maxLength={200}
+                        placeholder="primary"
+                        className="app-field"
+                      />
+                    </label>
+                  )}
+                  <div className="form-field">
+                    <span>When a run fails</span>
+                    <AppSelect
+                      aria-label="When a run fails"
+                      value={routineDraftOnError}
+                      onChange={(event) =>
+                        setRoutineDraftOnError(
+                          event.target.value as "notify_user" | "retry" | "pause",
+                        )
+                      }
+                    >
+                      <option value="pause">Pause the routine</option>
+                      <option value="notify_user">Notify you</option>
+                      <option value="retry">Retry</option>
+                    </AppSelect>
+                  </div>
+                  <p>
+                    Connect the selected Google service first. The initial poll records a baseline;
+                    only new matching events trigger runs.
+                  </p>
+                  <div className="memory-actions">
+                    <AppButton type="submit" className="primary">
+                      Create routine
+                    </AppButton>
+                    <AppButton type="button" onClick={() => setNewConnectorRoutineOpen(false)}>
+                      Cancel
+                    </AppButton>
+                  </div>
+                </form>
+              )}
+              {taughtDraft && (
+                <form
+                  className="skill-editor"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void saveTaughtDraft();
+                  }}
+                >
+                  <strong>Review skill draft</strong>
+                  <label htmlFor="agentos-control-20">
+                    Name
+                    <TextField.Root
+                      id="agentos-control-20"
+                      value={taughtDraft.name}
+                      onChange={(event) =>
+                        setTaughtDraft({ ...taughtDraft, name: event.target.value })
+                      }
+                      maxLength={120}
+                      className="app-field"
+                    />
+                  </label>
+                  <label htmlFor="agentos-control-21">
+                    Description
+                    <TextArea
+                      id="agentos-control-21"
+                      value={taughtDraft.description}
+                      onChange={(event) =>
+                        setTaughtDraft({ ...taughtDraft, description: event.target.value })
+                      }
+                      rows={2}
+                      maxLength={2000}
+                      className="app-textarea"
+                    />
+                  </label>
+                  {taughtDraft.steps.map((step, index) => (
+                    <div className="skill-step-editor" key={step.id}>
+                      <label htmlFor="agentos-control-22">
+                        Step {index + 1}
+                        <TextArea
+                          id="agentos-control-22"
+                          value={step.instruction}
+                          onChange={(event) => {
+                            const steps = taughtDraft.steps.slice();
+                            const current = steps[index];
+                            if (!current) return;
+                            steps[index] = { ...current, instruction: event.target.value };
+                            setTaughtDraft({ ...taughtDraft, steps });
+                          }}
+                          rows={2}
+                          maxLength={4000}
+                          className="app-textarea"
+                        />
+                      </label>
+                      <label className="skill-approval-toggle">
+                        <input
+                          type="checkbox"
+                          checked={step.approvalRequired}
+                          onChange={(event) => {
+                            const steps = taughtDraft.steps.slice();
+                            const current = steps[index];
+                            if (!current) return;
+                            steps[index] = { ...current, approvalRequired: event.target.checked };
+                            setTaughtDraft({ ...taughtDraft, steps });
+                          }}
+                        />
+                        Require approval before this step
+                      </label>
                       <AppButton
                         type="button"
                         onClick={() =>
-                          setSkillDraftSteps((previous) => [
-                            ...previous,
+                          setTaughtDraft({
+                            ...taughtDraft,
+                            steps: taughtDraft.steps.filter((_, stepIndex) => stepIndex !== index),
+                          })
+                        }
+                        disabled={taughtDraft.steps.length < 2}
+                      >
+                        Remove step
+                      </AppButton>
+                    </div>
+                  ))}
+                  <div className="memory-actions">
+                    <AppButton
+                      type="button"
+                      onClick={() =>
+                        setTaughtDraft({
+                          ...taughtDraft,
+                          steps: [
+                            ...taughtDraft.steps,
                             {
+                              id: crypto.randomUUID(),
                               instruction: "",
                               approvalRequired: false,
                               onError: "stop",
                               maxAttempts: 3,
                               customPrompt: "",
                             },
-                          ])
-                        }
-                      >
-                        Add step
-                      </AppButton>
-                      <AppButton type="button" onClick={() => void saveSkill()}>
-                        Save version
-                      </AppButton>
-                      <AppButton type="button" onClick={() => setEditingSkillId("")}>
-                        Cancel
-                      </AppButton>
-                    </div>
-                  </div>
-                )}
-                <div className="memory-actions">
-                  <AppButton
-                    type="button"
-                    onClick={() =>
-                      editingSkillId === skill.id ? setEditingSkillId("") : editSkill(skill)
-                    }
-                  >
-                    {editingSkillId === skill.id ? "Close editor" : "Edit"}
-                  </AppButton>
-                  <AppButton type="button" onClick={() => void testSkill(skill)}>
-                    Test skill
-                  </AppButton>
-                  {skillTests[skill.id] && (
-                    <AppButton type="button" onClick={() => void refreshSkillTest(skill)}>
-                      Test {skillTests[skill.id]?.status}
+                          ],
+                        })
+                      }
+                      disabled={taughtDraft.steps.length >= 20}
+                    >
+                      Add step
                     </AppButton>
-                  )}
-                  <AppButton type="button" onClick={() => void deleteSkill(skill)}>
-                    Delete
-                  </AppButton>
-                  <select
-                    aria-label={`Copy ${skill.name} to another bot`}
-                    value=""
-                    onChange={(event) => {
-                      if (event.target.value) void assignSkill(skill, event.target.value);
-                    }}
-                  >
-                    <option value="">Copy to bot…</option>
-                    {bots
-                      .filter((bot) => bot.id !== skill.ownerBotId)
-                      .map((bot) => (
-                        <option key={bot.id} value={bot.id}>
-                          {bot.name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-              </article>
-            ))}
-            <h3>Routines</h3>
-            {!routineItems.length && <p className="empty-note">No routines configured.</p>}
-            {routineItems.map((routine) => (
-              <article className="memory-entry" key={routine.id}>
-                <div>
-                  <strong>{routine.name}</strong>
-                  <small>
-                    {routineTriggerLabel(routine.trigger, bots)} ·{" "}
-                    {routine.enabled ? "enabled" : "paused"}
-                  </small>
-                </div>
-                <p>
-                  Bot: {bots.find((bot) => bot.id === routine.botId)?.name ?? "Unknown"} · Skill:{" "}
-                  {skillItems.find((skill) => skill.id === routine.skillId)?.name ?? "Unknown"}
-                </p>
-                {editingRoutineId === routine.id && (
-                  <div className="skill-editor">
-                    <label>
-                      Routine name
-                      <input
-                        value={routineDraftName}
-                        onChange={(event) => setRoutineDraftName(event.target.value)}
-                        maxLength={120}
-                      />
-                    </label>
-                    <label>
-                      Bot
-                      <select
-                        value={routineDraftBotId}
-                        onChange={(event) => {
-                          const nextBotId = event.target.value;
-                          setRoutineDraftBotId(nextBotId);
-                          const compatibleSkills = skillItems.filter(
-                            (skill) => !skill.ownerBotId || skill.ownerBotId === nextBotId,
-                          );
-                          if (!compatibleSkills.some((skill) => skill.id === routineDraftSkillId))
-                            setRoutineDraftSkillId(compatibleSkills[0]?.id ?? "");
-                        }}
-                      >
-                        {bots
-                          .filter((bot) => bot.role !== "subagent")
-                          .map((bot) => (
-                            <option key={bot.id} value={bot.id}>
-                              {bot.name}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-                    <label>
-                      Skill
-                      <select
-                        value={routineDraftSkillId}
-                        onChange={(event) => setRoutineDraftSkillId(event.target.value)}
-                      >
-                        {skillItems
-                          .filter(
-                            (skill) => !skill.ownerBotId || skill.ownerBotId === routineDraftBotId,
-                          )
-                          .map((skill) => (
-                            <option key={skill.id} value={skill.id}>
-                              {skill.name}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-                    {routine.trigger.type === "cron" && (
-                      <>
-                        <label>
-                          Five-field cron schedule
-                          <input
-                            value={routineDraftSchedule}
-                            onChange={(event) => setRoutineDraftSchedule(event.target.value)}
-                            placeholder="0 9 * * *"
-                          />
-                        </label>
-                        <p>{cronPreview(routineDraftSchedule)}</p>
-                      </>
-                    )}
-                    {routine.trigger.type === "file_change" && (
-                      <label>
-                        Workspace path
-                        <input
-                          value={routineDraftPath}
-                          onChange={(event) => setRoutineDraftPath(event.target.value)}
-                          placeholder="/home/agent"
+                    <AppButton type="submit">Save skill</AppButton>
+                    <AppButton type="button" onClick={() => setTaughtDraft(null)}>
+                      Discard draft
+                    </AppButton>
+                  </div>
+                </form>
+              )}
+              <h3>Skills</h3>
+              {!skillItems.length && <p className="empty-note">No skills configured.</p>}
+              {skillItems.map((skill) => (
+                <article className="memory-entry" key={skill.id}>
+                  <strong>{skill.name}</strong>
+                  <p>
+                    Version {skill.version ?? 1} · {skill.steps.length} steps
+                    {skill.description ? ` · ${skill.description}` : ""}
+                  </p>
+                  {editingSkillId === skill.id && (
+                    <div className="skill-editor">
+                      <label htmlFor="agentos-control-23">
+                        Name
+                        <TextField.Root
+                          id="agentos-control-23"
+                          value={skillDraftName}
+                          onChange={(event) => setSkillDraftName(event.target.value)}
+                          maxLength={120}
+                          className="app-field"
                         />
                       </label>
-                    )}
-                    {routine.trigger.type === "connector_event" && (
-                      <>
-                        <label>
-                          Connector
-                          <select
-                            value={routineDraftConnectorService}
-                            onChange={(event) =>
-                              setRoutineDraftConnectorService(
-                                event.target.value as "gmail" | "google-calendar",
+                      <label htmlFor="agentos-control-24">
+                        Description
+                        <TextArea
+                          id="agentos-control-24"
+                          value={skillDraftDescription}
+                          onChange={(event) => setSkillDraftDescription(event.target.value)}
+                          rows={2}
+                          className="app-textarea"
+                        />
+                      </label>
+                      <strong>Steps</strong>
+                      {skillDraftSteps.map((step, index) => (
+                        <div
+                          className="skill-step-editor"
+                          key={`${skill.id}-step-${index}`}
+                          draggable
+                          onDragStart={() => setSkillDragIndex(index)}
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={() => {
+                            if (skillDragIndex === null || skillDragIndex === index) return;
+                            setSkillDraftSteps((previous) => {
+                              const next = previous.slice();
+                              const [moved] = next.splice(skillDragIndex, 1);
+                              if (!moved) return previous;
+                              next.splice(index, 0, moved);
+                              return next;
+                            });
+                            setSkillDragIndex(null);
+                          }}
+                        >
+                          <label htmlFor="agentos-control-25">
+                            Step {index + 1}
+                            <TextArea
+                              id="agentos-control-25"
+                              value={step.instruction}
+                              onChange={(event) =>
+                                setSkillDraftSteps((previous) =>
+                                  previous.map((item, itemIndex) =>
+                                    itemIndex === index
+                                      ? { ...item, instruction: event.target.value }
+                                      : item,
+                                  ),
+                                )
+                              }
+                              rows={3}
+                              required
+                              className="app-textarea"
+                            />
+                          </label>
+                          <div>
+                            <div className="form-field">
+                              <span>Error handling</span>
+                              <AppSelect
+                                aria-label="Error handling"
+                                value={step.onError}
+                                onChange={(event) =>
+                                  setSkillDraftSteps((previous) =>
+                                    previous.map((item, itemIndex) =>
+                                      itemIndex === index
+                                        ? {
+                                            ...item,
+                                            onError: event.target
+                                              .value as SkillStepDraft["onError"],
+                                          }
+                                        : item,
+                                    ),
+                                  )
+                                }
+                              >
+                                <option value="stop">Stop</option>
+                                <option value="retry">Retry up to 3 times</option>
+                                <option value="skip">Skip step</option>
+                                <option value="notify_user">Notify user</option>
+                                <option value="custom_prompt">Use recovery prompt</option>
+                              </AppSelect>
+                            </div>
+                            {step.onError === "custom_prompt" && (
+                              <label htmlFor="agentos-control-27">
+                                Recovery prompt
+                                <TextArea
+                                  id="agentos-control-27"
+                                  value={step.customPrompt}
+                                  onChange={(event) =>
+                                    setSkillDraftSteps((previous) =>
+                                      previous.map((item, itemIndex) =>
+                                        itemIndex === index
+                                          ? { ...item, customPrompt: event.target.value }
+                                          : item,
+                                      ),
+                                    )
+                                  }
+                                  rows={3}
+                                  maxLength={2000}
+                                  required
+                                  className="app-textarea"
+                                />
+                              </label>
+                            )}
+                            {(step.onError === "retry" || step.onError === "custom_prompt") && (
+                              <label htmlFor="agentos-control-28">
+                                Maximum failed actions (1–10)
+                                <TextField.Root
+                                  id="agentos-control-28"
+                                  type="number"
+                                  min={1}
+                                  max={10}
+                                  step={1}
+                                  value={step.maxAttempts}
+                                  onChange={(event) =>
+                                    setSkillDraftSteps((previous) =>
+                                      previous.map((item, itemIndex) =>
+                                        itemIndex === index
+                                          ? { ...item, maxAttempts: Number(event.target.value) }
+                                          : item,
+                                      ),
+                                    )
+                                  }
+                                  className="app-field"
+                                />
+                              </label>
+                            )}
+                            <label className="skill-approval-toggle">
+                              <input
+                                type="checkbox"
+                                checked={step.approvalRequired}
+                                onChange={(event) =>
+                                  setSkillDraftSteps((previous) =>
+                                    previous.map((item, itemIndex) =>
+                                      itemIndex === index
+                                        ? { ...item, approvalRequired: event.target.checked }
+                                        : item,
+                                    ),
+                                  )
+                                }
+                              />
+                              Require approval before this step
+                            </label>
+                          </div>
+                          <AppButton
+                            type="button"
+                            onClick={() =>
+                              setSkillDraftSteps((previous) =>
+                                previous.filter((_, itemIndex) => itemIndex !== index),
                               )
                             }
+                            disabled={skillDraftSteps.length < 2}
                           >
-                            <option value="gmail">Gmail</option>
-                            <option value="google-calendar">Google Calendar</option>
-                          </select>
-                        </label>
-                        {routineDraftConnectorService === "gmail" && (
-                          <label>
-                            Sender email (optional)
-                            <input
-                              type="email"
-                              value={routineDraftConnectorSender}
-                              onChange={(event) =>
-                                setRoutineDraftConnectorSender(event.target.value)
-                              }
-                              maxLength={200}
-                              placeholder="name@example.com"
-                            />
-                          </label>
-                        )}
-                        <label>
-                          {routineDraftConnectorService === "gmail"
-                            ? "Subject contains (optional)"
-                            : "Event title contains"}
-                          <input
-                            value={routineDraftConnectorSubject}
-                            onChange={(event) =>
-                              setRoutineDraftConnectorSubject(event.target.value)
-                            }
-                            maxLength={200}
-                            placeholder="Project update"
-                          />
-                        </label>
-                        {routineDraftConnectorService === "gmail" ? (
-                          <label>
-                            Gmail search query (optional)
-                            <input
-                              value={routineDraftConnectorQuery}
-                              onChange={(event) =>
-                                setRoutineDraftConnectorQuery(event.target.value)
-                              }
-                              maxLength={200}
-                              placeholder="has:attachment"
-                            />
-                          </label>
-                        ) : (
-                          <label>
-                            Calendar ID
-                            <input
-                              value={routineDraftCalendarId}
-                              onChange={(event) => setRoutineDraftCalendarId(event.target.value)}
-                              maxLength={200}
-                              placeholder="primary"
-                            />
-                          </label>
-                        )}
-                        <p>Choose a filter so the routine only runs for matching events.</p>
-                      </>
-                    )}
-                    <label>
-                      When a run fails
-                      <select
-                        value={routineDraftOnError}
-                        onChange={(event) =>
-                          setRoutineDraftOnError(
-                            event.target.value as "notify_user" | "retry" | "pause",
-                          )
-                        }
-                      >
-                        <option value="pause">Pause the routine</option>
-                        <option value="notify_user">Notify you</option>
-                        <option value="retry">Retry</option>
-                      </select>
-                    </label>
-                    {routine.trigger.type === "inter_bot_message" && (
-                      <label>
-                        Sender bot filter
-                        <select
-                          value={routineDraftSenderBotId}
-                          onChange={(event) => setRoutineDraftSenderBotId(event.target.value)}
+                            Remove step
+                          </AppButton>
+                        </div>
+                      ))}
+                      <div className="memory-actions">
+                        <AppButton
+                          type="button"
+                          onClick={() =>
+                            setSkillDraftSteps((previous) => [
+                              ...previous,
+                              {
+                                instruction: "",
+                                approvalRequired: false,
+                                onError: "stop",
+                                maxAttempts: 3,
+                                customPrompt: "",
+                              },
+                            ])
+                          }
                         >
-                          <option value="">Any bot</option>
+                          Add step
+                        </AppButton>
+                        <AppButton type="button" onClick={() => void saveSkill()}>
+                          Save version
+                        </AppButton>
+                        <AppButton type="button" onClick={() => setEditingSkillId("")}>
+                          Cancel
+                        </AppButton>
+                      </div>
+                    </div>
+                  )}
+                  <div className="memory-actions">
+                    <AppButton
+                      type="button"
+                      onClick={() =>
+                        editingSkillId === skill.id ? setEditingSkillId("") : editSkill(skill)
+                      }
+                    >
+                      {editingSkillId === skill.id ? "Close editor" : "Edit"}
+                    </AppButton>
+                    <AppButton type="button" onClick={() => void testSkill(skill)}>
+                      Test skill
+                    </AppButton>
+                    {skillTests[skill.id] && (
+                      <AppButton type="button" onClick={() => void refreshSkillTest(skill)}>
+                        Test {skillTests[skill.id]?.status}
+                      </AppButton>
+                    )}
+                    <AppButton type="button" onClick={() => void deleteSkill(skill)}>
+                      Delete
+                    </AppButton>
+                    <AppSelect
+                      aria-label={`Copy ${skill.name} to another bot`}
+                      value=""
+                      onChange={(event) => {
+                        if (event.target.value) void assignSkill(skill, event.target.value);
+                      }}
+                    >
+                      <option value="">Copy to bot…</option>
+                      {bots
+                        .filter((bot) => bot.id !== skill.ownerBotId)
+                        .map((bot) => (
+                          <option key={bot.id} value={bot.id}>
+                            {bot.name}
+                          </option>
+                        ))}
+                    </AppSelect>
+                  </div>
+                </article>
+              ))}
+              <h3>Routines</h3>
+              {!routineItems.length && <p className="empty-note">No routines configured.</p>}
+              {routineItems.map((routine) => (
+                <article className="memory-entry" key={routine.id}>
+                  <div>
+                    <strong>{routine.name}</strong>
+                    <small>
+                      {routineTriggerLabel(routine.trigger, bots)} ·{" "}
+                      {routine.enabled ? "enabled" : "paused"}
+                    </small>
+                  </div>
+                  <p>
+                    Bot: {bots.find((bot) => bot.id === routine.botId)?.name ?? "Unknown"} · Skill:{" "}
+                    {skillItems.find((skill) => skill.id === routine.skillId)?.name ?? "Unknown"}
+                  </p>
+                  {editingRoutineId === routine.id && (
+                    <div className="skill-editor">
+                      <label htmlFor="agentos-control-29">
+                        Routine name
+                        <TextField.Root
+                          id="agentos-control-29"
+                          value={routineDraftName}
+                          onChange={(event) => setRoutineDraftName(event.target.value)}
+                          maxLength={120}
+                          className="app-field"
+                        />
+                      </label>
+                      <div className="form-field">
+                        <span>Bot</span>
+                        <AppSelect
+                          aria-label="Bot"
+                          value={routineDraftBotId}
+                          onChange={(event) => {
+                            const nextBotId = event.target.value;
+                            setRoutineDraftBotId(nextBotId);
+                            const compatibleSkills = skillItems.filter(
+                              (skill) => !skill.ownerBotId || skill.ownerBotId === nextBotId,
+                            );
+                            if (!compatibleSkills.some((skill) => skill.id === routineDraftSkillId))
+                              setRoutineDraftSkillId(compatibleSkills[0]?.id ?? "");
+                          }}
+                        >
                           {bots
-                            .filter(
-                              (bot) => bot.id !== routineDraftBotId && bot.role !== "subagent",
-                            )
+                            .filter((bot) => bot.role !== "subagent")
                             .map((bot) => (
                               <option key={bot.id} value={bot.id}>
                                 {bot.name}
                               </option>
                             ))}
-                        </select>
-                      </label>
-                    )}
-                    <div className="memory-actions">
-                      <AppButton type="button" onClick={() => void saveRoutineEdit(routine)}>
-                        Save routine
-                      </AppButton>
-                      <AppButton type="button" onClick={() => setEditingRoutineId("")}>
-                        Cancel
-                      </AppButton>
-                    </div>
-                  </div>
-                )}
-                <p>
-                  Last run:{" "}
-                  {routine.lastTriggeredAt
-                    ? new Date(routine.lastTriggeredAt).toLocaleString()
-                    : "never"}
-                </p>
-                {routine.trigger.type === "cron" && (
-                  <p>
-                    Next run:{" "}
-                    {routine.nextRunAt
-                      ? new Date(routine.nextRunAt).toLocaleString()
-                      : "not scheduled"}
-                    {routine.cronTimezone ? ` (${routine.cronTimezone})` : ""}
-                  </p>
-                )}
-                {routine.trigger.type === "webhook" && (
-                  <p>Webhook: POST {`${baseUrl.replace(/\/$/, "")}/v1/webhooks/${routine.id}`}</p>
-                )}
-                {routineHistory[routine.id]?.slice(0, 20).map((run) => (
-                  <details key={run.id}>
-                    <summary>
-                      {new Date(run.triggeredAt).toLocaleString()} · {run.status}
-                      {run.durationMs ? ` · ${run.durationMs}ms` : ""}
-                    </summary>
-                    <p>{run.inputSummary}</p>
-                    <p>{run.outputSummary || run.errorMessage || "No result summary"}</p>
-                  </details>
-                ))}
-                <div className="memory-actions">
-                  <AppButton type="button" onClick={() => editRoutine(routine)}>
-                    Edit
-                  </AppButton>
-                  <AppButton
-                    type="button"
-                    onClick={() => void updateRoutine(routine, { test: true })}
-                  >
-                    Test run
-                  </AppButton>
-                  <AppButton type="button" onClick={() => void loadRoutineHistory(routine)}>
-                    History
-                  </AppButton>
-                  <AppButton
-                    type="button"
-                    onClick={() => void updateRoutine(routine, { enabled: !routine.enabled })}
-                  >
-                    {routine.enabled ? "Pause" : "Resume"}
-                  </AppButton>
-                  <AppButton
-                    type="button"
-                    onClick={() => void updateRoutine(routine, { delete: true })}
-                  >
-                    Delete
-                  </AppButton>
-                </div>
-              </article>
-            ))}
-          </section>
-        ) : workspace === "memory" ? (
-          <section className="messages memory-view">
-            <div className="memory-toolbar">
-              <h2>Memory</h2>
-              <div>
-                <AppButton type="button" onClick={() => void loadMemories()}>
-                  Refresh
-                </AppButton>
-                <AppButton type="button" onClick={() => void exportMemories()}>
-                  Export JSON
-                </AppButton>
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
-                </AppButton>
-              </div>
-            </div>
-            {!!memoryReviewSuggestions.length && (
-              <section aria-labelledby="memory-review-heading">
-                <h3 id="memory-review-heading">Suggested memory changes</h3>
-                <p className="empty-note">
-                  Review each change. Updates and deletions are applied only after you accept.
-                </p>
-                {memoryReviewSuggestions.map((suggestion) => (
-                  <article className="memory-entry" key={suggestion.id}>
-                    <small>
-                      {suggestion.action === "delete" ? "Possible removal" : "Possible correction"} ·{" "}
-                      {new Date(suggestion.createdAt).toLocaleString()}
-                    </small>
-                    <p>
-                      <strong>Saved memory</strong>
-                      <br />
-                      {suggestion.existingContent}
-                    </p>
-                    {suggestion.action === "update" && suggestion.proposedContent && (
-                      <p>
-                        <strong>Suggested replacement</strong>
-                        <br />
-                        {suggestion.proposedContent}
-                      </p>
-                    )}
-                    {suggestion.action === "delete" && (
-                      <p>
-                        <strong>Why it was suggested</strong>
-                        <br />
-                        {suggestion.reason || "The latest conversation may indicate this fact is no longer valid."}
-                      </p>
-                    )}
-                    <div className="memory-actions">
-                      <AppButton
-                        type="button"
-                        onClick={() => void resolveMemoryReview(suggestion, "accept")}
-                      >
-                        {suggestion.action === "delete" ? "Delete memory" : "Accept update"}
-                      </AppButton>
-                      <AppButton
-                        type="button"
-                        onClick={() => void resolveMemoryReview(suggestion, "reject")}
-                      >
-                        Dismiss
-                      </AppButton>
-                    </div>
-                  </article>
-                ))}
-              </section>
-            )}
-            {!memoryEntries.length && <p className="empty-note">No saved memories for this bot.</p>}
-            {memoryEntries.map((memory) => (
-              <article className="memory-entry" key={memory.id}>
-                <div>
-                  <span className="memory-scope">{memory.scope}</span>
-                  <small>
-                    {memory.source} · updated {new Date(memory.updatedAt).toLocaleString()}
-                    {memory.staleAfter
-                      ? ` · stale after ${new Date(memory.staleAfter).toLocaleString()}`
-                      : " · no expiry"}
-                  </small>
-                </div>
-                <p>{memory.content}</p>
-                <div className="memory-actions">
-                  <AppButton type="button" onClick={() => void loadMemoryEvidence(memory)}>
-                    {memoryEvidence[memory.id] ? "Hide evidence" : "Evidence"}
-                  </AppButton>
-                  <AppButton type="button" onClick={() => void editMemory(memory)}>
-                    Edit
-                  </AppButton>
-                  <AppButton type="button" onClick={() => void deleteMemory(memory)}>
-                    Delete
-                  </AppButton>
-                </div>
-                {memoryEvidence[memory.id]?.length ? (
-                  <ul>
-                    {(memoryEvidence[memory.id] ?? []).map((entry) => (
-                      <li key={entry.id}>
-                        Supported by turn {entry.turnId} ·{" "}
-                        {new Date(entry.createdAt).toLocaleString()}
-                      </li>
-                    ))}
-                  </ul>
-                ) : memoryEvidence[memory.id] ? (
-                  <p className="empty-note">No automatic extraction evidence is recorded.</p>
-                ) : null}
-              </article>
-            ))}
-          </section>
-        ) : workspace === "chat" ? (
-          <div className="messages" ref={scrollRef}>
-            {!items.length && (
-              <div className="welcome">
-                <div className="welcome-icon">
-                  <Sparkles className="glyph" aria-hidden="true" />
-                </div>
-                <h1>{selectedBot ? `Message ${selectedBot.name}` : "What can I help with?"}</h1>
-                <p>
-                  Send a task to the selected agent. Tool activity, files, and approval requests
-                  stay in this conversation.
-                </p>
-                <div className="suggestion-row">
-                  {[
-                    "Summarize what you can do",
-                    "Check my connected accounts",
-                    "Plan the next routine",
-                  ].map((suggestion) => (
-                    <AppButton
-                      key={suggestion}
-                      type="button"
-                      disabled={!botId}
-                      onClick={() => {
-                        setDraft(suggestion);
-                        composerRef.current?.focus();
-                      }}
-                    >
-                      {suggestion}
-                    </AppButton>
-                  ))}
-                </div>
-              </div>
-            )}
-            {items.map((item) => (
-              <article key={item.id} className={`message ${item.role}`}>
-                {item.role === "tool" ? (
-                  <details open={item.approval !== undefined}>
-                    <summary>{item.toolName}</summary>
-                    <pre>{item.content}</pre>
-                    {item.approval && (
-                      <div className="approval-actions">
-                        <AppButton type="button" onClick={() => void decide(item, "allow_once")}>
-                          Allow once
-                        </AppButton>
-                        <AppButton type="button" onClick={() => void decide(item, "always_allow")}>
-                          Always allow
-                        </AppButton>
-                        <AppButton
-                          type="button"
-                          className="deny"
-                          onClick={() => void decide(item, "deny")}
+                        </AppSelect>
+                      </div>
+                      <div className="form-field">
+                        <span>Skill</span>
+                        <AppSelect
+                          aria-label="Skill"
+                          value={routineDraftSkillId}
+                          onChange={(event) => setRoutineDraftSkillId(event.target.value)}
                         >
-                          Deny
+                          {skillItems
+                            .filter(
+                              (skill) =>
+                                !skill.ownerBotId || skill.ownerBotId === routineDraftBotId,
+                            )
+                            .map((skill) => (
+                              <option key={skill.id} value={skill.id}>
+                                {skill.name}
+                              </option>
+                            ))}
+                        </AppSelect>
+                      </div>
+                      {routine.trigger.type === "cron" && (
+                        <>
+                          <label htmlFor="agentos-control-32">
+                            Five-field cron schedule
+                            <TextField.Root
+                              id="agentos-control-32"
+                              value={routineDraftSchedule}
+                              onChange={(event) => setRoutineDraftSchedule(event.target.value)}
+                              placeholder="0 9 * * *"
+                              className="app-field"
+                            />
+                          </label>
+                          <p>{cronPreview(routineDraftSchedule)}</p>
+                        </>
+                      )}
+                      {routine.trigger.type === "file_change" && (
+                        <label htmlFor="agentos-control-33">
+                          Workspace path
+                          <TextField.Root
+                            id="agentos-control-33"
+                            value={routineDraftPath}
+                            onChange={(event) => setRoutineDraftPath(event.target.value)}
+                            placeholder="/home/agent"
+                            className="app-field"
+                          />
+                        </label>
+                      )}
+                      {routine.trigger.type === "connector_event" && (
+                        <>
+                          <div className="form-field form-field--connector">
+                            <span>Connector</span>
+                            <div className="connector-select-row">
+                              <AppSelect
+                                aria-label="Connector"
+                                value={routineDraftConnectorService}
+                                onChange={(event) =>
+                                  setRoutineDraftConnectorService(
+                                    event.target.value as "gmail" | "google-calendar",
+                                  )
+                                }
+                              >
+                                <option value="gmail">Gmail</option>
+                                <option value="google-calendar">Google Calendar</option>
+                              </AppSelect>
+                              <ConnectorBrandIcon
+                                service={routineDraftConnectorService}
+                                size={20}
+                                className="connector-brand-icon connector-brand-icon--inline"
+                              />
+                            </div>
+                          </div>
+                          {routineDraftConnectorService === "gmail" && (
+                            <label htmlFor="agentos-control-35">
+                              Sender email (optional)
+                              <TextField.Root
+                                id="agentos-control-35"
+                                type="email"
+                                value={routineDraftConnectorSender}
+                                onChange={(event) =>
+                                  setRoutineDraftConnectorSender(event.target.value)
+                                }
+                                maxLength={200}
+                                placeholder="name@example.com"
+                                className="app-field"
+                              />
+                            </label>
+                          )}
+                          <label htmlFor="agentos-control-36">
+                            {routineDraftConnectorService === "gmail"
+                              ? "Subject contains (optional)"
+                              : "Event title contains"}
+                            <TextField.Root
+                              id="agentos-control-36"
+                              value={routineDraftConnectorSubject}
+                              onChange={(event) =>
+                                setRoutineDraftConnectorSubject(event.target.value)
+                              }
+                              maxLength={200}
+                              placeholder="Project update"
+                              className="app-field"
+                            />
+                          </label>
+                          {routineDraftConnectorService === "gmail" ? (
+                            <label htmlFor="agentos-control-37">
+                              Gmail search query (optional)
+                              <TextField.Root
+                                id="agentos-control-37"
+                                value={routineDraftConnectorQuery}
+                                onChange={(event) =>
+                                  setRoutineDraftConnectorQuery(event.target.value)
+                                }
+                                maxLength={200}
+                                placeholder="has:attachment"
+                                className="app-field"
+                              />
+                            </label>
+                          ) : (
+                            <label htmlFor="agentos-control-38">
+                              Calendar ID
+                              <TextField.Root
+                                id="agentos-control-38"
+                                value={routineDraftCalendarId}
+                                onChange={(event) => setRoutineDraftCalendarId(event.target.value)}
+                                maxLength={200}
+                                placeholder="primary"
+                                className="app-field"
+                              />
+                            </label>
+                          )}
+                          <p>Choose a filter so the routine only runs for matching events.</p>
+                        </>
+                      )}
+                      <div className="form-field">
+                        <span>When a run fails</span>
+                        <AppSelect
+                          aria-label="When a run fails"
+                          value={routineDraftOnError}
+                          onChange={(event) =>
+                            setRoutineDraftOnError(
+                              event.target.value as "notify_user" | "retry" | "pause",
+                            )
+                          }
+                        >
+                          <option value="pause">Pause the routine</option>
+                          <option value="notify_user">Notify you</option>
+                          <option value="retry">Retry</option>
+                        </AppSelect>
+                      </div>
+                      {routine.trigger.type === "inter_bot_message" && (
+                        <div className="form-field">
+                          <span>Sender bot filter</span>
+                          <AppSelect
+                            aria-label="Sender bot filter"
+                            value={routineDraftSenderBotId}
+                            onChange={(event) => setRoutineDraftSenderBotId(event.target.value)}
+                          >
+                            <option value="">Any bot</option>
+                            {bots
+                              .filter(
+                                (bot) => bot.id !== routineDraftBotId && bot.role !== "subagent",
+                              )
+                              .map((bot) => (
+                                <option key={bot.id} value={bot.id}>
+                                  {bot.name}
+                                </option>
+                              ))}
+                          </AppSelect>
+                        </div>
+                      )}
+                      <div className="memory-actions">
+                        <AppButton type="button" onClick={() => void saveRoutineEdit(routine)}>
+                          Save routine
+                        </AppButton>
+                        <AppButton type="button" onClick={() => setEditingRoutineId("")}>
+                          Cancel
                         </AppButton>
                       </div>
-                    )}
-                  </details>
-                ) : (
-                  <div className="message-bubble">
-                    <div className="message-label">
-                      {item.role === "user" ? "You" : (selectedBot?.name ?? "Agent")}
-                      {item.role === "assistant" && (
-                        <AppButton
-                          type="button"
-                          className="copy-button"
-                          onClick={() => void navigator.clipboard.writeText(item.content)}
-                        >
-                          <Copy size={12} aria-hidden="true" />
-                          Copy
-                        </AppButton>
-                      )}
                     </div>
-                    <div
-                      className={`message-content${item.role === "assistant" ? " markdown-content" : ""}`}
-                    >
-                      {item.role === "assistant" ? (
-                        <ReactMarkdown
-                          skipHtml
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            a: ({ href, children }) => (
-                              <a
-                                href={href}
-                                rel="noreferrer noopener"
-                                onClick={(event) => {
-                                  event.preventDefault();
-                                  if (href && /^https?:\/\//i.test(href))
-                                    void window.agentOS
-                                      .openExternal(href)
-                                      .catch((err: unknown) =>
-                                        setError(err instanceof Error ? err.message : String(err)),
-                                      );
-                                }}
-                              >
-                                {children}
-                              </a>
-                            ),
-                          }}
-                        >
-                          {item.content}
-                        </ReactMarkdown>
-                      ) : (
-                        item.content
-                      )}
-                    </div>
-                  </div>
-                )}
-              </article>
-            ))}
-          </div>
-        ) : null}
-        {error && (
-          <div className="error-banner" role="alert">
-            {error}
-            <AppButton type="button" onClick={() => setError("")} aria-label="Dismiss">
-              ×
-            </AppButton>
-          </div>
-        )}
-        {notice && <output className="notice-banner">{notice}</output>}
-        {workspace === "chat" && !screenMode && (
-          <form
-            className={`composer${dragOver ? " dragover" : ""}`}
-            onSubmit={(e) => void sendPrompt(e)}
-            onDragEnter={(event) => {
-              event.preventDefault();
-              setDragOver(true);
-            }}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setDragOver(true);
-            }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(event) => {
-              event.preventDefault();
-              setDragOver(false);
-              void addDroppedFiles(event.dataTransfer.files).catch((err) =>
-                setError(err instanceof Error ? err.message : String(err)),
-              );
-            }}
-          >
-            {pendingFiles.length > 0 && (
-              <div className="attachment-list">
-                {pendingFiles.map((file) => (
-                  <span className="attachment-chip" key={file.id}>
-                    {file.name}
+                  )}
+                  <p>
+                    Last run:{" "}
+                    {routine.lastTriggeredAt
+                      ? new Date(routine.lastTriggeredAt).toLocaleString()
+                      : "never"}
+                  </p>
+                  {routine.trigger.type === "cron" && (
+                    <p>
+                      Next run:{" "}
+                      {routine.nextRunAt
+                        ? new Date(routine.nextRunAt).toLocaleString()
+                        : "not scheduled"}
+                      {routine.cronTimezone ? ` (${routine.cronTimezone})` : ""}
+                    </p>
+                  )}
+                  {routine.trigger.type === "webhook" && (
+                    <p>Webhook: POST {`${baseUrl.replace(/\/$/, "")}/v1/webhooks/${routine.id}`}</p>
+                  )}
+                  {routineHistory[routine.id]?.slice(0, 20).map((run) => (
+                    <details key={run.id}>
+                      <summary>
+                        {new Date(run.triggeredAt).toLocaleString()} · {run.status}
+                        {run.durationMs ? ` · ${run.durationMs}ms` : ""}
+                      </summary>
+                      <p>{run.inputSummary}</p>
+                      <p>{run.outputSummary || run.errorMessage || "No result summary"}</p>
+                    </details>
+                  ))}
+                  <div className="memory-actions">
+                    <AppButton type="button" onClick={() => editRoutine(routine)}>
+                      Edit
+                    </AppButton>
                     <AppButton
                       type="button"
-                      onClick={() =>
-                        setPendingFiles((current) => current.filter((item) => item.id !== file.id))
-                      }
+                      onClick={() => void updateRoutine(routine, { test: true })}
                     >
-                      ×
+                      Test run
                     </AppButton>
-                  </span>
-                ))}
+                    <AppButton type="button" onClick={() => void loadRoutineHistory(routine)}>
+                      History
+                    </AppButton>
+                    <AppButton
+                      type="button"
+                      onClick={() => void updateRoutine(routine, { enabled: !routine.enabled })}
+                    >
+                      {routine.enabled ? "Pause" : "Resume"}
+                    </AppButton>
+                    <AppButton
+                      type="button"
+                      onClick={() => void updateRoutine(routine, { delete: true })}
+                    >
+                      Delete
+                    </AppButton>
+                  </div>
+                </article>
+              ))}
+            </section>
+          ) : workspace === "memory" ? (
+            <section className="messages memory-view">
+              <div className="memory-toolbar">
+                <h2>Memory</h2>
+                <div>
+                  <AppButton type="button" onClick={() => void loadMemories()}>
+                    Refresh
+                  </AppButton>
+                  <AppButton type="button" onClick={() => void exportMemories()}>
+                    Export JSON
+                  </AppButton>
+                  <AppButton type="button" onClick={() => showWorkspace("chat")}>
+                    Back to chat
+                  </AppButton>
+                </div>
               </div>
-            )}
-            <textarea
-              ref={composerRef}
-              value={draft}
-              onChange={(event) => {
-                setDraft(event.target.value);
-                const node = event.target;
-                node.style.height = "0px";
-                node.style.height = `${Math.min(180, node.scrollHeight)}px`;
-              }}
-              placeholder={
-                botId ? `Message ${selectedBot?.name ?? "your agent"}` : "Connect and choose a bot"
-              }
-              disabled={!botId}
-              rows={1}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  event.currentTarget.form?.requestSubmit();
-                }
-              }}
-            />
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              hidden
-              onChange={(event) => {
-                const files = event.target.files;
-                if (files?.length)
-                  void addDroppedFiles(files).catch((err) =>
-                    setError(err instanceof Error ? err.message : String(err)),
-                  );
-                event.target.value = "";
-              }}
-            />
-            <div className="composer-footer">
-              <div className="composer-tools">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  className="icon-button"
-                  title="Attach files"
-                  disabled={!botId}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <Paperclip className="glyph" aria-hidden="true" />
-                </Button>
-                <span>
-                  <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
-                  {dragOver ? " · Drop to attach" : ""}
-                </span>
-              </div>
-              <Button
-                type="submit"
-                variant="solid"
-                className="primary"
-                disabled={sendingPrompt || !botId || (!draft.trim() && pendingFiles.length === 0)}
-                aria-busy={sendingPrompt}
-              >
-                {sendingPrompt ? "Sending…" : "Send"}
-                <ArrowRight className="glyph" aria-hidden="true" />
-              </Button>
-            </div>
-          </form>
-        )}
-        <AlertDialog.Root
-          open={confirmation !== null}
-          onOpenChange={(open) => {
-            if (!open && confirmation) resolveConfirmation(false);
-          }}
-        >
-          {confirmation && (
-            <AlertDialog.Content maxWidth="440px">
-              <AlertDialog.Title>{confirmation.title}</AlertDialog.Title>
-              <AlertDialog.Description>{confirmation.description}</AlertDialog.Description>
-              <div className="memory-actions">
-                <AlertDialog.Cancel>
-                  <AppButton type="button">Cancel</AppButton>
-                </AlertDialog.Cancel>
-                <AppButton
-                  type="button"
-                  className={confirmation.destructive ? "danger" : "primary"}
-                  variant="solid"
-                  color={confirmation.destructive ? "red" : undefined}
-                  onClick={() => resolveConfirmation(true)}
-                >
-                  {confirmation.confirmLabel}
-                </AppButton>
-              </div>
-            </AlertDialog.Content>
-          )}
-        </AlertDialog.Root>
-        <Dialog.Root
-          open={memoryEditTarget !== null}
-          onOpenChange={(open) => {
-            if (!open) setMemoryEditTarget(null);
-          }}
-        >
-          <Dialog.Content maxWidth="540px">
-            <Dialog.Title>Edit memory</Dialog.Title>
-            <Dialog.Description>
-              Update the fact the agent uses as context. This changes the saved memory immediately.
-            </Dialog.Description>
-            <form className="skill-editor" onSubmit={(event) => void saveMemoryEdit(event)}>
-              <label>
-                Memory
-                <textarea
-                  value={memoryEditDraft}
-                  onChange={(event) => setMemoryEditDraft(event.target.value)}
-                  rows={6}
-                  maxLength={4000}
-                  required
-                />
-              </label>
-              <div className="memory-actions">
-                <Dialog.Close>
-                  <AppButton type="button">Cancel</AppButton>
-                </Dialog.Close>
-                <AppButton
-                  type="submit"
-                  className="primary"
-                  disabled={
-                    !memoryEditDraft.trim() || memoryEditDraft.trim() === memoryEditTarget?.content
-                  }
-                >
-                  Save memory
-                </AppButton>
-              </div>
-            </form>
-          </Dialog.Content>
-        </Dialog.Root>
-        <Dialog.Root open={skillCreateOpen} onOpenChange={setSkillCreateOpen}>
-          <Dialog.Content maxWidth="540px">
-            <Dialog.Title>New skill</Dialog.Title>
-            <Dialog.Description>
-              Give the skill a name and add one instruction per line. Each line becomes a step.
-            </Dialog.Description>
-            <form className="skill-editor" onSubmit={(event) => void createSkill(event)}>
-              <label>
-                Name
-                <input
-                  value={skillCreateName}
-                  onChange={(event) => setSkillCreateName(event.target.value)}
-                  maxLength={120}
-                  required
-                />
-              </label>
-              <label>
-                Instructions
-                <textarea
-                  value={skillCreateInstructions}
-                  onChange={(event) => setSkillCreateInstructions(event.target.value)}
-                  rows={7}
-                  required
-                  placeholder={"Open the project dashboard\nSummarize the latest activity"}
-                />
-              </label>
-              <div className="memory-actions">
-                <Dialog.Close>
-                  <AppButton type="button">Cancel</AppButton>
-                </Dialog.Close>
-                <AppButton type="submit" className="primary">
-                  Create skill
-                </AppButton>
-              </div>
-            </form>
-          </Dialog.Content>
-        </Dialog.Root>
-        <Dialog.Root open={routineCreateOpen} onOpenChange={setRoutineCreateOpen}>
-          <Dialog.Content maxWidth="560px">
-            <Dialog.Title>New routine</Dialog.Title>
-            <Dialog.Description>
-              This routine runs a skill on the selected bot when its trigger fires.
-            </Dialog.Description>
-            <form className="skill-editor" onSubmit={(event) => void createRoutine(event)}>
-              <label>
-                Name
-                <input
-                  value={routineCreateName}
-                  onChange={(event) => setRoutineCreateName(event.target.value)}
-                  maxLength={120}
-                  required
-                />
-              </label>
-              <label>
-                Skill
-                <select
-                  value={routineCreateSkillId}
-                  onChange={(event) => setRoutineCreateSkillId(event.target.value)}
-                  required
-                >
-                  {skillItems
-                    .filter((skill) => !skill.ownerBotId || skill.ownerBotId === botId)
-                    .map((skill) => (
-                      <option key={skill.id} value={skill.id}>
-                        {skill.name}
-                      </option>
+              {!!memoryReviewSuggestions.length && (
+                <section aria-labelledby="memory-review-heading">
+                  <h3 id="memory-review-heading">Suggested memory changes</h3>
+                  <p className="empty-note">
+                    Review each change. Updates and deletions are applied only after you accept.
+                  </p>
+                  {memoryReviewSuggestions.map((suggestion) => (
+                    <article className="memory-entry" key={suggestion.id}>
+                      <small>
+                        {suggestion.action === "delete"
+                          ? "Possible removal"
+                          : "Possible correction"}{" "}
+                        · {new Date(suggestion.createdAt).toLocaleString()}
+                      </small>
+                      <p>
+                        <strong>Saved memory</strong>
+                        <br />
+                        {suggestion.existingContent}
+                      </p>
+                      {suggestion.currentContent !== suggestion.existingContent && (
+                        <p className="empty-note">
+                          This memory changed after the suggestion was created. Dismiss it and
+                          review the current memory.
+                        </p>
+                      )}
+                      {suggestion.action === "update" && suggestion.proposedContent && (
+                        <p>
+                          <strong>Suggested replacement</strong>
+                          <br />
+                          {suggestion.proposedContent}
+                        </p>
+                      )}
+                      {suggestion.action === "delete" && (
+                        <p>
+                          <strong>Why it was suggested</strong>
+                          <br />
+                          {suggestion.reason ||
+                            "The latest conversation may indicate this fact is no longer valid."}
+                        </p>
+                      )}
+                      <div className="memory-actions">
+                        <AppButton
+                          type="button"
+                          disabled={suggestion.currentContent !== suggestion.existingContent}
+                          onClick={() => void resolveMemoryReview(suggestion, "accept")}
+                        >
+                          {suggestion.action === "delete" ? "Delete memory" : "Accept update"}
+                        </AppButton>
+                        <AppButton
+                          type="button"
+                          onClick={() => void resolveMemoryReview(suggestion, "reject")}
+                        >
+                          Dismiss
+                        </AppButton>
+                      </div>
+                    </article>
+                  ))}
+                </section>
+              )}
+              {!memoryEntries.length && (
+                <p className="empty-note">No saved memories for this bot.</p>
+              )}
+              {memoryEntries.map((memory) => (
+                <article className="memory-entry" key={memory.id}>
+                  <div>
+                    <span className="memory-scope">{memory.scope}</span>
+                    <small>
+                      {memory.source} · updated {new Date(memory.updatedAt).toLocaleString()}
+                      {memory.staleAfter
+                        ? ` · stale after ${new Date(memory.staleAfter).toLocaleString()}`
+                        : " · no expiry"}
+                    </small>
+                  </div>
+                  <p>{memory.content}</p>
+                  <div className="memory-actions">
+                    <AppButton type="button" onClick={() => void loadMemoryEvidence(memory)}>
+                      {memoryEvidence[memory.id] ? "Hide evidence" : "Evidence"}
+                    </AppButton>
+                    <AppButton type="button" onClick={() => void editMemory(memory)}>
+                      Edit
+                    </AppButton>
+                    <AppButton type="button" onClick={() => void deleteMemory(memory)}>
+                      Delete
+                    </AppButton>
+                  </div>
+                  {memoryEvidence[memory.id]?.length ? (
+                    <ul>
+                      {(memoryEvidence[memory.id] ?? []).map((entry) => (
+                        <li key={entry.id}>
+                          Supported by turn {entry.turnId} ·{" "}
+                          {new Date(entry.createdAt).toLocaleString()}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : memoryEvidence[memory.id] ? (
+                    <p className="empty-note">No automatic extraction evidence is recorded.</p>
+                  ) : null}
+                </article>
+              ))}
+            </section>
+          ) : workspace === "chat" ? (
+            <div className="messages" ref={scrollRef} onScroll={handleConversationScroll}>
+              {!items.length && (
+                <div className="welcome">
+                  <div className="welcome-icon">
+                    <Sparkles className="glyph" aria-hidden="true" />
+                  </div>
+                  <h1>{selectedBot ? `Message ${selectedBot.name}` : "What can I help with?"}</h1>
+                  <p>
+                    Send a task to the selected agent. Tool activity, files, and approval requests
+                    stay in this conversation.
+                  </p>
+                  <div className="suggestion-row">
+                    {[
+                      "Summarize what you can do",
+                      "Check my connected accounts",
+                      "Plan the next routine",
+                    ].map((suggestion) => (
+                      <AppButton
+                        key={suggestion}
+                        type="button"
+                        disabled={!botId}
+                        onClick={() => {
+                          setDraft(suggestion);
+                          composerRef.current?.focus();
+                        }}
+                      >
+                        {suggestion}
+                      </AppButton>
                     ))}
-                </select>
-              </label>
-              {routineCreateType === "cron" && (
-                <label>
-                  Schedule (minute hour day month weekday)
-                  <input
-                    value={routineCreateSchedule}
-                    onChange={(event) => setRoutineCreateSchedule(event.target.value)}
-                    placeholder="0 9 * * *"
-                    required
-                  />
-                </label>
+                  </div>
+                </div>
               )}
-              {routineCreateType === "file_change" && (
-                <label>
-                  Workspace path to watch
-                  <input
-                    value={routineCreateFilePath}
-                    onChange={(event) => setRoutineCreateFilePath(event.target.value)}
-                    placeholder="/home/agent/project"
-                    required
-                  />
-                </label>
+              {items.map((item) => (
+                <article key={item.id} className={`message ${item.role}`}>
+                  {item.role === "tool" ? (
+                    <details open={item.approval !== undefined}>
+                      <summary>{item.toolName}</summary>
+                      <pre>{item.content}</pre>
+                      {item.approval && (
+                        <div className="approval-actions">
+                          <AppButton type="button" onClick={() => void decide(item, "allow_once")}>
+                            Allow once
+                          </AppButton>
+                          <AppButton
+                            type="button"
+                            onClick={() => void decide(item, "always_allow")}
+                          >
+                            Always allow
+                          </AppButton>
+                          <AppButton
+                            type="button"
+                            className="deny"
+                            onClick={() => void decide(item, "deny")}
+                          >
+                            Deny
+                          </AppButton>
+                        </div>
+                      )}
+                    </details>
+                  ) : (
+                    <div className="message-bubble">
+                      <div className="message-label">
+                        {item.role === "user" ? "You" : (selectedBot?.name ?? "Agent")}
+                        {item.role === "assistant" && (
+                          <AppButton
+                            type="button"
+                            className="copy-button"
+                            onClick={() => void navigator.clipboard.writeText(item.content)}
+                          >
+                            <Copy size={12} aria-hidden="true" />
+                            Copy
+                          </AppButton>
+                        )}
+                      </div>
+                      <div
+                        className={`message-content${item.role === "assistant" ? " markdown-content" : ""}`}
+                      >
+                        {item.role === "assistant" ? (
+                          <React.Suspense
+                            fallback={<span className="markdown-loading">Formatting reply…</span>}
+                          >
+                            <AssistantMarkdown
+                              content={item.content}
+                              onError={(err) =>
+                                setError(err instanceof Error ? err.message : String(err))
+                              }
+                            />
+                          </React.Suspense>
+                        ) : (
+                          item.content
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          ) : null}
+          {error && (
+            <div className="error-banner" role="alert">
+              {error}
+              <AppButton type="button" onClick={() => setError("")} aria-label="Dismiss">
+                ×
+              </AppButton>
+            </div>
+          )}
+          {notice && <output className="notice-banner">{notice}</output>}
+          {workspace === "chat" && !screenMode && (
+            <form
+              className={`composer${dragOver ? " dragover" : ""}`}
+              onSubmit={(e) => void sendPrompt(e)}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                setDragOver(true);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDragOver(false);
+                void addDroppedFiles(event.dataTransfer.files).catch((err) =>
+                  setError(err instanceof Error ? err.message : String(err)),
+                );
+              }}
+            >
+              {pendingFiles.length > 0 && (
+                <div className="attachment-list">
+                  {pendingFiles.map((file) => (
+                    <span className="attachment-chip" key={file.id}>
+                      {file.name}
+                      <AppButton
+                        type="button"
+                        onClick={() =>
+                          setPendingFiles((current) =>
+                            current.filter((item) => item.id !== file.id),
+                          )
+                        }
+                      >
+                        ×
+                      </AppButton>
+                    </span>
+                  ))}
+                </div>
               )}
-              {routineCreateType === "inter_bot_message" && (
-                <label>
-                  Sender bot
-                  <select
-                    value={routineCreateSenderBotId}
-                    onChange={(event) => setRoutineCreateSenderBotId(event.target.value)}
+              <TextArea
+                ref={composerRef}
+                value={draft}
+                onChange={(event) => {
+                  setDraft(event.target.value);
+                  const node = event.target;
+                  node.style.height = "0px";
+                  node.style.height = `${Math.min(180, node.scrollHeight)}px`;
+                }}
+                placeholder={
+                  botId
+                    ? `Message ${selectedBot?.name ?? "your agent"}`
+                    : "Connect and choose a bot"
+                }
+                disabled={!botId}
+                rows={1}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                className="app-textarea"
+              />
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                hidden
+                onChange={(event) => {
+                  const files = event.target.files;
+                  if (files?.length)
+                    void addDroppedFiles(files).catch((err) =>
+                      setError(err instanceof Error ? err.message : String(err)),
+                    );
+                  event.target.value = "";
+                }}
+              />
+              <div className="composer-footer">
+                <div className="composer-tools">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="icon-button"
+                    title="Attach files"
+                    disabled={!botId}
+                    onClick={() => fileInputRef.current?.click()}
                   >
-                    <option value="">Any bot</option>
-                    {bots
-                      .filter((bot) => bot.id !== botId && bot.role !== "subagent")
-                      .map((bot) => (
-                        <option key={bot.id} value={bot.id}>
-                          {bot.name}
+                    <Paperclip className="glyph" aria-hidden="true" />
+                  </Button>
+                  <span>
+                    <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+                    {dragOver ? " · Drop to attach" : ""}
+                  </span>
+                </div>
+                <Button
+                  type="submit"
+                  variant="solid"
+                  className="primary"
+                  disabled={sendingPrompt || !botId || (!draft.trim() && pendingFiles.length === 0)}
+                  aria-busy={sendingPrompt}
+                >
+                  {sendingPrompt ? "Sending…" : "Send"}
+                  <ArrowRight className="glyph" aria-hidden="true" />
+                </Button>
+              </div>
+            </form>
+          )}
+          <AlertDialog.Root
+            open={confirmation !== null}
+            onOpenChange={(open) => {
+              if (!open && confirmation) resolveConfirmation(false);
+            }}
+          >
+            {confirmation && (
+              <AlertDialog.Content maxWidth="440px">
+                <AlertDialog.Title>{confirmation.title}</AlertDialog.Title>
+                <AlertDialog.Description>{confirmation.description}</AlertDialog.Description>
+                <div className="memory-actions">
+                  <AlertDialog.Cancel>
+                    <AppButton type="button">Cancel</AppButton>
+                  </AlertDialog.Cancel>
+                  <AppButton
+                    type="button"
+                    className={confirmation.destructive ? "danger" : "primary"}
+                    variant="solid"
+                    color={confirmation.destructive ? "red" : undefined}
+                    onClick={() => resolveConfirmation(true)}
+                  >
+                    {confirmation.confirmLabel}
+                  </AppButton>
+                </div>
+              </AlertDialog.Content>
+            )}
+          </AlertDialog.Root>
+          <Dialog.Root
+            open={memoryEditTarget !== null}
+            onOpenChange={(open) => {
+              if (!open) setMemoryEditTarget(null);
+            }}
+          >
+            <Dialog.Content maxWidth="540px">
+              <Dialog.Title>Edit memory</Dialog.Title>
+              <Dialog.Description>
+                Update the fact the agent uses as context. This changes the saved memory
+                immediately.
+              </Dialog.Description>
+              <form className="skill-editor" onSubmit={(event) => void saveMemoryEdit(event)}>
+                <label htmlFor="agentos-control-41">
+                  Memory
+                  <TextArea
+                    id="agentos-control-41"
+                    value={memoryEditDraft}
+                    onChange={(event) => setMemoryEditDraft(event.target.value)}
+                    rows={6}
+                    maxLength={4000}
+                    required
+                    className="app-textarea"
+                  />
+                </label>
+                <div className="memory-actions">
+                  <Dialog.Close>
+                    <AppButton type="button">Cancel</AppButton>
+                  </Dialog.Close>
+                  <AppButton
+                    type="submit"
+                    className="primary"
+                    disabled={
+                      !memoryEditDraft.trim() ||
+                      memoryEditDraft.trim() === memoryEditTarget?.content
+                    }
+                  >
+                    Save memory
+                  </AppButton>
+                </div>
+              </form>
+            </Dialog.Content>
+          </Dialog.Root>
+          <Dialog.Root open={skillCreateOpen} onOpenChange={setSkillCreateOpen}>
+            <Dialog.Content maxWidth="540px">
+              <Dialog.Title>New skill</Dialog.Title>
+              <Dialog.Description>
+                Draft steps from a description or enter them manually. Review and approve any
+                generated checkpoints before saving.
+              </Dialog.Description>
+              <Tabs.Root defaultValue="draft">
+                <Tabs.List aria-label="Skill creation method">
+                  <Tabs.Trigger value="draft">Draft with AI</Tabs.Trigger>
+                  <Tabs.Trigger value="manual">Create manually</Tabs.Trigger>
+                </Tabs.List>
+                <Tabs.Content value="draft">
+                  <form
+                    className="skill-editor"
+                    onSubmit={(event) => void draftSkillFromDescription(event)}
+                  >
+                    <label htmlFor="agentos-control-42">
+                      Task description
+                      <TextArea
+                        id="agentos-control-42"
+                        value={skillCreateDescription}
+                        onChange={(event) => setSkillCreateDescription(event.target.value)}
+                        rows={6}
+                        maxLength={6000}
+                        required
+                        placeholder="Describe the task and what a successful result should look like."
+                        className="app-textarea"
+                      />
+                      <small>{skillCreateDescription.length}/6000</small>
+                    </label>
+                    <div className="memory-actions">
+                      <Dialog.Close>
+                        <AppButton type="button" disabled={skillDrafting}>
+                          Cancel
+                        </AppButton>
+                      </Dialog.Close>
+                      <AppButton
+                        type="submit"
+                        className="primary"
+                        disabled={skillDrafting || !skillCreateDescription.trim()}
+                      >
+                        {skillDrafting ? "Drafting…" : "Draft steps"}
+                      </AppButton>
+                    </div>
+                  </form>
+                </Tabs.Content>
+                <Tabs.Content value="manual">
+                  <form
+                    className="skill-editor"
+                    onSubmit={(event) => void createSkillManually(event)}
+                  >
+                    <label htmlFor="agentos-control-43">
+                      Name
+                      <TextField.Root
+                        id="agentos-control-43"
+                        value={skillManualName}
+                        onChange={(event) => setSkillManualName(event.target.value)}
+                        maxLength={120}
+                        required
+                        className="app-field"
+                      />
+                    </label>
+                    <label htmlFor="agentos-control-44">
+                      Instructions
+                      <TextArea
+                        id="agentos-control-44"
+                        value={skillManualInstructions}
+                        onChange={(event) => setSkillManualInstructions(event.target.value)}
+                        rows={7}
+                        required
+                        placeholder={"Open the project dashboard\nSummarize the latest activity"}
+                        className="app-textarea"
+                      />
+                    </label>
+                    <div className="memory-actions">
+                      <Dialog.Close>
+                        <AppButton type="button">Cancel</AppButton>
+                      </Dialog.Close>
+                      <AppButton type="submit" className="primary">
+                        Create skill
+                      </AppButton>
+                    </div>
+                  </form>
+                </Tabs.Content>
+              </Tabs.Root>
+            </Dialog.Content>
+          </Dialog.Root>
+          <Dialog.Root open={routineCreateOpen} onOpenChange={setRoutineCreateOpen}>
+            <Dialog.Content maxWidth="560px">
+              <Dialog.Title>New routine</Dialog.Title>
+              <Dialog.Description>
+                This routine runs a skill on the selected bot when its trigger fires.
+              </Dialog.Description>
+              <form className="skill-editor" onSubmit={(event) => void createRoutine(event)}>
+                <label htmlFor="agentos-control-45">
+                  Name
+                  <TextField.Root
+                    id="agentos-control-45"
+                    value={routineCreateName}
+                    onChange={(event) => setRoutineCreateName(event.target.value)}
+                    maxLength={120}
+                    required
+                    className="app-field"
+                  />
+                </label>
+                <div className="form-field">
+                  <span>Skill</span>
+                  <AppSelect
+                    aria-label="Skill"
+                    value={routineCreateSkillId}
+                    onChange={(event) => setRoutineCreateSkillId(event.target.value)}
+                    required
+                  >
+                    {skillItems
+                      .filter((skill) => !skill.ownerBotId || skill.ownerBotId === botId)
+                      .map((skill) => (
+                        <option key={skill.id} value={skill.id}>
+                          {skill.name}
                         </option>
                       ))}
-                  </select>
-                </label>
-              )}
-              {routineCreateType === "webhook" && (
-                <p>A one-time signing secret will be shown after the routine is created.</p>
-              )}
-              <div className="memory-actions">
-                <Dialog.Close>
-                  <AppButton type="button">Cancel</AppButton>
-                </Dialog.Close>
-                <AppButton type="submit" className="primary">
-                  Create routine
-                </AppButton>
-              </div>
-            </form>
-          </Dialog.Content>
-        </Dialog.Root>
+                  </AppSelect>
+                </div>
+                {routineCreateType === "cron" && (
+                  <label htmlFor="agentos-control-47">
+                    Schedule (minute hour day month weekday)
+                    <TextField.Root
+                      id="agentos-control-47"
+                      value={routineCreateSchedule}
+                      onChange={(event) => setRoutineCreateSchedule(event.target.value)}
+                      placeholder="0 9 * * *"
+                      required
+                      className="app-field"
+                    />
+                  </label>
+                )}
+                {routineCreateType === "file_change" && (
+                  <label htmlFor="agentos-control-48">
+                    Workspace path to watch
+                    <TextField.Root
+                      id="agentos-control-48"
+                      value={routineCreateFilePath}
+                      onChange={(event) => setRoutineCreateFilePath(event.target.value)}
+                      placeholder="/home/agent/project"
+                      required
+                      className="app-field"
+                    />
+                  </label>
+                )}
+                {routineCreateType === "inter_bot_message" && (
+                  <div className="form-field">
+                    <span>Sender bot</span>
+                    <AppSelect
+                      aria-label="Sender bot"
+                      value={routineCreateSenderBotId}
+                      onChange={(event) => setRoutineCreateSenderBotId(event.target.value)}
+                    >
+                      <option value="">Any bot</option>
+                      {bots
+                        .filter((bot) => bot.id !== botId && bot.role !== "subagent")
+                        .map((bot) => (
+                          <option key={bot.id} value={bot.id}>
+                            {bot.name}
+                          </option>
+                        ))}
+                    </AppSelect>
+                  </div>
+                )}
+                {routineCreateType === "webhook" && (
+                  <p>A one-time signing secret will be shown after the routine is created.</p>
+                )}
+                <div className="memory-actions">
+                  <Dialog.Close>
+                    <AppButton type="button">Cancel</AppButton>
+                  </Dialog.Close>
+                  <AppButton type="submit" className="primary">
+                    Create routine
+                  </AppButton>
+                </div>
+              </form>
+            </Dialog.Content>
+          </Dialog.Root>
+        </ErrorBoundary>
       </main>
     </div>
   );
@@ -4676,29 +5152,13 @@ function DesktopRequired() {
   );
 }
 
-function ClerkApp() {
-  const { isLoaded, isSignedIn, getToken } = useAuth();
-  const { signOut } = useClerk();
-  return (
-    <App
-      clerk={{
-        enabled: true,
-        loaded: isLoaded,
-        signedIn: Boolean(isSignedIn),
-        getToken,
-        signOut: () => signOut(),
-      }}
-    />
-  );
-}
-
 function Root() {
   const key = clerkPublishableKey();
   if (!key) return <App />;
   return (
-    <ClerkProvider publishableKey={key}>
-      <ClerkApp />
-    </ClerkProvider>
+    <React.Suspense fallback={<div className="auth-loading">Loading secure sign-in…</div>}>
+      <ClerkBoundary publishableKey={key}>{(clerk) => <App clerk={clerk} />}</ClerkBoundary>
+    </React.Suspense>
   );
 }
 
@@ -4706,8 +5166,10 @@ const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("root mount node is missing");
 createRoot(rootElement).render(
   <React.StrictMode>
-    <Theme appearance="dark" accentColor="green" grayColor="slate" radius="large">
-      {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
+    <Theme appearance="dark" accentColor="teal" grayColor="sage" radius="medium">
+      <ErrorBoundary fallbackTitle="AgentOS hit a display error">
+        {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
+      </ErrorBoundary>
     </Theme>
   </React.StrictMode>,
 );

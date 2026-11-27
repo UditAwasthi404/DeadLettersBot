@@ -65,7 +65,11 @@ export class BrowserSession {
   } | null = null;
 
   async connect(ipAddress: string, port: number): Promise<void> {
-    this.browser = await chromium.connectOverCDP(`http://${ipAddress}:${port}`);
+    await this.connectTo(`http://${ipAddress}:${port}`);
+  }
+
+  async connectTo(endpoint: string, headers?: Record<string, string>): Promise<void> {
+    this.browser = await chromium.connectOverCDP(endpoint, { headers });
     const existing = this.browser.contexts()[0]?.pages()[0];
     this.page = existing ?? (await (await this.browser.newContext()).newPage());
   }

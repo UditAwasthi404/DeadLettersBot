@@ -27,8 +27,11 @@ class StubVM implements VMManager {
   async execInContainer(_vmId: string, cmd: string[], input?: string): Promise<ExecResult> {
     this.lastCmd = cmd;
     this.lastInput = input;
-    if (cmd[0] === "cat") return { stdout: "hello file", stderr: "", exitCode: 0 };
-    if (cmd[0] === "ls") return { stdout: "file.txt\n", stderr: "", exitCode: 0 };
+    if (cmd[0] === "agentos-file" && cmd[1] === "read")
+      return { stdout: "hello file", stderr: "", exitCode: 0 };
+    if (cmd[0] === "agentos-file" && cmd[1] === "list")
+      return { stdout: "file.txt\n", stderr: "", exitCode: 0 };
+    if (cmd[0] === "agentos-file") return { stdout: "", stderr: "", exitCode: 0 };
     return { stdout: "ok", stderr: "", exitCode: 0 };
   }
   async ensureBotBrowser(): Promise<number> {
@@ -49,19 +52,29 @@ describe("file/shell tools", () => {
 
   test("readFile / listDirectory / writeFile / runShell", async () => {
     const vm = new StubVM();
-    expect(await readFile({ path: "/etc/hostname" }, "v", vm)).toEqual({ content: "hello file" });
-    expect(await listDirectory({ path: "/tmp" }, "v", vm)).toEqual({ listing: "file.txt\n" });
-    await writeFile({ path: "/tmp/x", content: "hi" }, "v", vm);
+    expect(await readFile({ path: "/home/agent/notes.txt" }, "v", vm)).toEqual({
+      content: "hello file",
+    });
+    expect(vm.lastCmd).toEqual(["agentos-file", "read", "/home/agent/notes.txt"]);
+    expect(await listDirectory({ path: "/home/agent" }, "v", vm)).toEqual({
+      listing: "file.txt\n",
+    });
+    await writeFile({ path: "/home/agent/x.txt", content: "hi" }, "v", vm);
     expect(vm.lastInput).toBe("hi");
-    expect(vm.lastCmd[0]).toBe("sh");
+    expect(vm.lastCmd).toEqual(["agentos-file", "write", "/home/agent/x.txt"]);
     const shell = await runShell({ command: "echo hi", cwd: "/tmp" }, "v", vm);
     expect(shell).toEqual({ stdout: "ok", stderr: "", exitCode: 0 });
+    expect(vm.lastCmd[0]).toBe("setpriv");
+    expect(vm.lastCmd).toContain("/usr/local/bin/agentos-shell");
   });
 
-  test("readFile rejects path traversal", async () => {
+  test("readFile rejects path traversal and absolute escapes", async () => {
     const vm = new StubVM();
     expect(await readFile({ path: "/home/agent/../../etc/passwd" }, "v", vm)).toEqual({
-      error: "path traversal denied",
+      error: "path must stay inside /home/agent",
+    });
+    expect(await readFile({ path: "/etc/hostname" }, "v", vm)).toEqual({
+      error: "path must stay inside /home/agent",
     });
     expect(vm.lastCmd).toEqual([]);
   });

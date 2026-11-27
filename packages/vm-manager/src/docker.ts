@@ -8,11 +8,13 @@ import { dirname, join } from "node:path";
  */
 import { PassThrough } from "node:stream";
 import Docker from "dockerode";
+import { type VMEgressRule, parseVMEgressAllowlist } from "./egress.ts";
 import type { ExecResult, VMInfo, VMManager, VMStats, VMStatus } from "./interface.ts";
 import { KubernetesVMManager } from "./kubernetes.ts";
 
 const IMAGE = process.env.VM_IMAGE ?? "agentos/vm-manager";
 const MAX_EXEC_OUTPUT_BYTES = 1_048_576;
+const PREWARM_CONTAINER_PREFIX = "agentos-vm-pool-";
 
 type StateFile = Record<string, { accountId: string; vmId: string }>;
 
@@ -43,7 +45,8 @@ function mapDockerState(status?: string, paused?: boolean): VMStatus {
   if (s === "running") return "running";
   if (s === "paused") return "sleeping";
   if (s === "created" || s === "restarting") return "starting";
-  if (s === "exited" || s === "dead" || s === "removing") return "terminated";
+  if (s === "exited") return "sleeping";
+  if (s === "dead" || s === "removing") return "terminated";
   return "terminated";
 }
 
@@ -86,7 +89,341 @@ export class NoopVMManager implements VMManager {
 }
 
 export class DockerVMManager implements VMManager {
-  constructor(private readonly docker: Docker) {}
+  private static prewarmQueue: Promise<void> = Promise.resolve();
+  private readonly prewarmPoolSize: number;
+  private readonly egressPolicy: "allow_all" | "deny_all" | "allowlist";
+  private readonly egressAllowlist: VMEgressRule[];
+  private readonly egressConfigHash: string;
+
+  constructor(private readonly docker: Docker) {
+    const requestedEgressPolicy = process.env.VM_EGRESS_POLICY ?? "allow_all";
+    if (
+      requestedEgressPolicy !== "allow_all" &&
+      requestedEgressPolicy !== "deny_all" &&
+      requestedEgressPolicy !== "allowlist"
+    )
+      throw new Error("VM_EGRESS_POLICY must be allow_all, deny_all, or allowlist");
+    this.egressPolicy = requestedEgressPolicy;
+    const allowlistValue = process.env.VM_EGRESS_ALLOWLIST?.trim() ?? "";
+    if (this.egressPolicy === "allowlist") {
+      if (!allowlistValue) throw new Error("VM_EGRESS_ALLOWLIST is required for allowlist mode");
+      this.egressAllowlist = parseVMEgressAllowlist(allowlistValue);
+    } else {
+      if (allowlistValue)
+        throw new Error("VM_EGRESS_ALLOWLIST requires VM_EGRESS_POLICY=allowlist");
+      this.egressAllowlist = [];
+    }
+    this.egressConfigHash = createHash("sha256")
+      .update(JSON.stringify({ policy: this.egressPolicy, rules: this.egressAllowlist }))
+      .digest("hex");
+
+    const requestedPoolSize = Number(process.env.VM_PREWARM_POOL_SIZE ?? 0);
+    this.prewarmPoolSize = Number.isInteger(requestedPoolSize)
+      ? Math.max(0, Math.min(requestedPoolSize, 20))
+      : 0;
+    if (this.egressPolicy === "allowlist" && this.prewarmPoolSize > 0)
+      throw new Error("VM_PREWARM_POOL_SIZE cannot be used with VM_EGRESS_POLICY=allowlist");
+    if (this.prewarmPoolSize > 0) {
+      const timer = setInterval(() => {
+        void this.reconcilePrewarmPool().catch((err: unknown) =>
+          console.warn("[vm-manager] VM prewarm pool reconciliation failed", err),
+        );
+      }, 30_000);
+      timer.unref?.();
+      void this.reconcilePrewarmPool().catch((err: unknown) =>
+        console.warn("[vm-manager] VM prewarm pool initialization failed", err),
+      );
+    }
+  }
+
+  private async withPrewarmLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = DockerVMManager.prewarmQueue;
+    let release!: () => void;
+    DockerVMManager.prewarmQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private containerHostConfig(networkMode: string, egressHelper = false) {
+    const memory = Number(process.env.VM_MEMORY_BYTES ?? 2_147_483_648);
+    return {
+      Memory: egressHelper ? 67_108_864 : memory,
+      MemorySwap: egressHelper ? 67_108_864 : memory,
+      NanoCpus: egressHelper ? 100_000_000 : Number(process.env.VM_CPU_NANOS ?? 2_000_000_000),
+      PidsLimit: egressHelper ? 64 : Number(process.env.VM_PIDS_LIMIT ?? 512),
+      NetworkMode: networkMode,
+      CapDrop: ["ALL"],
+      ...(egressHelper ? { CapAdd: ["NET_ADMIN", "SETUID", "SETGID"] } : {}),
+      SecurityOpt: ["no-new-privileges:true"],
+      Init: true,
+    };
+  }
+
+  private containerCreateOptions(
+    name: string,
+    networkMode: string,
+    labels: Record<string, string>,
+  ) {
+    return {
+      Image: IMAGE,
+      name,
+      User: "agent",
+      Env: [
+        `VM_EGRESS_POLICY=${this.egressPolicy}`,
+        ...(this.egressPolicy === "allowlist"
+          ? [
+              `VM_EGRESS_ALLOWLIST=${JSON.stringify(this.egressAllowlist)}`,
+              "AGENTOS_EGRESS_FIREWALL_SHARED=1",
+            ]
+          : []),
+      ],
+      Labels: { ...labels, "agentos.egressConfigHash": this.egressConfigHash },
+      HostConfig: this.containerHostConfig(networkMode),
+    };
+  }
+
+  private egressHelperName(accountId: string): string {
+    const suffix = createHash("sha256").update(accountId).digest("hex").slice(0, 16);
+    return `agentos-egress-${suffix}`;
+  }
+
+  private async waitForEgressHelperReady(
+    container: Docker.Container,
+    accountId: string,
+  ): Promise<string> {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const info = await container.inspect();
+      if (!info.State?.Running)
+        throw new Error(`Docker egress helper for account ${accountId} stopped during startup`);
+      const health = info.State.Health?.Status;
+      if (health === "healthy") return info.Id;
+      if (health === "unhealthy")
+        throw new Error(`Docker egress helper for account ${accountId} failed its readiness check`);
+      if (!info.State.Health)
+        throw new Error(
+          `Docker egress helper for account ${accountId} has no readiness healthcheck; rebuild the VM image and reprovision it`,
+        );
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(
+      `Docker egress helper for account ${accountId} did not become ready within 30 seconds`,
+    );
+  }
+
+  private async ensureEgressHelper(accountId: string, networkName: string): Promise<string> {
+    const name = this.egressHelperName(accountId);
+    let container: Docker.Container;
+    try {
+      container = await this.docker.createContainer({
+        Image: IMAGE,
+        name,
+        User: "root",
+        Cmd: ["sleep", "infinity"],
+        Env: [
+          "VM_EGRESS_POLICY=allowlist",
+          `VM_EGRESS_ALLOWLIST=${JSON.stringify(this.egressAllowlist)}`,
+          "AGENTOS_EGRESS_FIREWALL_HELPER=1",
+        ],
+        Labels: {
+          "agentos.accountId": accountId,
+          "agentos.egressHelper": "true",
+          "agentos.egressConfigHash": this.egressConfigHash,
+        },
+        HostConfig: this.containerHostConfig(networkName, true),
+      });
+    } catch (err) {
+      if ((err as { statusCode?: number }).statusCode !== 409) throw err;
+      container = this.docker.getContainer(name);
+    }
+
+    const info = await container.inspect();
+    if (
+      info.Config?.Labels?.["agentos.accountId"] !== accountId ||
+      info.Config?.Labels?.["agentos.egressHelper"] !== "true"
+    )
+      throw new Error("refusing to reuse a Docker egress helper owned by another account");
+    if (info.HostConfig?.NetworkMode !== networkName)
+      throw new Error(
+        `VM egress network changed for account ${accountId}; terminate and reprovision this VM before using the new policy`,
+      );
+    if (info.Config?.Labels?.["agentos.egressConfigHash"] !== this.egressConfigHash)
+      throw new Error(
+        `VM egress rules changed for account ${accountId}; terminate and reprovision this VM before using the new policy`,
+      );
+    if (!info.State?.Running) {
+      try {
+        await container.start();
+      } catch (err) {
+        if ((err as { statusCode?: number }).statusCode !== 304) throw err;
+      }
+    }
+    return this.waitForEgressHelperReady(container, accountId);
+  }
+
+  private async existingEgressHelperId(accountId: string): Promise<string> {
+    const container = this.docker.getContainer(this.egressHelperName(accountId));
+    const info = await container.inspect().catch((err: unknown) => {
+      if ((err as { statusCode?: number }).statusCode === 404)
+        throw new Error(
+          `Docker egress helper for account ${accountId} is missing; reprovision its VM`,
+        );
+      throw err;
+    });
+    if (
+      info.Config?.Labels?.["agentos.accountId"] !== accountId ||
+      info.Config?.Labels?.["agentos.egressHelper"] !== "true"
+    )
+      throw new Error("refusing to reuse a Docker egress helper owned by another account");
+    if (info.Config?.Labels?.["agentos.egressConfigHash"] !== this.egressConfigHash)
+      throw new Error(`VM egress rules changed for account ${accountId}; reprovision its VM`);
+    if (!info.State?.Running)
+      throw new Error(
+        `Docker egress helper for account ${accountId} is stopped; reprovision its VM`,
+      );
+    await this.waitForEgressHelperReady(container, accountId);
+    return info.Id;
+  }
+
+  private async removeEgressHelper(accountId: string): Promise<void> {
+    const container = this.docker.getContainer(this.egressHelperName(accountId));
+    const info = await container.inspect().catch((err: unknown) => {
+      if ((err as { statusCode?: number }).statusCode === 404) return null;
+      throw err;
+    });
+    if (!info) return;
+    if (
+      info.Config?.Labels?.["agentos.accountId"] !== accountId ||
+      info.Config?.Labels?.["agentos.egressHelper"] !== "true"
+    )
+      throw new Error("refusing to remove a Docker egress helper owned by another account");
+    await container.remove({ force: true });
+  }
+
+  private async egressHelperAddress(accountId: string): Promise<string | undefined> {
+    const container = this.docker.getContainer(this.egressHelperName(accountId));
+    const info = await container.inspect().catch((err: unknown) => {
+      if ((err as { statusCode?: number }).statusCode === 404) return undefined;
+      throw err;
+    });
+    if (
+      !info ||
+      info.Config?.Labels?.["agentos.accountId"] !== accountId ||
+      info.Config?.Labels?.["agentos.egressHelper"] !== "true"
+    )
+      return undefined;
+    return (
+      info.NetworkSettings?.IPAddress ||
+      Object.values(info.NetworkSettings?.Networks ?? {}).find((network) => network.IPAddress)
+        ?.IPAddress
+    );
+  }
+
+  private assertEgressConfig(
+    info: Awaited<ReturnType<Docker.Container["inspect"]>>,
+    allowLegacy = true,
+    egressHelperId?: string,
+  ): void {
+    const storedHash = info.Config?.Labels?.["agentos.egressConfigHash"];
+    if (
+      this.egressPolicy === "allowlist" &&
+      egressHelperId &&
+      info.HostConfig?.NetworkMode !== `container:${egressHelperId}`
+    )
+      throw new Error(
+        `VM egress network changed for ${info.Name?.replace(/^\/+/, "") ?? info.Id}; terminate and reprovision this VM before using the new policy`,
+      );
+    if (storedHash === this.egressConfigHash) return;
+    if (!storedHash && allowLegacy && this.egressPolicy !== "allowlist") return;
+    throw new Error(
+      `VM egress policy changed for ${info.Name?.replace(/^\/+/, "") ?? info.Id}; terminate and reprovision this VM before using the new policy`,
+    );
+  }
+
+  private async poolContainers(): Promise<Docker.ContainerInfo[]> {
+    const containers = await this.docker.listContainers({ all: true });
+    return containers.filter((container) =>
+      container.Names?.some((name) =>
+        name.replace(/^\/+/, "").startsWith(PREWARM_CONTAINER_PREFIX),
+      ),
+    );
+  }
+
+  private async reconcilePrewarmPool(): Promise<void> {
+    if (this.prewarmPoolSize < 1) return;
+    await this.withPrewarmLock(async () => {
+      let ready = 0;
+      for (const entry of await this.poolContainers()) {
+        const container = this.docker.getContainer(entry.Id);
+        const info = await container.inspect().catch((err: unknown) => {
+          if ((err as { statusCode?: number }).statusCode === 404) return null;
+          throw err;
+        });
+        if (!info) continue;
+        if (info.Config?.Labels?.["agentos.prewarm"] !== "true") continue;
+        if (
+          info.State?.Running &&
+          info.Config?.Labels?.["agentos.egressConfigHash"] === this.egressConfigHash
+        ) {
+          ready += 1;
+          continue;
+        }
+        await container.remove({ force: true }).catch((err: unknown) => {
+          if ((err as { statusCode?: number }).statusCode !== 404)
+            console.warn("[vm-manager] failed to remove stopped prewarm container", err);
+        });
+      }
+
+      while (ready < this.prewarmPoolSize) {
+        const name = `${PREWARM_CONTAINER_PREFIX}${randomUUID()}`;
+        const container = await this.docker.createContainer(
+          this.containerCreateOptions(name, "none", { "agentos.prewarm": "true" }),
+        );
+        await container.start();
+        ready += 1;
+      }
+    });
+  }
+
+  private async claimPrewarmedContainer(
+    accountId: string,
+    networkName: string,
+  ): Promise<Docker.Container | undefined> {
+    return this.withPrewarmLock(async () => {
+      for (const entry of await this.poolContainers()) {
+        const container = this.docker.getContainer(entry.Id);
+        const info = await container.inspect().catch((err: unknown) => {
+          if ((err as { statusCode?: number }).statusCode === 404) return null;
+          throw err;
+        });
+        const currentName = info?.Name?.replace(/^\/+/, "") ?? "";
+        if (!info || !currentName.startsWith(PREWARM_CONTAINER_PREFIX)) continue;
+        if (info.Config?.Labels?.["agentos.prewarm"] !== "true") continue;
+        if (info.Config?.Labels?.["agentos.egressConfigHash"] !== this.egressConfigHash) continue;
+        if (!info.State?.Running) continue;
+        try {
+          await container.rename({ name: this.containerName(accountId) });
+        } catch (err) {
+          const statusCode = (err as { statusCode?: number }).statusCode;
+          if (statusCode === 404 || statusCode === 409) continue;
+          throw err;
+        }
+        const networks = info.NetworkSettings?.Networks ?? {};
+        if (!networks[networkName])
+          await this.docker.getNetwork(networkName).connect({ Container: container.id });
+        void this.reconcilePrewarmPool().catch((err: unknown) =>
+          console.warn("[vm-manager] failed to replenish prewarm pool", err),
+        );
+        return container;
+      }
+      return undefined;
+    });
+  }
 
   private containerName(accountId: string): string {
     return `agentOS-vm-${accountId}`;
@@ -97,6 +434,45 @@ export class DockerVMManager implements VMManager {
     return `agentos-vm-${suffix}`;
   }
 
+  private isAccountContainer(
+    info: Awaited<ReturnType<Docker.Container["inspect"]>>,
+    accountId: string,
+  ): boolean {
+    if (info.Config?.Labels?.["agentos.accountId"] === accountId) return true;
+    const name = info.Name?.replace(/^\/+/, "");
+    return (
+      info.Config?.Labels?.["agentos.prewarm"] === "true" && name === this.containerName(accountId)
+    );
+  }
+
+  private accountIdForContainer(info: Awaited<ReturnType<Docker.Container["inspect"]>>): string {
+    const labeled = info.Config?.Labels?.["agentos.accountId"];
+    if (labeled) return labeled;
+    const stored = Object.values(loadState()).find((entry) => entry.vmId === info.Id)?.accountId;
+    if (stored) return stored;
+    const name = info.Name?.replace(/^\/+/, "") ?? "";
+    if (name.startsWith(PREWARM_CONTAINER_PREFIX)) return "";
+    return name.startsWith("agentOS-vm-") ? name.slice("agentOS-vm-".length) : "";
+  }
+
+  private async attachToAccountNetwork(
+    container: Docker.Container,
+    networkName: string,
+    info: Awaited<ReturnType<Docker.Container["inspect"]>>,
+  ): Promise<void> {
+    for (const attachedNetwork of Object.keys(info.NetworkSettings?.Networks ?? {})) {
+      if (attachedNetwork === networkName || attachedNetwork === "none") continue;
+      await this.docker
+        .getNetwork(attachedNetwork)
+        .disconnect({ Container: container.id, Force: true });
+    }
+    const attached = await container.inspect();
+    if (!attached.NetworkSettings?.Networks?.[networkName])
+      await this.docker.getNetwork(networkName).connect({ Container: container.id });
+    if (attached.State?.Paused) await container.unpause();
+    else if (attached.State?.Status !== "running") await container.start();
+  }
+
   private async hostContainerId(): Promise<string | undefined> {
     if (process.env.VM_HOST_IN_DOCKER !== "1" || !process.env.HOSTNAME) return undefined;
     const info = await this.docker.getContainer(process.env.HOSTNAME).inspect();
@@ -104,17 +480,20 @@ export class DockerVMManager implements VMManager {
   }
 
   private async ensureAccountNetwork(accountId: string): Promise<string> {
-    if (process.env.VM_EGRESS_POLICY === "allowlist")
-      throw new Error("VM_EGRESS_POLICY=allowlist is only supported by the Kubernetes backend");
     const name = this.accountNetworkName(accountId);
-    const isolated = process.env.VM_EGRESS_POLICY === "deny_all";
+    const isolated = this.egressPolicy === "deny_all";
+    const labels = {
+      "agentos.accountId": accountId,
+      "agentos.egressPolicy": this.egressPolicy,
+      "agentos.egressConfigHash": this.egressConfigHash,
+    };
     let network: Docker.Network;
     try {
       network = await this.docker.createNetwork({
         Name: name,
         Driver: "bridge",
         Internal: isolated,
-        Labels: { "agentos.accountId": accountId },
+        Labels: labels,
       });
     } catch (err) {
       const statusCode = (err as { statusCode?: number }).statusCode;
@@ -129,6 +508,15 @@ export class DockerVMManager implements VMManager {
       if (Boolean(details.Internal) !== isolated)
         throw new Error(
           `VM_EGRESS_POLICY changed for account ${accountId}; terminate its VM before reprovisioning`,
+        );
+      const storedHash = details.Labels?.["agentos.egressConfigHash"];
+      if (storedHash && storedHash !== this.egressConfigHash)
+        throw new Error(
+          `VM egress rules changed for account ${accountId}; terminate its VM before reprovisioning`,
+        );
+      if (this.egressPolicy === "allowlist" && storedHash !== this.egressConfigHash)
+        throw new Error(
+          `VM_EGRESS_ALLOWLIST changed for account ${accountId}; terminate its VM before reprovisioning`,
         );
     }
 
@@ -148,47 +536,60 @@ export class DockerVMManager implements VMManager {
   async provisionVM(accountId: string): Promise<VMInfo> {
     const name = this.containerName(accountId);
     const networkName = await this.ensureAccountNetwork(accountId);
+    const egressHelperId =
+      this.egressPolicy === "allowlist"
+        ? await this.ensureEgressHelper(accountId, networkName)
+        : undefined;
+    const containerNetworkMode = egressHelperId ? `container:${egressHelperId}` : networkName;
     let container = this.docker.getContainer(name);
+    let existing: Awaited<ReturnType<Docker.Container["inspect"]>> | undefined;
     try {
-      const existing = await container.inspect();
-      if (existing.Config?.Labels?.["agentos.accountId"] !== accountId)
-        throw new Error("refusing to reuse a Docker VM owned by another account");
-      if (existing.State?.Paused) await container.unpause();
-      for (const attachedNetwork of Object.keys(existing.NetworkSettings?.Networks ?? {})) {
-        if (attachedNetwork !== networkName) {
-          await this.docker
-            .getNetwork(attachedNetwork)
-            .disconnect({ Container: container.id, Force: true });
-        }
-      }
-      const attached = await container.inspect();
-      if (!attached.NetworkSettings?.Networks?.[networkName])
-        await this.docker.getNetwork(networkName).connect({ Container: container.id });
-      if (attached.State?.Status !== "running" && !attached.State?.Paused) await container.start();
+      existing = await container.inspect();
     } catch (err) {
       if ((err as { statusCode?: number }).statusCode !== 404) throw err;
-      container = await this.docker.createContainer({
-        Image: IMAGE,
-        name,
-        Labels: { "agentos.accountId": accountId },
-        HostConfig: {
-          Memory: Number(process.env.VM_MEMORY_BYTES ?? 2_147_483_648),
-          MemorySwap: Number(process.env.VM_MEMORY_BYTES ?? 2_147_483_648),
-          NanoCpus: Number(process.env.VM_CPU_NANOS ?? 2_000_000_000),
-          PidsLimit: Number(process.env.VM_PIDS_LIMIT ?? 512),
-          NetworkMode: networkName,
-          CapDrop: ["ALL"],
-          SecurityOpt: ["no-new-privileges:true"],
-          Init: true,
-        },
-      });
-      await container.start();
+    }
+    if (!existing) {
+      container =
+        (await this.claimPrewarmedContainer(accountId, networkName)) ??
+        (await this.createAccountContainer(accountId, name, containerNetworkMode));
+      existing = await container.inspect();
+    }
+    this.assertEgressConfig(existing, true, egressHelperId);
+    if (!this.isAccountContainer(existing, accountId))
+      throw new Error("refusing to reuse a Docker VM owned by another account");
+    if (egressHelperId) {
+      if (existing.State?.Paused) await container.unpause();
+      else if (existing.State?.Status !== "running") await container.start();
+    } else {
+      await this.attachToAccountNetwork(container, networkName, existing);
     }
     const vmId = container.id;
     const state = loadState();
     state[accountId] = { accountId, vmId };
     saveState(state);
     return this.waitUntilAddressed(vmId);
+  }
+
+  private async createAccountContainer(
+    accountId: string,
+    name: string,
+    networkName: string,
+  ): Promise<Docker.Container> {
+    try {
+      const container = await this.docker.createContainer(
+        this.containerCreateOptions(name, networkName, { "agentos.accountId": accountId }),
+      );
+      await container.start();
+      return container;
+    } catch (err) {
+      if ((err as { statusCode?: number }).statusCode !== 409) throw err;
+      const container = this.docker.getContainer(name);
+      const info = await container.inspect();
+      this.assertEgressConfig(info);
+      if (!this.isAccountContainer(info, accountId))
+        throw new Error("refusing to reuse a Docker VM owned by another account");
+      return container;
+    }
   }
 
   private async waitUntilAddressed(vmId: string): Promise<VMInfo> {
@@ -206,6 +607,11 @@ export class DockerVMManager implements VMManager {
 
   async wakeVM(vmId: string): Promise<VMInfo> {
     const container = this.docker.getContainer(vmId);
+    const info = await container.inspect();
+    const accountId = this.accountIdForContainer(info);
+    const helperId =
+      this.egressPolicy === "allowlist" ? await this.existingEgressHelperId(accountId) : undefined;
+    this.assertEgressConfig(info, true, helperId);
     try {
       await container.unpause();
     } catch {
@@ -215,7 +621,12 @@ export class DockerVMManager implements VMManager {
   }
 
   async suspendVM(vmId: string): Promise<void> {
-    await this.docker.getContainer(vmId).pause();
+    const container = this.docker.getContainer(vmId);
+    const info = await container.inspect().catch((err: unknown) => {
+      if ((err as { statusCode?: number }).statusCode === 404) return null;
+      throw err;
+    });
+    if (info?.State?.Running) await container.stop({ t: 10 });
   }
 
   async listVMs(): Promise<VMInfo[]> {
@@ -244,7 +655,10 @@ export class DockerVMManager implements VMManager {
   async terminateVM(vmId: string): Promise<void> {
     const container = this.docker.getContainer(vmId);
     const info = await container.inspect().catch(() => null);
-    const accountId = info?.Config?.Labels?.["agentos.accountId"];
+    const accountId =
+      (info ? this.accountIdForContainer(info) : "") ||
+      Object.values(loadState()).find((entry) => entry.vmId === vmId)?.accountId ||
+      "";
     try {
       await container.stop();
     } catch {
@@ -252,6 +666,7 @@ export class DockerVMManager implements VMManager {
     }
     await container.remove({ force: true });
     if (accountId) {
+      await this.removeEgressHelper(accountId);
       const networkName = this.accountNetworkName(accountId);
       const network = this.docker.getNetwork(networkName);
       const hostContainerId = await this.hostContainerId().catch(() => undefined);
@@ -270,16 +685,15 @@ export class DockerVMManager implements VMManager {
   async getVMStatus(vmId: string): Promise<VMInfo> {
     try {
       const info = await this.docker.getContainer(vmId).inspect();
-      const accountId =
-        info.Config?.Labels?.["agentos.accountId"] ??
-        Object.values(loadState()).find((e) => e.vmId === vmId)?.accountId ??
-        "";
+      const accountId = this.accountIdForContainer(info);
       const status = mapDockerState(info.State?.Status, info.State?.Paused);
-      const ip =
+      let ip =
         info.NetworkSettings?.IPAddress ||
         Object.values(info.NetworkSettings?.Networks ?? {}).find((network) => network.IPAddress)
           ?.IPAddress ||
         undefined;
+      if (!ip && this.egressPolicy === "allowlist" && accountId)
+        ip = await this.egressHelperAddress(accountId);
       return { vmId, accountId, status, ipAddress: ip };
     } catch {
       return { vmId, accountId: "", status: "terminated" };

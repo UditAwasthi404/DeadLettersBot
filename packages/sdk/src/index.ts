@@ -192,11 +192,18 @@ export interface SubagentRecord {
   allowedTools: string[];
   status: "queued" | "running" | "completed" | "error" | "cancelled" | "stalled";
   result: string | null;
-  usage: { promptTokens: number; completionTokens: number; totalTokens: number } | null;
-  stallCount?: number;
-  lastProgressAt?: string | null;
-  stallEvents?: Array<{ at: string; reason: string }>;
-  steeringEvents?: Array<{ at: string; message: string }>;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cachedPromptTokens?: number;
+    cacheWritePromptTokens?: number;
+    source?: "provider" | "estimate";
+  } | null;
+  stallCount: number;
+  lastProgressAt: string | null;
+  stallEvents: Array<{ at: string; reason: string }>;
+  steeringEvents: Array<{ at: string; message: string }>;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;

@@ -16,6 +16,8 @@ export {
 } from "./prompt.ts";
 export {
   type CatalogTool,
+  SUBAGENT_CONNECTOR_CALL_PARAMETERS,
+  SUBAGENT_CONNECTOR_READ_ACTIONS,
   STATIC_CATALOG,
   toInferenceTool,
 } from "./tools/catalog.ts";

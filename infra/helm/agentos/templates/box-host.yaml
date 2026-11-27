@@ -1,5 +1,16 @@
-{{- if ne (int .Values.replicaCount) 1 }}
-{{- fail "AgentOS must run with exactly one replica until turn and VM routing are externalized" }}
+{{- if and (not .Values.autoscaling.enabled) (ne (int .Values.replicaCount) 1) }}
+{{- fail "set autoscaling.enabled=true to run multiple box-host replicas" }}
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+{{- if lt (int .Values.autoscaling.minReplicas) 2 }}
+{{- fail "autoscaling.minReplicas must be at least 2 when autoscaling is enabled" }}
+{{- end }}
+{{- if lt (int .Values.autoscaling.maxReplicas) (int .Values.autoscaling.minReplicas) }}
+{{- fail "autoscaling.maxReplicas must be greater than or equal to autoscaling.minReplicas" }}
+{{- end }}
+{{- if or (lt (int .Values.autoscaling.targetCPUUtilizationPercentage) 1) (gt (int .Values.autoscaling.targetCPUUtilizationPercentage) 100) }}
+{{- fail "autoscaling.targetCPUUtilizationPercentage must be between 1 and 100" }}
+{{- end }}
 {{- end }}
 {{- if not (has .Values.agent.vmEgressPolicy (list "allow_all" "deny_all" "allowlist")) }}
 {{- fail "agent.vmEgressPolicy must be allow_all, deny_all, or allowlist" }}
@@ -57,7 +68,7 @@ metadata:
   labels:
     {{- include "agentos.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
   selector:
     matchLabels:
       {{- include "agentos.selectorLabels" . | nindent 6 }}

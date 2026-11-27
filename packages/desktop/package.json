@@ -23,6 +23,7 @@
     "react-dom": "19.0.3",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "simple-icons": "15.22.0",
     "ws": "8.21.0"
   },
   "devDependencies": {
@@ -30,6 +31,7 @@
     "@types/react": "19.0.3",
     "@types/react-dom": "19.0.2",
     "@types/ws": "8.5.13",
+    "@vitejs/plugin-react": "4.7.0",
     "dmg-builder": "26.18.0",
     "electron": "42.11.16",
     "electron-builder": "26.18.0",

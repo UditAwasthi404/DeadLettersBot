@@ -20,9 +20,15 @@ export interface ExecResult {
   outputTruncated?: boolean;
 }
 
+export interface BrowserEndpoint {
+  url: string;
+  headers?: Record<string, string>;
+}
+
 export interface VMManager {
   provisionVM(accountId: string): Promise<VMInfo>;
   wakeVM(vmId: string): Promise<VMInfo>;
+  /** Stop VM compute while preserving its workspace for the next wake. */
   suspendVM(vmId: string): Promise<void>;
   terminateVM(vmId: string): Promise<void>;
   getVMStatus(vmId: string): Promise<VMInfo>;
@@ -38,6 +44,8 @@ export interface VMManager {
   ): Promise<ExecResult>;
   /** Start or reuse a bot-isolated Xvfb + Chromium instance and return its CDP port. */
   ensureBotBrowser(vmId: string, botId: string): Promise<number>;
+  /** Optional host-side route to the bot's browser, when direct VM access is unavailable. */
+  getBotBrowserEndpoint?(vmId: string, botId: string): BrowserEndpoint;
   /** Start or reuse x11vnc on that bot's Xvfb display and return its RFB port. */
   ensureBotVnc(vmId: string, botId: string): Promise<number>;
   /**

@@ -59,10 +59,20 @@ export async function assertPublicHttpUrl(value: string): Promise<URL> {
   return (await resolvePublicHttpTarget(value)).url;
 }
 
-async function requestPublicHttp(
+type PublicHttpResponse = {
+  status: number;
+  headers: import("node:http").IncomingHttpHeaders;
+  text: string;
+};
+type PublicHttpRequester = (
   target: PinnedFetchTarget,
   maxBytes: number,
-): Promise<{ status: number; headers: import("node:http").IncomingHttpHeaders; text: string }> {
+) => Promise<PublicHttpResponse>;
+
+async function defaultRequestPublicHttp(
+  target: PinnedFetchTarget,
+  maxBytes: number,
+): Promise<PublicHttpResponse> {
   return new Promise((resolve, reject) => {
     const lookupPinned = (
       _hostname: string,
@@ -138,6 +148,13 @@ async function requestPublicHttp(
     request.on("close", () => clearTimeout(deadline));
     request.end();
   });
+}
+
+let requestPublicHttp: PublicHttpRequester = defaultRequestPublicHttp;
+
+/** Test-only override for the pinned HTTP transport used by FetchURL. */
+export function setPublicHttpRequesterForTests(requester: PublicHttpRequester | null): void {
+  requestPublicHttp = requester ?? defaultRequestPublicHttp;
 }
 
 export async function searchWeb(query: string): Promise<unknown> {

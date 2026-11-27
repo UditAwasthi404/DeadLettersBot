@@ -1,0 +1,15 @@
+{
+  "prompt": "try a shell command",
+  "fixture": [
+    {
+      "type": "toolCall",
+      "toolCall": {
+        "name": "RunShell",
+        "args": { "command": "echo should-be-blocked" }
+      }
+    },
+    { "type": "ok" }
+  ],
+  "disabledToolIds": ["RunShell", "SearchWeb", "FetchURL"],
+  "stepBudget": 4
+}

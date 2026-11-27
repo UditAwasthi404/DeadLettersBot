@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { assertPublicHttpUrl, fetchURL, isBlockedIp } from "./web-tools.ts";
+import {
+  assertPublicHttpUrl,
+  fetchURL,
+  isBlockedIp,
+  setPublicHttpRequesterForTests,
+} from "./web-tools.ts";
 
 describe("public URL guard", () => {
   test("blocks loopback, link-local, and rewritten private addresses", async () => {
@@ -30,17 +35,20 @@ describe("public URL guard", () => {
   });
 
   test("does not follow a redirect onto the host network", async () => {
-    const original = globalThis.fetch;
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      const href = String(input);
-      if (href.includes("127.0.0.1")) throw new Error("redirect target was fetched");
-      return new Response(null, { status: 302, headers: { location: "http://127.0.0.1/" } });
-    }) as typeof fetch;
+    setPublicHttpRequesterForTests(async (target) => {
+      if (target.address === "127.0.0.1" || target.url.hostname === "127.0.0.1")
+        throw new Error("redirect target was fetched");
+      return {
+        status: 302,
+        headers: { location: "http://127.0.0.1/" },
+        text: "",
+      };
+    });
     try {
       const result = await fetchURL("https://8.8.8.8/start");
       expect(result).toEqual({ error: "URL targets a private or local network address" });
     } finally {
-      globalThis.fetch = original;
+      setPublicHttpRequesterForTests(null);
     }
   });
 });

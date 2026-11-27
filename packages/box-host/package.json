@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "bun run src/index.ts",
+    "eval": "bun run src/index.ts --eval-mode",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },

@@ -11,6 +11,7 @@ import type { GatewayDeps } from "./gateway.ts";
 import { loggedError, logger } from "./logger.ts";
 import { queueRoutine } from "./routine-queue.ts";
 import { gmailEventQuery } from "./routine-trigger.ts";
+import { acquireRedisLease } from "./worker-lease.ts";
 import { drainAgent } from "./worker.ts";
 
 type Cursor = { initialized: boolean; seenIds: string[] };
@@ -99,13 +100,25 @@ let activeRun: Promise<number> | undefined;
 
 export function pollConnectorEvents(deps: GatewayDeps): Promise<number> {
   if (activeRun) return activeRun;
-  activeRun = poll(deps).finally(() => {
+  activeRun = (async () => {
+    const lease = await acquireRedisLease(deps.redis, "worker:connector-events:lease", () => {});
+    if (!lease) return 0;
+    try {
+      return await poll(deps, () => lease.isHeld());
+    } finally {
+      await lease
+        .release()
+        .catch((err) =>
+          logger.warn(loggedError(err), "failed to release connector-event poll lease"),
+        );
+    }
+  })().finally(() => {
     activeRun = undefined;
   });
   return activeRun;
 }
 
-async function poll(deps: GatewayDeps): Promise<number> {
+async function poll(deps: GatewayDeps, leaseHeld: () => boolean): Promise<number> {
   const sources = (await loadScheduleSources(deps.db)).filter(
     (routine) => routine.enabled && routine.trigger.type === "connector_event",
   );
@@ -120,16 +133,19 @@ async function poll(deps: GatewayDeps): Promise<number> {
   await deps.redis.set(pollOffsetKey, String((offset + selected.length) % sources.length));
   let fired = 0;
   for (const routine of selected) {
+    if (!leaseHeld()) break;
     if (routine.trigger.type !== "connector_event") continue;
     try {
       const token = await accessTokenFor(deps, routine.accountId, routine.trigger.service);
       if (!token) continue;
       const found = await eventIds(routine.trigger.service, routine.trigger, token);
+      if (!leaseHeld()) break;
       const cursor = await readCursor(deps, routine.id);
       const seen = new Set(cursor.seenIds);
       const fresh = found.filter((item) => !seen.has(item.id));
       const queued = cursor.initialized ? fresh.slice(0, MAX_NEW_EVENTS) : [];
       for (const item of queued) {
+        if (!leaseHeld()) break;
         await queueRoutine(
           deps,
           routine,
@@ -138,6 +154,7 @@ async function poll(deps: GatewayDeps): Promise<number> {
         );
         fired += 1;
       }
+      if (!leaseHeld()) break;
       const deferredIds = new Set(fresh.slice(queued.length).map((item) => item.id));
       const discoveredIds = cursor.initialized
         ? found.map((item) => item.id).filter((id) => !deferredIds.has(id))

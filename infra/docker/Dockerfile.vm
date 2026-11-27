@@ -1,33 +1,57 @@
-FROM node:22-bookworm-slim AS node-runtime
+FROM ubuntu:22.04 AS file-tools-build
 
-FROM gcc:12-bookworm AS file-tools-build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
 COPY agentos-file.c /tmp/agentos-file.c
 COPY agentos-shell.c /tmp/agentos-shell.c
 RUN gcc -std=c11 -O2 -Wall -Wextra -Werror -o /usr/local/bin/agentos-file /tmp/agentos-file.c \
     && gcc -std=c11 -O2 -Wall -Wextra -Werror -o /usr/local/bin/agentos-shell /tmp/agentos-shell.c
 
-FROM debian:bookworm-slim
+FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb x11vnc bash coreutils findutils util-linux ca-certificates inotify-tools \
-    && rm -rf /var/lib/apt/lists/* \
+ARG PLAYWRIGHT_VERSION=1.64.1
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/home/agent \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash coreutils findutils util-linux ca-certificates curl gpg inotify-tools iptables x11vnc xvfb \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && chmod 0644 /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install --global "playwright@${PLAYWRIGHT_VERSION}" "ipaddr.js@2.5.0" \
+    && playwright install --with-deps chromium \
+    && mkdir -p /usr/local/lib/agentos/node_modules \
+    && ln -s "$(npm root --global)/ipaddr.js" /usr/local/lib/agentos/node_modules/ipaddr.js \
+    && useradd --create-home --uid 1000 --shell /bin/bash agent \
     && mkdir -p /tmp/.X11-unix \
     && chmod 1777 /tmp/.X11-unix \
-    && useradd -m -u 1000 agent
-ENV HOME=/home/agent
+    && browser="$(find /ms-playwright -type f -name chrome -print -quit)" \
+    && test -n "$browser" \
+    && ln -s "$browser" /usr/local/bin/chromium \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/* /root/.npm/_logs
 
 COPY ensure-bot-browser.sh /usr/local/bin/agentos-ensure-browser
 COPY ensure-bot-vnc.sh /usr/local/bin/agentos-ensure-vnc
 COPY controlled-exec.sh /usr/local/bin/agentos-controlled-exec
+COPY agentos-vm-entrypoint.mjs /usr/local/bin/agentos-vm-entrypoint.mjs
+COPY agentos-vm-entrypoint.sh /usr/local/bin/agentos-vm-entrypoint.sh
 COPY --from=file-tools-build /usr/local/bin/agentos-file /usr/local/bin/agentos-file
 COPY --from=file-tools-build /usr/local/bin/agentos-shell /usr/local/bin/agentos-shell
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN chmod 0755 /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-ensure-vnc /usr/local/bin/agentos-controlled-exec /usr/local/bin/agentos-file /usr/local/bin/agentos-shell \
-    && ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-RUN node --version && npm --version
+RUN chmod 0755 /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-ensure-vnc /usr/local/bin/agentos-controlled-exec /usr/local/bin/agentos-vm-entrypoint.mjs /usr/local/bin/agentos-vm-entrypoint.sh /usr/local/bin/agentos-file /usr/local/bin/agentos-shell \
+    && node --version \
+    && npm --version \
+    && chromium --version
+
+HEALTHCHECK --interval=1s --timeout=12s --start-period=30s --retries=60 CMD ["node", "-e", "if (process.env.AGENTOS_EGRESS_FIREWALL_HELPER === '1') { const fs = require('node:fs'); const cp = require('node:child_process'); const closeEgress = () => { for (const bin of ['iptables', 'ip6tables']) cp.spawnSync(bin, ['-w', '5', '-F', 'AGENTOS_EGRESS']); process.exit(1); }; try { const [pidText, heartbeatText, dueText] = fs.readFileSync('/run/agentos-egress-ready', 'utf8').split(':'); const pid = Number(pidText); const heartbeat = Number(heartbeatText); const due = Number(dueText); const cmd = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8'); const rules = JSON.parse(process.env.VM_EGRESS_ALLOWLIST || '[]'); const hasDomains = rules.some((rule) => typeof rule.domain === 'string'); if (!cmd.includes('/usr/local/bin/agentos-vm-entrypoint.mjs') || !Number.isFinite(heartbeat) || (hasDomains && (!Number.isFinite(due) || Date.now() > due + 10000))) closeEgress(); } catch { closeEgress(); } }"]
 
 USER agent
 WORKDIR /home/agent
+ENTRYPOINT ["/usr/local/bin/agentos-vm-entrypoint.sh"]
 CMD ["sleep", "infinity"]

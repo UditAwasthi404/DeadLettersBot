@@ -1,3 +1,4 @@
+import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
@@ -9,6 +10,7 @@ export default defineConfig({
   build: { outDir: "dist", emptyOutDir: true },
   server: { port: 5173, strictPort: true },
   plugins: [
+    react(),
     {
       name: "dev-csp",
       apply: "serve",

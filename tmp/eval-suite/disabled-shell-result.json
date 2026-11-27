@@ -1,0 +1,38 @@
+{
+  "status": "completed",
+  "updates": [
+    "ok",
+    "ok"
+  ],
+  "deliveries": [
+    "ok"
+  ],
+  "toolCalls": [
+    {
+      "name": "RunShell",
+      "args": {
+        "command": "echo should-be-blocked"
+      },
+      "result": {
+        "error": "unadvertised tool"
+      },
+      "isError": true
+    },
+    {
+      "name": "SendToUser",
+      "args": {
+        "content": "ok",
+        "endTurn": true
+      },
+      "result": {
+        "ok": true
+      }
+    }
+  ],
+  "tokenUsage": {
+    "promptTokens": 0,
+    "completionTokens": 0,
+    "totalTokens": 0,
+    "source": "estimate"
+  }
+}

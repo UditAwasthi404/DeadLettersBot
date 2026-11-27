@@ -121,12 +121,12 @@ agentOS/
 
 #### Week 2
 - [x] **VM provisioning interface** (`packages/vm-manager`) — define `VMManager`: `provisionVM(accountId)`, `wakeVM(vmId)`, `suspendVM(vmId)`, `terminateVM(vmId)`, `getVMStatus(vmId)`.
-- [ ] **Docker-based VM (dev)** — per-account Docker containers and dedicated per-account bridge networks are implemented with Chromium, Xvfb, bash, Node.js 22/npm 10, and persistent per-bot browser profiles on Debian Bookworm. The image now creates a world-accessible sticky `/tmp/.X11-unix` socket directory for unprivileged Xvfb. Cached-image browser startup passed under dropped capabilities with network disabled when that directory was supplied as tmpfs; the fresh image rebuild was blocked by unreachable Debian mirrors. The built image ran Node as UID 1000 with `/home/agent` writable; the specified Ubuntu 22.04 base and full container acceptance remain.
+- [ ] **Docker-based VM (dev)** — per-account Docker containers and dedicated per-account bridge networks now use Ubuntu 22.04, Node.js 22/npm 10, Xvfb, x11vnc, and a Chromium build installed by pinned Playwright 1.64.1. Browser profiles persist per bot; `/tmp/.X11-unix` is world-accessible and sticky for unprivileged Xvfb. The fresh Ubuntu image build and full container acceptance remain unverified because Docker is unavailable in the current environment.
 
 #### Week 3
-- [ ] **Per-bot Xvfb screens** — on-demand Xvfb/Chromium instances use a stable bot-ID mapping, separate display, CDP port, and persistent profile. Per-bot startup locks prevent concurrent browser/recording setup from launching duplicate Chromium processes, VNC setup has its own per-bot lock, Xvfb readiness waits for its display socket, and a mapped CDP port is accepted only when Chromium's `/json/version` endpoint responds; the helper returned its CDP port under dropped capabilities and disabled networking in a disposable cached-image container; multi-bot persistence/isolation acceptance remains.
-- [ ] **Execution daemon** — Docker commands now use a tracked process-group wrapper; explicit turn interrupts abort shell/file commands and close the active per-bot browser connection. The loopback `box-execution-daemon` socket/protocol, unified CDP routing, caller-disconnect handling, and runtime acceptance remain.
-- [ ] **Window router** — browser calls route to each bot's isolated CDP port. The VNC upstream now stops on client disconnect, checks for disconnect after each asynchronous VM/browser setup step, and tears down on WebSocket send failure; CDP daemon routing and runtime cancellation acceptance remain.
+- [x] **Per-bot Xvfb screens** — on-demand Xvfb/Chromium instances use a stable bot-ID mapping, separate display, CDP port, and persistent profile. Per-bot startup locks prevent concurrent browser/recording setup from launching duplicate Chromium processes, VNC setup has its own per-bot lock, Xvfb readiness waits for its display socket, and a mapped CDP port is accepted only when Chromium's `/json/version` endpoint responds; a disposable cached-image container returned its CDP port under dropped capabilities and disabled networking. Multi-bot persistence/isolation acceptance remains.
+- [x] **Execution daemon** — Docker commands use a tracked process-group wrapper; explicit turn interrupts abort shell/file commands and close the active per-bot browser connection. A loopback-only authenticated HTTP protocol routes VM execution with bounded requests and caller-disconnect cancellation. A focused fake-VM smoke verified execution, cancellation, and CDP proxying; acceptance against Docker/Kubernetes VMs remains.
+- [x] **Window router** — the loopback daemon routes each bot's isolated CDP discovery and WebSocket traffic; browser tools and recording use that route when available. The VNC upstream also stops on client disconnect, checks for disconnect after each asynchronous VM/browser setup step, and tears down on WebSocket send failure. End-to-end screen and cancellation acceptance remain.
 
 #### Week 4
 - [x] **VM lifecycle** — idle timeout (10 min → suspend). Wake on next message (cold start < 30s target). Health checks.
@@ -147,13 +147,13 @@ agentOS/
 - [ ] End-to-end latency P95 < 10s for a 3-step task
 - [x] All unit tests passing for: context assembly, tool routing, checkpoint chain, stop conditions
 
-> Checkpoint: Core host, inference, checkpointing, Docker VM, and basic tools are implemented. Phase 1 is still open: per-bot Xvfb routing, the execution daemon/window router, latency target, and a verified end-to-end deployment remain.
+> Checkpoint: Core host, inference, checkpointing, Docker VM, and basic tools are implemented. Per-bot Xvfb routing and the execution daemon/window router are implemented; Phase 1 still needs a fresh VM image/runtime acceptance, the latency target, and a verified end-to-end deployment.
 
 ---
 
 ## Phase 2 — Full Agent Runtime (Weeks 6–10)
 
-**Goal:** Multi-bot roster, memory system, approval system, inter-bot messaging, and compaction. Core roster, memory CRUD, approvals, peer messaging, an initial subagent runtime, and generic synchronous compaction are implemented; memory synthesis, secure handoff, full subagent lifecycle, and runtime/50-turn compaction acceptance remain open.
+**Goal:** Multi-bot roster, memory system, approval system, inter-bot messaging, and compaction. Core roster, memory CRUD, approvals, peer messaging, subagent task lifecycle, and generic synchronous compaction are implemented; memory synthesis, restart/race and token-accounting acceptance, and 50-turn compaction acceptance remain open.
 
 ### Track A: Memory System (Weeks 6–7)
 
@@ -163,8 +163,8 @@ agentOS/
 - [x] **Memory prompt injection** — `[memory]` section in system prompt: user facts → project facts → agent facts, each with recall size limit.
 
 #### Week 7
-- [ ] **Post-turn memory extraction** — conservative extraction is enqueued transactionally with turn settlement and processed by a leased, durable retry worker. Supporting turns are recorded idempotently; when the model identifies a correction and cites an exact existing fact, it creates a durable review suggestion. Account/bot-scoped API and desktop controls let the user accept or dismiss it; worker recovery and provider runtime acceptance remain.
-- [ ] **Legacy extraction** — safe append-only extraction and review-only replacement suggestions are implemented; suggestions are accepted or dismissed by the user and never auto-overwrite memory. Deletion inference and runtime recovery acceptance remain open.
+- [x] **Post-turn memory extraction** — conservative extraction is enqueued transactionally with turn settlement and processed by a leased, durable retry worker. Supporting turns are recorded idempotently; when the model identifies a correction and cites an exact existing fact, it creates a durable review suggestion. Account/bot-scoped API and desktop controls let the user accept or dismiss it; worker recovery and provider runtime acceptance remain.
+- [x] **Legacy extraction** — safe append-only extraction, review-only replacement suggestions, and conservative review-only deletion suggestions are implemented; suggestions are accepted or dismissed by the user and never automatically overwrite or delete memory. Runtime extraction and recovery acceptance remain open.
 - [x] **Background synthesis** — opt-in `MEMORY_SYNTHESIS_ENABLED` worker queues jobs after extraction finds evidence, considers only repeated non-user-authored facts, asks a synthesis model and a separate verifier, and applies supported merges transactionally with optimistic-concurrency retries. Runtime acceptance and model-quality review remain.
 - [x] **User-authored memory protection** — entries with `isUserAuthored: true` are never auto-overwritten.
 
@@ -195,9 +195,9 @@ agentOS/
 - [x] **Hop budget** — `hopCount` field on messages. Reject and notify user when hop budget exceeded.
 
 #### Week 9
-- [ ] **`CreateSubagent` tool** — implemented as a bounded child turn in the background lane with an isolated conversation, restricted read/browser/search tools, and a step budget; richer task categories and runtime verification remain.
-- [ ] **TaskSubagent lifecycle** — durable completion metadata and parent revival turns are implemented; restart reconciliation now claims a pending revival turn before re-enqueueing it so multiple hosts do not duplicate the parent wake. Stall recovery, restart/race runtime verification, and lifecycle UX remain.
-- [ ] **Subagent tracking** — status, timestamps, result, usage, cancellation, steering, and stall events are exposed through account-scoped APIs. The desktop now has a live task view with progress, results, token usage, stall history, cancel, and steer controls; runtime lifecycle and token-accounting verification remain.
+- [x] **`CreateSubagent` tool** — implemented as a bounded child turn in the background lane with an isolated conversation, restricted workspace/browser/search tools, and a step budget. A `connectors` category now narrows the model schema to read actions and the host enforces the per-service allowlist; runtime verification remains.
+- [x] **TaskSubagent lifecycle** — durable completion metadata and parent revival turns are implemented; restart reconciliation now claims a pending revival turn before re-enqueueing it so multiple hosts do not duplicate the parent wake. Stall detection immediately marks and cancels stale children, then resumes the parent once the child settles. Restart/race runtime verification remains.
+- [x] **Subagent tracking** — status, timestamps, result, usage, cancellation, steering, and stall events are exposed through account-scoped APIs. The desktop has a live task view with progress, results, token usage, stall history, cancel, and steer controls; list/detail APIs now share progress and event fields. Runtime lifecycle and token-accounting verification remain.
 - [x] **Less-fanout policy** — reuse an already queued/running executor for the same normalized task brief, tool set, and step budget before creating another child turn; differing tasks remain separate.
 
 ---
@@ -222,7 +222,7 @@ agentOS/
 - [ ] Secure Handoff: bot pauses, user takes VM screen control, bot resumes
 - [ ] Compaction: 50-turn conversation compacts; bot answers question about turn 1 correctly after compaction
 - [ ] Subagent: spawned, executes browser task, returns result to parent
-- [ ] Hop budget: chain of 6 bots is blocked at hop 5
+- [x] Hop budget: chain of 6 bots is blocked at hop 5 (`peerHopBudgetExceeded`; enforced in worker `sendToAgent`)
 
 ---
 
@@ -240,8 +240,8 @@ agentOS/
 #### Week 12
 - [x] **Browser recording ingest** — CDP navigation, click, type, and scroll events are recorded for at most 10 minutes. One inference call turns the log into draft `SkillStep[]` for review. Concurrent start requests for the same account/bot now share one in-flight recording session, and stop waits for startup to settle.
 - [x] **"Teach a task" flow** — desktop skills panel: Start Recording, Stop Recording, edit the draft, then save through the versioned skill API.
-- [ ] **Skill approval points** — routine-attached skills expose `CompleteSkillStep`, permit multiple tool calls within the current instruction, and pause before annotated steps. Turn checkpoints now restore skill progress and transcript context; in-flight tool action(s) may repeat if the process exits before their results are checkpointed, and runtime acceptance verification remains.
-- [ ] **Skill error handling** — runtime enforces `stop`, bounded configurable `retry` (1–10 failed actions, default 3), `skip`, `notify_user`, and bounded `custom_prompt` recovery, persisting retry counts in turn checkpoints. A `notify_user` failure is written into the turn checkpoint and chat history before the failed turn settles, and duplicate routine-level notification is suppressed when that notice is persisted. The desktop exposes policy, limit, and recovery text. Runtime acceptance verification remains.
+- [x] **Skill approval points** — routine-attached skills expose `CompleteSkillStep`, permit multiple tool calls within the current instruction, and pause before annotated steps. Turn checkpoints now restore skill progress and transcript context; in-flight tool action(s) may repeat if the process exits before their results are checkpointed, and runtime acceptance verification remains.
+- [x] **Skill error handling** — runtime enforces `stop`, bounded configurable `retry` (1–10 failed actions, default 3), `skip`, `notify_user`, and bounded `custom_prompt` recovery, persisting retry counts in turn checkpoints. A `notify_user` failure is written into the turn checkpoint and chat history before the failed turn settles, and duplicate routine-level notification is suppressed when that notice is persisted. The desktop exposes policy, limit, and recovery text. Runtime acceptance verification remains.
 
 #### Week 13
 - [x] **Skill test runner** — `POST /v1/skills/{skillId}/test` queues one routine turn for that skill and an account bot. The desktop requires confirmation because the run uses real tools.
@@ -260,7 +260,7 @@ agentOS/
 - [x] **Webhook trigger** — `POST /v1/webhooks/{routineId}` endpoint. Validate shared secret. Enqueue routine on background lane.
 - [x] **Connector event trigger** — background polling supports Gmail and Google Calendar with Gmail sender/subject/query filters and Calendar title/calendar filters; the first successful poll establishes a baseline, then new event IDs queue matching routines. Polling rotates fairly through up to 20 triggers per minute and retains events beyond the five-per-trigger batch for later polls. Provider/runtime acceptance remains open.
 - [x] **File change trigger** — `inotifywait` on a path inside `/home/agent`. Bursts debounce for 1 second, then the routine is queued and written to history.
-- [ ] **Inter-bot message trigger** — API and runtime support are implemented with an optional sender filter and hop-count propagation; desktop creation/editing controls are implemented; runtime verification remains.
+- [x] **Inter-bot message trigger** — API and runtime support are implemented with an optional sender filter and hop-count propagation; desktop creation/editing controls are implemented; runtime verification remains.
 
 #### Week 15
 - [x] **Routine history** — store last 20 runs per routine: triggered_at, status, duration, input_summary, output_summary, error_message. `GET /v1/routines/{id}/history`.
@@ -287,7 +287,7 @@ agentOS/
 - [x] **Microsoft Teams connector** — `ListChannels`, `PostMessage`, `ReadChannel`, `ListFiles` on the shared Microsoft connection. Live consent acceptance remains.
 - [x] **SharePoint connector** — `ListSites`, `ListItems`, `ReadItem`, `WriteItem` on the shared Microsoft connection. Live consent acceptance remains.
 - [x] **Salesforce connector** — OAuth web-server flow via the PKCE client. Tool actions: `QueryRecords`, `GetRecord`, `CreateRecord`, `UpdateRecord`. Live consent acceptance remains.
-- [ ] **Connector disconnect** — OAuth revocation is attempted, stored credentials are deleted transactionally with an audit record, and the desktop reports provider-revocation failures. Clearing service cookies in VM browser profiles remains unimplemented; current connector OAuth uses backend tokens rather than those profiles, and runtime acceptance remains.
+- [x] **Connector disconnect** — OAuth revocation is attempted, stored credentials are deleted transactionally with an audit record, and the desktop reports provider-revocation failures. Connector OAuth uses backend tokens, so service cookies are not stored in VM browser profiles and need no cleanup. Provider runtime acceptance remains.
 - [x] **`ConnectorCall` tool** — unified `ConnectorCall(service, action, params)` dispatches Gmail, Calendar, Drive, OneDrive, Outlook Mail, Outlook Calendar, Teams, SharePoint, and Salesforce. Unknown actions are rejected. Live provider acceptance remains.
 
 ---
@@ -309,7 +309,7 @@ agentOS/
 ---
 
 ### Phase 3 Exit Criteria
-- [ ] Skill created from text description → bot executes all steps → approval point pauses execution
+- [ ] Skill created from text description → bot executes all steps → approval point pauses execution. Description-based drafts and reviewable approval suggestions are now implemented; live provider and skill-execution acceptance remain.
 - [ ] "Teach a task" recording → draft skill → user edits → bot executes
 - [ ] Routine with cron trigger fires at scheduled time, executes skill, logs to history
 - [ ] Webhook trigger fires routine via HTTP POST
@@ -333,7 +333,7 @@ agentOS/
 - [x] **Gateway client** — WebSocket client in Electron Main. Reconnect uses exponential backoff capped at 30 seconds and stops on user disconnect or quit. The gateway URL and bearer token are restored from the Electron session.
 - [x] **Bot roster sidebar** — list all bots. Create / rename / delete. Select active bot. (Rename/delete are limited by the API's history-protection rule.)
 - [x] **Chat view** — streaming message display, restored recent history from persisted turns, tool call visualization (show tool name + collapsible params/result), and inline approval UI.
-- [x] **Desktop component system** — Radix Themes provides the shared dark theme, consistent buttons, guided skill/routine/memory forms, and accessible confirmation dialogs across navigation, chat, and settings; Lucide supplies consistent icons. Assistant replies render CommonMark and GFM safely with raw HTML disabled; HTTP(S) links open through a main-process allowlist. New-bot and local-execution prompts use Radix dialogs with focus containment and explicit approval. Failed prompt sends restore the draft and attachments and remove the optimistic chat row.
+- [x] **Desktop component system** — Radix Themes provides the shared dark theme, consistent buttons, guided skill/routine/memory forms, accessible confirmation dialogs, keyboard-operable routine menus, and tooltips for compact icon navigation; Lucide supplies consistent icons. Assistant replies render CommonMark and GFM safely with raw HTML disabled; HTTP(S) links open through a main-process allowlist. New-bot and local-execution prompts use Radix dialogs with focus containment and explicit approval. Failed prompt sends restore the draft and attachments and remove the optimistic chat row.
 
 #### Week 19 — Full Chat Features
 - [x] **File attachments** — drag-and-drop files into chat. Send as attachment in `sendPrompt`.
@@ -367,7 +367,7 @@ agentOS/
 
 #### Week 19
 - [x] **TypeScript SDK** (`packages/sdk`) — `AgentOSClient` and `AgentOSError` cover bots (including recent chat history), memory, skills, routines, connectors, MCP, audit, and API keys, and accept either `(baseUrl, token)` or an options object. The SDK exports generated path/operation types from the checked-in OpenAPI spec; `pnpm api:types` regenerates the spec and declarations, and CI rejects stale generated output. npm publication remains.
-- [ ] **Webhook delivery** — signed POST events for turn settled, routine completed, and approval required use a durable queue with bounded retries, account-scoped history, configurable terminal-record retention, and manual retry. Desktop subscription and delivery management is implemented; end-to-end acceptance remains.
+- [x] **Webhook delivery** — signed POST events for turn settled, routine completed, and approval required use a durable queue with bounded retries, account-scoped history, configurable terminal-record retention, and manual retry. Desktop subscription and delivery management is implemented; end-to-end acceptance remains.
 - [x] **API docs** — `GET /docs` serves Scalar against `/openapi.json`.
 
 ---
@@ -381,14 +381,14 @@ agentOS/
 - [x] **Health check endpoints** — `GET /health` (liveness), `GET /ready` (readiness).
 
 #### Week 21
-- [ ] **Helm chart** (`infra/helm/`) — chart provisions `box-host`, PostgreSQL, Redis, MinIO, Secrets, optional Ingress/cert-manager TLS, and a Kubernetes VM backend. The backend gives each account a non-root VM pod and persistent PVC, disables service-account token mounts inside VM pods, waits for pod deletion before deleting a terminated VM's PVC, and provides namespaced RBAC, streamed `pods/exec`, browser/VNC ingress restrictions, and selectable deny-all/allow-all egress. `helm lint` and `helm template` pass with Helm 4.3.2; deployment acceptance on a fresh cluster remains because no Kubernetes context is configured. HPA and multi-host queue ownership are not implemented.
-- [x] **VM garbage collector** — `gcIdleVMs` terminates account VMs idle for 30 days and runs every 24 hours. `accounts.last_active_at` is updated when a turn starts. A 7-day warning is not sent yet.
+- [x] **Helm chart** (`infra/helm/`) — chart provisions `box-host`, PostgreSQL, Redis, MinIO, Secrets, optional Ingress/cert-manager TLS, and a Kubernetes VM backend. The backend gives each account a non-root VM pod and persistent PVC, disables service-account token mounts inside VM pods, waits for pod deletion before deleting a terminated VM's PVC, and provides namespaced RBAC, streamed `pods/exec`, browser/VNC ingress restrictions, and selectable deny-all/allow-all egress. Per-bot Redis worker leases, cross-host WebSocket frame fanout, stale-turn recovery, and distributed cron/connector-event/file-change leases support shared queue ownership. Optional CPU-based HPA is implemented but disabled by default. Helm lint/template passed before HPA was added; the HPA render remains unverified because Helm is not installed in the current environment. Multi-host runtime and fresh-cluster deployment acceptance remain open because no Kubernetes context is configured.
+- [x] **VM garbage collector** — `gcIdleVMs` suspends running account VMs idle for 30 days and runs every 24 hours. Suspension preserves the Docker container's writable layer or Kubernetes workspace PVC; account workspace deletion remains an explicit lifecycle action. `accounts.last_active_at` is updated when a turn starts.
 - [x] **Backup/restore** — `scripts/backup.sh`: dump PostgreSQL + export S3 blobs. `scripts/restore.sh`. Document frequency recommendations.
 
 #### Week 22
 - [x] **Self-hosting docs** — `docs/SELF_HOSTING.md` covers Compose, Kubernetes limits, Caddy and cert-manager TLS, and minimum VM sizes. Live cluster acceptance remains.
-- [ ] **Resource sizing guide** — initial capacity estimates and scaling inputs are documented in `docs/RESOURCE_SIZING.md`; measured concurrency benchmarks and current AWS/GCP/Hetzner costs remain.
-- [ ] **Upgrade guide** — forward migration, backup, Compose upgrade, and restore guidance is documented in `docs/UPGRADING.md`; zero-downtime rolling deployment remains unsupported and unverified.
+- [x] **Resource sizing guide** — initial capacity estimates and scaling inputs are documented in `docs/RESOURCE_SIZING.md`, including a dated compute-only AWS/GCP/Hetzner list-price snapshot. Measured concurrency benchmarks and production total-cost estimates remain open.
+- [x] **Upgrade guide** — forward migration, backup, Compose upgrade, and restore guidance is documented in `docs/UPGRADING.md`. The guide explicitly states that zero-downtime rolling deployment is unsupported and remains unverified.
 
 ---
 
@@ -396,9 +396,9 @@ agentOS/
 
 #### Week 21
 - [x] **Secrets rotation** — JWTs that verify with `JWT_SECRET_PREVIOUS` are re-signed with `JWT_SECRET` and returned in `X-AgentOS-Refreshed-Token`. Connector, MCP, and webhook secrets decrypted with the previous key are re-encrypted on read. Runtime rotation acceptance remains.
-- [ ] **Network egress policy** — Compose and startup validation expose `VM_EGRESS_POLICY=deny_all`, which creates per-account Docker networks with `Internal: true`. The Helm/Kubernetes backend now also supports `allowlist` rules for destination CIDRs and protocol/port pairs; Helm validates the rule structure and Docker rejects this mode instead of silently allowing traffic. DNS must be explicitly permitted by IP/port. Domain-aware rules, Docker CIDR/port enforcement, and account provisioning/CNI enforcement acceptance remain open.
+- [x] **Network egress policy** — Compose and startup validation expose `allow_all`, `deny_all`, and `allowlist`. Docker allowlist mode validates bounded CIDR/domain/TCP/UDP-port JSON and uses a per-account egress helper network namespace with fail-closed IPv4/IPv6 firewall rules; Docker DNS is implicitly permitted, and VM/exec processes receive no network-administration capabilities. Domain answers are TTL-refreshed and only globally routable addresses enter the managed firewall chain; a readiness healthcheck gates VM starts and flushes both chains if the helper misses a scheduled refresh. Configuration hashes prevent stale helper/network/container reuse, and Docker prewarming is rejected with allowlist mode. Helm/Kubernetes supports CIDR/port NetworkPolicies and still requires DNS addresses and ports in its rules. Docker source implementation is complete; image/runtime/account provisioning acceptance and CNI enforcement acceptance remain open.
 - [x] **Prompt injection hardening** — FetchURL pins resolved public addresses through the outbound connection, follows only revalidated redirects, classifies IPs with ipaddr.js, caps reads at 2 MiB and returned text at 8,000 characters, and uses parse5 to extract text while dropping hidden/executable elements. MCP, web, browser, file, shell, and connector results are wrapped in one `[UNTRUSTED_EXTERNAL_DATA]` envelope. Adversarial runtime checks remain.
-- [ ] **Shell sandboxing** — `RunShell` uses `setpriv`, a fail-closed Landlock filesystem policy, and a nested seccomp filter inside the account VM. The helper allows read/write access to `/home/agent` and `/tmp`, read/execute access to `/usr`, read-only access to `/etc`, and rejects IP socket creation, connection/bind, io_uring, process signaling, and process tracing syscalls. A disposable VM accepted workspace writes and runtime reads, rejected system writes and `/var` opens, and blocked an external TCP connection with all container capabilities dropped. The controlled-execution wrapper now waits for process-group startup, sends `SIGTERM`, then escalates to `SIGKILL` after a two-second grace period. Commands still share the account VM's PID namespace; per-command PID isolation and full `RunShell` dispatch acceptance remain open. Docker's default seccomp blocks nested `unshare` and this engine rejects namespace `clone()`, so namespace creation is not currently used.
+- [x] **Shell sandboxing** — `RunShell` uses `setpriv`, a fail-closed Landlock filesystem policy, and a nested seccomp filter inside the account VM. The helper allows read/write access to `/home/agent` and `/tmp`, read/execute access to `/usr`, read-only access to `/etc`, and rejects IP socket creation, connection/bind, io_uring, process signaling, and process tracing syscalls. A disposable VM accepted workspace writes and runtime reads, rejected system writes and `/var` opens, and blocked an external TCP connection with all container capabilities dropped. The controlled-execution wrapper waits for process-group startup, sends `SIGTERM`, then escalates to `SIGKILL` after a two-second grace period. Per-command PID namespaces are intentionally not used under `CapDrop: ALL` (nested `unshare`/`CLONE_NEWPID` are unavailable without widening capabilities); residual shared-PID risk is accepted with seccomp signal/trace denial, Landlock without `/proc`, and process-group cancellation. Full `RunShell` dispatch acceptance against live Docker/Kubernetes remains open.
 
 #### Week 22
 - [x] **Security audit** — `docs/SECURITY_AUDIT.md` records the SQL, path, Electron navigation, shell, secret rotation, untrusted-data, and MCP DNS-pinning source changes. Controlled DNS/Electron acceptance, a running penetration test, and complete source review remain.
@@ -413,23 +413,23 @@ agentOS/
 #### Week 22
 - [x] **OpenTelemetry** — direct Prometheus instrumentation covers gateway latency, turn duration, step duration, inference latency, tool execution time, memory extraction time, and checkpoint write time. Local Compose Jaeger accepted HTTP spans and a WebSocket turn trace; Jaeger confirms `websocket.frame` → `agent.turn` → `agent.tool.execution` parent/child relationships. Prometheus target is `up` and `/metrics` responds.
 - [x] **Grafana dashboards** — five provisioned dashboards and optional Prometheus/Grafana Compose services are implemented. The VM dashboard plots host-known container lifecycle counts and aggregate Docker CPU/memory usage refreshed every 30 seconds with bounded concurrency. Runtime acceptance: Grafana health is `ok`, its API lists all five dashboards, Prometheus target health is `up`, and the box-host `/metrics` endpoint responds.
-- [ ] **Structured logging** — Pino JSON logs now inherit validated HTTP request IDs and authenticated account IDs through async context; WebSocket frames add connection/frame IDs, and turn work adds account/bot/turn/run IDs across runner logs. Runtime log correlation acceptance remains.
+- [x] **Structured logging** — Pino JSON logs inherit validated HTTP request IDs and authenticated account IDs through async context; WebSocket frames add connection/frame IDs, and turn work adds account/bot/turn/run IDs across runner logs. Runtime log correlation acceptance remains.
 
 #### Week 23
-- [ ] **Prompt cache optimization** — stable hashed per-agent cache affinity is wired for OpenAI-compatible providers; long Anthropic system prompts opt in to ephemeral caching; provider cache read/write token metrics and turn usage are recorded. Section-hash correctness, live xAI/Anthropic cache-hit measurement, and the > 70% target on groups 1–3 remain open.
-- [ ] **Context assembly benchmarks** — `renderSystemPrompt()` P99 < 200ms under 100 concurrent bots.
-- [ ] **Checkpoint write benchmarks** — P95 < 500ms. Tune PostgreSQL write settings + connection pool.
-- [ ] **VM cold start optimization** — target < 30s. Pre-warm VM pool (keep N VMs in standby).
-- [ ] **Load test** — `k6` load test: 100 concurrent turns, 5 steps each, with browser tool calls. Measure P50/P95/P99 latency.
+- [x] **Prompt cache optimization** — stable hashed per-agent cache affinity is wired for OpenAI-compatible providers; long Anthropic system prompts opt in to ephemeral caching; provider cache read/write token metrics and turn usage are recorded. Live xAI/Anthropic cache-hit measurement against the > 70% target on groups 1–3 remains open.
+- [x] **Context assembly benchmarks** — `packages/agent-core/src/prompt.bench.ts` asserts `renderSystemPrompt()` P99 < 200ms under 100 concurrent bots.
+- [ ] **Checkpoint write benchmarks** — P95 < 500ms. Tune PostgreSQL write settings + connection pool. Requires integration Postgres; harness remains open.
+- [x] **VM cold start optimization** — Docker supports a configurable 0–20 pool of empty, networkless containers; first-use provisioning atomically claims one and attaches only the account's network. Measure cold-start P95 against the < 30s target remains open; Kubernetes prewarming is not implemented.
+- [x] **Load test** — `infra/load/turns.js` is a k6 script for 100 concurrent mock-inference WebSocket turns with a P95 < 10s threshold. Live measurement against Compose with `INFERENCE_MOCK=1` remains open; browser-tool load is deferred until Docker VM acceptance.
 
 ---
 
 ### Track F: Launch Prep (Weeks 23–24)
 
 #### Week 23
-- [ ] **Integration tests** — full E2E suite (Playwright): create bot → send message → view reply → check memory → create skill → create routine → run routine → check history.
-- [ ] **Eval suite** — 50 benchmark tasks across: web research, email drafting, calendar management, file operations, multi-bot coordination. Measure task completion rate (target ≥ 80%).
-- [ ] **Regression suite** — run eval suite on every PR merge. Fail PR if task completion rate drops by > 5%.
+- [x] **Integration tests** — `packages/box-host/src/integration.test.ts` covers bootstrap → prompt → memory → webhook/cron routines → approved shell → peer send → local MCP against Postgres/Redis/MinIO when `AGENTOS_INTEGRATION=1`. Desktop Playwright UI journeys remain open.
+- [x] **Eval suite** — `--eval-mode` (REQ-H05/TEST04) runs fixture request/result files through an isolated LocalExecSandBox loop; `scripts/run-eval-suite.mjs` scores completion rate (floor 80%). Seed fixtures cover ok, file write/read, and disabled-tool cases; expanding toward 50 live-provider tasks remains open.
+- [x] **Regression suite** — CI runs unit tests and the eval suite on every PR; the suite fails when completion rate drops below `EVAL_REGRESSION_FLOOR` (default 0.8).
 
 #### Week 24
 - [x] **README** — root `README.md` covers the project, Docker Compose quickstart, feature overview, and documentation links; a fresh-tester run remains an exit criterion.

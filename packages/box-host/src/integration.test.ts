@@ -1,5 +1,6 @@
+import { describe, expect, test } from "bun:test";
 /**
- * Phase 2 exit criteria against Postgres, Redis, and MinIO.
+ * Phase 2/3 exit criteria against Postgres, Redis, and MinIO.
  * Start infra/docker/test-compose.yml, apply Drizzle migrations, then:
  *   AGENTOS_INTEGRATION=1 INFERENCE_MOCK=1 JWT_SECRET=integration-secret \
  *   DATABASE_URL=postgresql://agentos:agentos@127.0.0.1:5432/agentos \
@@ -8,7 +9,7 @@
  *   pnpm --filter @agentos/box-host test src/integration.test.ts
  * The database must have no accounts. Live runs are not part of the default test command.
  */
-import { describe, expect, test } from "bun:test";
+import { createServer } from "node:http";
 import type { InferenceSession, InferenceStreamEvent, ProviderFactory } from "@agentos/inference";
 import {
   BlobStore,
@@ -19,7 +20,8 @@ import {
 } from "@agentos/shared";
 import { NoopVMManager } from "@agentos/vm-manager";
 import { Hono } from "hono";
-import { createGateway } from "./gateway.ts";
+import { createGateway, runScheduledRoutines } from "./gateway.ts";
+import { PEER_MESSAGE_HOP_BUDGET, peerHopBudgetExceeded } from "./peer-hops.ts";
 
 const enabled = process.env.AGENTOS_INTEGRATION === "1";
 
@@ -40,6 +42,30 @@ class ScriptedSession implements InferenceSession {
       yield {
         type: "toolCall",
         toolCall: { id: "shell-1", name: "RunShell", args: { command: "echo agentos" } },
+      };
+      return;
+    }
+    if (user.includes("SEND_TO_PEER") && !sawTool) {
+      const target = user.match(/SEND_TO_PEER\s+(\S+)/)?.[1] ?? "";
+      yield {
+        type: "toolCall",
+        toolCall: {
+          id: "peer-1",
+          name: "SendToAgent",
+          args: { botId: target, message: "peer task", priority: false },
+        },
+      };
+      return;
+    }
+    if (user.includes("CALL_MCP") && !sawTool) {
+      const serverId = user.match(/CALL_MCP\s+(\S+)/)?.[1] ?? "";
+      yield {
+        type: "toolCall",
+        toolCall: {
+          id: "mcp-1",
+          name: "MCPCall",
+          args: { serverId, toolName: "echo", arguments: { text: "hello" } },
+        },
       };
       return;
     }
@@ -220,9 +246,133 @@ describe.skipIf(!enabled)("Phase 2 exit criteria", () => {
       expect(shell.some((frame) => frame.type === "needsApproval")).toBe(true);
       expect(shell.some((frame) => frame.type === "toolEnd")).toBe(true);
       expect(shell.some((frame) => frame.type === "settled")).toBe(true);
+
+      const peer = (await jsonRequest(app, "/v1/bots", boot.token, {
+        method: "POST",
+        body: JSON.stringify({ name: "PeerBot", role: "peer" }),
+      })) as { id: string };
+      const peerSend = await prompt(
+        server.port,
+        boot.token,
+        bot.id,
+        `SEND_TO_PEER ${peer.id}`,
+        (frames) => frames.some((frame) => frame.type === "settled"),
+      );
+      expect(peerSend.some((frame) => frame.type === "toolEnd")).toBe(true);
+      expect(peerHopBudgetExceeded(PEER_MESSAGE_HOP_BUDGET)).toBe(false);
+      expect(peerHopBudgetExceeded(PEER_MESSAGE_HOP_BUDGET + 1)).toBe(true);
+
+      const cron = (await jsonRequest(app, "/v1/routines", boot.token, {
+        method: "POST",
+        body: JSON.stringify({
+          botId: bot.id,
+          skillId: skill.id,
+          name: "Cron",
+          trigger: { type: "cron", expression: "* * * * *" },
+        }),
+      })) as { routine: { id: string } };
+      const fired = await runScheduledRoutines(
+        {
+          db,
+          redis,
+          blob,
+          providers: [scriptedProvider],
+          vm: new NoopVMManager(),
+          accountVms: new Map(),
+        },
+        new Date(),
+      );
+      expect(fired).toBeGreaterThan(0);
+      const cronHistory = (await jsonRequest(
+        app,
+        `/v1/routines/${cron.routine.id}/history`,
+        boot.token,
+      )) as unknown[];
+      expect(cronHistory.length).toBeGreaterThan(0);
+
+      const mcpUpstream = createServer((req, res) => {
+        let body = "";
+        req.on("data", (chunk) => {
+          body += String(chunk);
+        });
+        req.on("end", () => {
+          const payload = body ? (JSON.parse(body) as { method?: string; id?: unknown }) : {};
+          res.setHeader("content-type", "application/json");
+          if (payload.method === "initialize") {
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: payload.id,
+                result: {
+                  protocolVersion: "2024-11-05",
+                  capabilities: { tools: {} },
+                  serverInfo: { name: "eval-mcp", version: "1.0.0" },
+                },
+              }),
+            );
+            return;
+          }
+          if (payload.method === "tools/list") {
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: payload.id,
+                result: {
+                  tools: [
+                    {
+                      name: "echo",
+                      description: "Echo text",
+                      inputSchema: { type: "object", properties: { text: { type: "string" } } },
+                    },
+                  ],
+                },
+              }),
+            );
+            return;
+          }
+          if (payload.method === "tools/call") {
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: payload.id,
+                result: { content: [{ type: "text", text: "hello" }] },
+              }),
+            );
+            return;
+          }
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: "unsupported" }));
+        });
+      });
+      await new Promise<void>((resolve) => mcpUpstream.listen(0, "127.0.0.1", resolve));
+      const mcpPort = (mcpUpstream.address() as { port: number }).port;
+      try {
+        const mcp = (await jsonRequest(app, "/v1/connectors/mcp", boot.token, {
+          method: "POST",
+          body: JSON.stringify({
+            name: "Local MCP",
+            url: `http://127.0.0.1:${mcpPort}/mcp`,
+            apiKey: "test-key",
+          }),
+        })) as { id: string };
+        const mcpCall = await prompt(
+          server.port,
+          boot.token,
+          bot.id,
+          `CALL_MCP ${mcp.id}`,
+          (frames) => frames.some((frame) => frame.type === "settled"),
+        );
+        expect(mcpCall.some((frame) => frame.type === "toolEnd" || frame.type === "settled")).toBe(
+          true,
+        );
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          mcpUpstream.close((err) => (err ? reject(err) : resolve())),
+        );
+      }
     } finally {
       server.stop(true);
       redis.disconnect();
     }
-  }, 60_000);
+  }, 90_000);
 });

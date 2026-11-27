@@ -1,3 +1,5 @@
+import { SUBAGENT_CONNECTOR_READ_ACTIONS } from "@agentos/agent-core";
+
 const ACTIONS: Record<string, readonly string[]> = {
   gmail: ["ListMessages", "ReadMessage", "SendMessage", "ApplyLabel", "GetAttachment"],
   "google-calendar": ["ListEvents", "CreateEvent", "UpdateEvent", "DeleteEvent", "GetFreeBusy"],
@@ -9,6 +11,30 @@ const ACTIONS: Record<string, readonly string[]> = {
   sharepoint: ["ListSites", "ListItems", "ReadItem", "WriteItem"],
   salesforce: ["QueryRecords", "GetRecord", "CreateRecord", "UpdateRecord"],
 };
+
+export function isSubagentReadOnlyConnectorAction(service: string, action: string): boolean {
+  const actions: readonly string[] =
+    SUBAGENT_CONNECTOR_READ_ACTIONS[service as keyof typeof SUBAGENT_CONNECTOR_READ_ACTIONS] ?? [];
+  return actions.includes(action);
+}
+
+export function describeSubagentReadOnlyConnectors(services: readonly string[]): string {
+  const connected = [...new Set(services.map((service) => service.trim()).filter(Boolean))];
+  if (!connected.length) return "No OAuth connectors are connected for this account.";
+  const lines = connected.map((service) => {
+    const actions: readonly string[] =
+      SUBAGENT_CONNECTOR_READ_ACTIONS[service as keyof typeof SUBAGENT_CONNECTOR_READ_ACTIONS] ??
+      [];
+    return actions.length ? `- ${service}: ${actions.join(", ")}.` : "";
+  });
+  const available = lines.filter(Boolean);
+  if (!available.length) return "No supported read-only connector actions are available.";
+  return [
+    "Read-only connector access granted to this subagent:",
+    ...available,
+    "Only the listed read actions are permitted. Sending, editing, deleting, sharing, and posting actions are blocked.",
+  ].join("\n");
+}
 
 /** Prompt text for the connectors stored for this account. Read again on every turn. */
 export function describeConnectedConnectors(services: readonly string[]): string {

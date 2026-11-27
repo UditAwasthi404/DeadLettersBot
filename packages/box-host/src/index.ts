@@ -4,12 +4,14 @@
  */
 import { inferenceReady } from "@agentos/inference";
 import { BlobStore, adjustGauge, createDb, createRedis } from "@agentos/shared";
-import { createVMManager, gcIdleVMs } from "@agentos/vm-manager";
+import { NoopVMManager, createVMManager, gcIdleVMs } from "@agentos/vm-manager";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { AccountFrameRouter } from "./account-frames.ts";
 import { reconcileAutomationShadows } from "./automation-sync.ts";
 import { validateRuntimeConfig } from "./config.ts";
 import { pollConnectorEvents } from "./connector-events.ts";
+import { startExecutionDaemon } from "./execution-daemon.ts";
 import { startFileChangeWatcher } from "./file-watch.ts";
 import { createGateway, runScheduledRoutines } from "./gateway.ts";
 import { acquireProcessLock } from "./lock.ts";
@@ -28,14 +30,17 @@ import {
 } from "./worker.ts";
 
 const PORT = Number(process.env.PORT ?? 8787);
+let closeExecutionDaemon = () => {};
 
 function installCrashHandlers(): void {
   process.on("uncaughtException", (err) => {
     logger.fatal(loggedError(err), "uncaughtException");
+    closeExecutionDaemon();
     void shutdownTelemetry().finally(() => process.exit(1));
   });
   process.on("unhandledRejection", (reason) => {
     logger.fatal(loggedError(reason), "unhandledRejection");
+    closeExecutionDaemon();
     void shutdownTelemetry().finally(() => process.exit(1));
   });
 }
@@ -46,11 +51,14 @@ export async function runHostMain(): Promise<void> {
   const telemetryEnabled = startTelemetry();
   const releaseLock = acquireProcessLock();
   process.on("exit", releaseLock);
+  process.on("exit", () => closeExecutionDaemon());
   process.on("SIGINT", () => {
+    closeExecutionDaemon();
     releaseLock();
     void shutdownTelemetry().finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
+    closeExecutionDaemon();
     releaseLock();
     void shutdownTelemetry().finally(() => process.exit(0));
   });
@@ -70,7 +78,13 @@ export async function runHostMain(): Promise<void> {
   await blob.ensureBuckets();
 
   // 4b. VM manager
-  const vm = await createVMManager();
+  const rawVm = await createVMManager();
+  const executionDaemon = rawVm instanceof NoopVMManager ? null : await startExecutionDaemon(rawVm);
+  if (executionDaemon) {
+    closeExecutionDaemon = executionDaemon.close;
+    logger.info({ port: executionDaemon.port }, "box execution daemon ready");
+  }
+  const vm = executionDaemon?.vm ?? rawVm;
   const accountVms = new Map<string, string>();
   const vmResources = new Map<
     string,
@@ -145,7 +159,9 @@ export async function runHostMain(): Promise<void> {
       return c.json({ ok: false, error: String(err) }, 503);
     }
   });
-  const gatewayDeps = { db, redis, blob, providers, vm, accountVms };
+  const accountFrames = new AccountFrameRouter(redis);
+  await accountFrames.start();
+  const gatewayDeps = { db, redis, blob, providers, vm, accountVms, accountFrames };
   await reconcileAutomationShadows(db);
   await reconcileSubagents(gatewayDeps);
   void detectStalledSubagents(gatewayDeps).catch((err) =>
@@ -216,12 +232,20 @@ export async function runHostMain(): Promise<void> {
   for (const agentId of recovered.agentIds) {
     void drainAgent(agentId, gatewayDeps);
   }
+  const turnRecoveryTimer = setInterval(() => {
+    void recoverInProgressTurns(db, redis)
+      .then(({ agentIds }) => {
+        for (const agentId of agentIds) void drainAgent(agentId, gatewayDeps);
+      })
+      .catch((err) => logger.error(loggedError(err), "turn recovery poll failed"));
+  }, 15_000);
+  turnRecoveryTimer.unref();
 
-  // shortcut: no 7-day warning before an idle VM is removed; add that when a notification channel exists.
+  // Release compute for old inactive accounts while preserving their workspace data.
   const gcTimer = setInterval(() => {
     void gcIdleVMs(vm, db)
       .then((count) => {
-        if (count > 0) logger.info({ count }, "terminated idle account VMs");
+        if (count > 0) logger.info({ count }, "suspended idle account VMs");
       })
       .catch((err) => logger.error(loggedError(err), "gc error"));
   }, 86_400_000);
@@ -247,8 +271,33 @@ export async function runHostMain(): Promise<void> {
 }
 
 if (import.meta.main) {
-  runHostMain().catch((err) => {
-    logger.fatal(loggedError(err), "startup failed");
-    void shutdownTelemetry().finally(() => process.exit(1));
-  });
+  if (process.argv.includes("--eval-mode")) {
+    const { parseEvalArgs, runEvalModeFromFiles } = await import("./eval-mode.ts");
+    try {
+      const paths = parseEvalArgs(process.argv);
+      if (!paths) throw new Error("--eval-mode requires a request.json path");
+      const result = await runEvalModeFromFiles(paths.requestPath, paths.resultPath);
+      if (result.status === "error") {
+        logger.error({ err: result.error, resultPath: paths.resultPath }, "eval-mode failed");
+        process.exit(1);
+      }
+      logger.info(
+        {
+          status: result.status,
+          resultPath: paths.resultPath,
+          deliveries: result.deliveries.length,
+        },
+        "eval-mode completed",
+      );
+      process.exit(0);
+    } catch (err) {
+      logger.fatal(loggedError(err), "eval-mode startup failed");
+      process.exit(1);
+    }
+  } else {
+    runHostMain().catch((err) => {
+      logger.fatal(loggedError(err), "startup failed");
+      void shutdownTelemetry().finally(() => process.exit(1));
+    });
+  }
 }

@@ -1,0 +1,6 @@
+{
+  "prompt": "reply with ok",
+  "fixture": "ok",
+  "stepBudget": 3,
+  "disabledToolIds": ["RunShell", "SearchWeb", "FetchURL"]
+}

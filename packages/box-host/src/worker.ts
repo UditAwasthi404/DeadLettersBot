@@ -33,12 +33,16 @@ import {
 import { callMcpTool, discoverMcpTools } from "@agentos/tools";
 import { NoopVMManager, type VMManager } from "@agentos/vm-manager";
 import { and, asc, eq, inArray, lte, or, sql } from "drizzle-orm";
+import type { AccountFrameTransport } from "./account-frames.ts";
+import { isSubagentReadOnlyConnectorAction } from "./connector-availability.ts";
 import { accessTokenForConnection } from "./connector-token.ts";
 import { loggedError, logger } from "./logger.ts";
+import { peerHopBudgetExceeded } from "./peer-hops.ts";
 import { queueRoutine } from "./routine-queue.ts";
 import { createTurnRunShell } from "./runner.ts";
 import { dequeue, enqueue, hasQueuedWork } from "./scheduler.ts";
 import { shouldRecordStall, subagentIsStalled, subagentStallWindowMs } from "./subagent-stall.ts";
+import { type WorkerLease, acquireRedisLease, acquireWorkerLease } from "./worker-lease.ts";
 
 export interface WorkerDeps {
   db: Database;
@@ -46,11 +50,13 @@ export interface WorkerDeps {
   blob: BlobStore;
   providers: ProviderFactory[];
   vm: VMManager;
+  accountFrames?: AccountFrameTransport;
   /** accountId → container vmId */
   accountVms: Map<string, string>;
 }
 
 const draining = new Set<string>();
+const drainRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const IDLE_TIMEOUT_MS = Number(process.env.VM_IDLE_TIMEOUT_MS ?? 600_000);
 const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let memoryJobsRunning = false;
@@ -131,7 +137,7 @@ function createMemoryExtractor(
       "Do not infer sensitive traits, credentials, temporary details, or facts merely proposed by the assistant.",
       `Only use these enabled scopes: ${enabledScopes.join(", ")}. user means a fact about the user; agent means a stable preference or instruction for this bot; project means a fact about the configured project.`,
       'Return only JSON in this shape: {"facts":[{"scope":"user|agent|project","content":"short standalone fact"}],"conflicts":[{"scope":"user|agent|project","existingContent":"exact text copied from an existing fact","proposedContent":"replacement fact"}],"deletions":[{"scope":"user|agent|project","existingContent":"exact text copied from an existing fact","reason":"short explanation grounded in the latest user message"}]}. Add a conflict only when the latest user explicitly corrects or updates a known fact; copy existingContent exactly. Suggest deletion only when the latest user explicitly asks to forget a fact or clearly says it is no longer true without giving a replacement. Never infer deletion from silence, temporary changes, or assistant text. Leave conflicts and deletions empty when the user did not clearly request a change.',
-      `Existing facts (for avoiding duplicates; never request changes to these): ${JSON.stringify(activeFacts)}`,
+      `Existing facts (avoid duplicates; suggest changes only when the latest user explicitly corrects, replaces, or asks to forget that exact fact): ${JSON.stringify(activeFacts)}`,
       `User message:\n${userMessage.content.slice(0, 8_000)}`,
       `Assistant reply:\n${assistantContent.slice(0, 8_000)}`,
     ].join("\n\n");
@@ -171,10 +177,10 @@ function createMemoryExtractor(
         !enabledScopes.includes(deletion.scope as (typeof enabledScopes)[number])
       )
         continue;
+      const existingContent = deletion.existingContent;
       const existingMemory = relevantFacts.find(
         (memory) =>
-          memory.scope === deletion.scope &&
-          memory.content.trim() === deletion.existingContent.trim(),
+          memory.scope === deletion.scope && memory.content.trim() === existingContent.trim(),
       );
       if (!existingMemory) continue;
       const reason =
@@ -840,7 +846,11 @@ async function completeSubagent(
       .where(
         and(
           eq(subagents.id, subagent.id),
-          or(eq(subagents.status, "queued"), eq(subagents.status, "running")),
+          or(
+            eq(subagents.status, "queued"),
+            eq(subagents.status, "running"),
+            eq(subagents.status, "stalled"),
+          ),
         ),
       )
       .returning({ id: subagents.id });
@@ -876,48 +886,64 @@ export async function detectStalledSubagents(
   send: (frame: ServerFrame) => void = () => {},
   now = Date.now(),
 ): Promise<number> {
-  const stallMs = subagentStallWindowMs();
-  const rows = await deps.db
-    .select()
-    .from(subagents)
-    .where(or(eq(subagents.status, "queued"), eq(subagents.status, "running")));
-  let stalled = 0;
-  for (const row of rows) {
-    if (!subagentIsStalled(row, now, stallMs) || !shouldRecordStall(row.stallEvents, now, stallMs))
-      continue;
-    stalled += 1;
-    await deps.redis.set(`run:${row.childRunId}:stalled`, "1", "EX", 86400);
-    await deps.redis.set(`run:${row.childRunId}:cancelled`, "1", "EX", 86400);
-    const stallEvents = [
-      ...row.stallEvents,
-      {
-        at: new Date(now).toISOString(),
-        reason: "no checkpoint progress before the stall deadline",
-      },
-    ].slice(-20);
-    const [updated] = await deps.db
-      .update(subagents)
-      .set({ stallCount: row.stallCount + 1, stallEvents })
-      .where(
-        and(
-          eq(subagents.id, row.id),
-          or(eq(subagents.status, "queued"), eq(subagents.status, "running")),
-        ),
+  const lease = await acquireRedisLease(deps.redis, "worker:subagent-stalls:lease", () => {});
+  if (!lease) return 0;
+  try {
+    const stallMs = subagentStallWindowMs();
+    const rows = await deps.db
+      .select()
+      .from(subagents)
+      .where(or(eq(subagents.status, "queued"), eq(subagents.status, "running")));
+    let stalled = 0;
+    for (const row of rows) {
+      if (!lease.isHeld()) break;
+      if (
+        !subagentIsStalled(row, now, stallMs) ||
+        !shouldRecordStall(row.stallEvents, now, stallMs)
       )
-      .returning({ id: subagents.id });
-    if (!updated) continue;
-    const [turn] = await deps.db.select().from(turns).where(eq(turns.id, row.childTurnId)).limit(1);
-    if (turn?.state === "pending") {
-      await deps.db
-        .update(turns)
-        .set({ state: "cancelled" })
-        .where(and(eq(turns.id, turn.id), eq(turns.state, "pending")));
-      await completeSubagent(deps, row.id, send);
-    } else if (turn && turn.state !== "running") {
-      await completeSubagent(deps, row.id, send);
+        continue;
+      stalled += 1;
+      await deps.redis.set(`run:${row.childRunId}:stalled`, "1", "EX", 86400);
+      await deps.redis.set(`run:${row.childRunId}:cancelled`, "1", "EX", 86400);
+      const stallEvents = [
+        ...row.stallEvents,
+        {
+          at: new Date(now).toISOString(),
+          reason: "no checkpoint progress before the stall deadline",
+        },
+      ].slice(-20);
+      const [updated] = await deps.db
+        .update(subagents)
+        .set({ status: "stalled", stallCount: row.stallCount + 1, stallEvents })
+        .where(
+          and(
+            eq(subagents.id, row.id),
+            or(eq(subagents.status, "queued"), eq(subagents.status, "running")),
+          ),
+        )
+        .returning({ id: subagents.id });
+      if (!updated) continue;
+      const [turn] = await deps.db
+        .select()
+        .from(turns)
+        .where(eq(turns.id, row.childTurnId))
+        .limit(1);
+      if (turn?.state === "pending") {
+        await deps.db
+          .update(turns)
+          .set({ state: "cancelled" })
+          .where(and(eq(turns.id, turn.id), eq(turns.state, "pending")));
+        await completeSubagent(deps, row.id, send);
+      } else if (turn && turn.state !== "running") {
+        await completeSubagent(deps, row.id, send);
+      }
     }
+    return stalled;
+  } finally {
+    await lease
+      .release()
+      .catch((err) => logger.warn(loggedError(err), "failed to release subagent stall lease"));
   }
-  return stalled;
 }
 
 export async function reconcileSubagents(
@@ -926,6 +952,24 @@ export async function reconcileSubagents(
 ): Promise<void> {
   const rows = await deps.db.select().from(subagents);
   for (const row of rows) await completeSubagent(deps, row.id, send);
+}
+
+function retryQueuedDrain(
+  agentId: string,
+  deps: WorkerDeps,
+  send: (frame: ServerFrame) => void,
+): void {
+  if (drainRetryTimers.has(agentId)) return;
+  const timer = setTimeout(() => {
+    drainRetryTimers.delete(agentId);
+    void hasQueuedWork(deps.redis, agentId)
+      .then((queued) => {
+        if (queued) void drainAgent(agentId, deps, send);
+      })
+      .catch((err) => logger.warn(loggedError(err), "queued bot drain retry failed"));
+  }, 1_000);
+  timer.unref();
+  drainRetryTimers.set(agentId, timer);
 }
 
 /** Drain user→agent→background queues for one agent until empty. */
@@ -937,10 +981,26 @@ export async function drainAgent(
   if (draining.has(agentId)) return;
   draining.add(agentId);
   let lastVmId: string | null = null;
+  let activeRunId: string | null = null;
+  let lease: WorkerLease | null = null;
   try {
-    while (true) {
+    lease = await acquireWorkerLease(deps.redis, agentId, () => {
+      if (activeRunId)
+        void deps.redis
+          .set(`run:${activeRunId}:cancelled`, "1", "EX", 3600)
+          .catch((err) => logger.warn(loggedError(err), "failed to cancel after losing bot lease"));
+    });
+    if (!lease) {
+      retryQueuedDrain(agentId, deps, send);
+      return;
+    }
+    while (lease.isHeld()) {
       const item = await dequeue(deps.redis, agentId);
       if (!item) break;
+      activeRunId = item.payload.runId;
+      const accountSend = deps.accountFrames
+        ? (frame: ServerFrame) => deps.accountFrames?.publish(item.payload.accountId, frame)
+        : send;
 
       const [botRow] = await deps.db
         .select()
@@ -949,6 +1009,7 @@ export async function drainAgent(
         .limit(1);
       if (!botRow) {
         logger.error({ turnId: item.payload.turnId }, "bot missing for turn");
+        activeRunId = null;
         continue;
       }
       const [turnRow] = await deps.db
@@ -957,7 +1018,9 @@ export async function drainAgent(
         .where(eq(turns.id, item.payload.turnId))
         .limit(1);
       if (!turnRow || turnRow.state !== "pending") {
-        if (turnRow?.input.subagentId) await completeSubagent(deps, turnRow.input.subagentId, send);
+        if (turnRow?.input.subagentId)
+          await completeSubagent(deps, turnRow.input.subagentId, accountSend);
+        activeRunId = null;
         continue;
       }
       await deps.db
@@ -973,6 +1036,13 @@ export async function drainAgent(
       let vmId = deps.accountVms.get(item.payload.accountId) ?? null;
       if (vmId === null && !(deps.vm instanceof NoopVMManager)) {
         const info = await deps.vm.provisionVM(item.payload.accountId);
+        vmId = info.vmId;
+        deps.accountVms.set(item.payload.accountId, vmId);
+      } else if (vmId !== null && !(deps.vm instanceof NoopVMManager)) {
+        let info = await deps.vm.getVMStatus(vmId);
+        if (info.status !== "running") info = await deps.vm.provisionVM(item.payload.accountId);
+        if (info.status !== "running")
+          throw new Error(`VM did not reach running state for account ${item.payload.accountId}`);
         vmId = info.vmId;
         deps.accountVms.set(item.payload.accountId, vmId);
       }
@@ -1012,7 +1082,7 @@ export async function drainAgent(
         blob: deps.blob,
         session,
         summarizationSession: createFallbackSession("summarization", deps.providers),
-        send,
+        send: accountSend,
         vm: deps.vm,
         vmId,
         browser: null,
@@ -1030,7 +1100,7 @@ export async function drainAgent(
           : undefined,
         sendToAgent: async (targetBotId, message, priority, hopCount) => {
           if (!message.trim()) throw new Error("message is required");
-          if (hopCount > 5) throw new Error("peer message hop budget exceeded");
+          if (peerHopBudgetExceeded(hopCount)) throw new Error("peer message hop budget exceeded");
           const [target] = await deps.db
             .select()
             .from(bots)
@@ -1067,7 +1137,7 @@ export async function drainAgent(
             priority,
           });
           await deps.redis.set(`run:${runId}:agentId`, targetBotId, "EX", 86400);
-          void drainAgent(targetBotId, deps, send);
+          void drainAgent(targetBotId, deps, accountSend);
           const messageRoutines = await deps.db
             .select()
             .from(routines)
@@ -1089,7 +1159,7 @@ export async function drainAgent(
                 deps,
                 routine,
                 `Message from ${botRow.name}: ${message}`,
-                (id) => void drainAgent(id, deps, send),
+                (id) => void drainAgent(id, deps, accountSend),
                 hopCount,
               );
             } catch (err) {
@@ -1108,7 +1178,7 @@ export async function drainAgent(
             if (!taskDescription) throw new Error("task description is required");
             const categories = Array.isArray(params.tools)
               ? params.tools.filter((category) =>
-                  ["read", "browser", "search"].includes(String(category)),
+                  ["read", "browser", "search", "connectors"].includes(String(category)),
                 )
               : ["read", "browser", "search"];
             const allowedTools = [
@@ -1123,6 +1193,7 @@ export async function drainAgent(
                   ]
                 : []),
               ...(categories.includes("search") ? ["SearchWeb", "FetchURL"] : []),
+              ...(categories.includes("connectors") ? ["ConnectorCall"] : []),
             ];
             if (allowedTools.length === 1)
               throw new Error("at least one subagent tool category is required");
@@ -1220,7 +1291,7 @@ export async function drainAgent(
               accountId: item.payload.accountId,
             });
             await deps.redis.set(`run:${childRunId}:agentId`, childBotId, "EX", 86400);
-            void drainAgent(childBotId, deps, send);
+            void drainAgent(childBotId, deps, accountSend);
             return { subagentId, status: "queued", stepBudget, allowedTools };
           }
           const subagentId = String(params.subagentId ?? "");
@@ -1278,11 +1349,20 @@ export async function drainAgent(
               .update(turns)
               .set({ state: "cancelled" })
               .where(eq(turns.id, record.childTurnId));
-            await completeSubagent(deps, record.id, send);
+            await completeSubagent(deps, record.id, accountSend);
           }
           return { subagentId: record.id, status: "cancellation_requested" };
         },
         connectorCall: async (service, action, params) => {
+          if (
+            botRow.role === "subagent" &&
+            (!botRow.tools.includes("ConnectorCall") ||
+              !isSubagentReadOnlyConnectorAction(service, action))
+          ) {
+            throw new Error(
+              "subagents may only use explicitly granted read-only connector actions",
+            );
+          }
           const credentialService = connectorCredentialService(service);
           const [connection] = await deps.db
             .select()
@@ -1450,7 +1530,7 @@ export async function drainAgent(
               accountId: routine.accountId,
             });
             await deps.redis.set(`run:${noticeRunId}:agentId`, routine.botId, "EX", 86400);
-            void drainAgent(routine.botId, deps, send);
+            void drainAgent(routine.botId, deps, accountSend);
             return;
           }
           if (routine.onError === "pause" || attempt >= 3) {
@@ -1503,7 +1583,7 @@ export async function drainAgent(
                   accountId: routine.accountId,
                 });
                 await deps.redis.set(`run:${retryRunId}:agentId`, routine.botId, "EX", 86400);
-                void drainAgent(routine.botId, deps, send);
+                void drainAgent(routine.botId, deps, accountSend);
               })().catch((retryError) =>
                 logger.error(loggedError(retryError), "routine retry scheduling failed"),
               );
@@ -1513,14 +1593,29 @@ export async function drainAgent(
           timer.unref();
         },
       });
-      if (turnRow.input.subagentId) await completeSubagent(deps, turnRow.input.subagentId, send);
+      activeRunId = null;
+      if (turnRow.input.subagentId)
+        await completeSubagent(deps, turnRow.input.subagentId, accountSend);
     }
+  } catch (err) {
+    logger.error({ ...loggedError(err), botId: agentId }, "bot queue drain failed");
+    retryQueuedDrain(agentId, deps, send);
   } finally {
     draining.delete(agentId);
-    if (await hasQueuedWork(deps.redis, agentId)) {
-      queueMicrotask(() => void drainAgent(agentId, deps, send));
-    } else if (lastVmId && !(deps.vm instanceof NoopVMManager)) {
-      scheduleIdleSuspend(deps.vm, lastVmId);
+    if (lease) {
+      await lease
+        .release()
+        .catch((err) =>
+          logger.warn(
+            { ...loggedError(err), botId: agentId },
+            "failed to release bot worker lease",
+          ),
+        );
+      if (await hasQueuedWork(deps.redis, agentId)) {
+        queueMicrotask(() => void drainAgent(agentId, deps, send));
+      } else if (lastVmId && !(deps.vm instanceof NoopVMManager)) {
+        scheduleIdleSuspend(deps.vm, lastVmId);
+      }
     }
   }
 }

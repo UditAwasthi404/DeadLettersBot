@@ -45,7 +45,7 @@ function createWindow(): void {
     height: 840,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: "#07070b",
+    backgroundColor: "#0e1110",
     ...(darwin
       ? {
           titleBarStyle: "hiddenInset" as const,
@@ -53,7 +53,7 @@ function createWindow(): void {
         }
       : {
           titleBarStyle: "hidden" as const,
-          titleBarOverlay: { color: "#07070b", symbolColor: "#f5f5f7", height: 52 },
+          titleBarOverlay: { color: "#0e1110", symbolColor: "#eef3f0", height: 52 },
         }),
     webPreferences: {
       preload: join(__dirname, "preload.js"),
@@ -66,6 +66,14 @@ function createWindow(): void {
     process.env.VITE_DEV_SERVER_URL ?? (!app.isPackaged ? "http://127.0.0.1:5173" : undefined);
   if (devUrl) void windowRef.loadURL(devUrl);
   else void windowRef.loadFile(join(__dirname, "../dist/index.html"));
+  if (!app.isPackaged) {
+    windowRef.webContents.on("console-message", (_event, level, message) => {
+      if (level >= 2) console.error("[renderer]", message);
+    });
+    windowRef.webContents.on("render-process-gone", (_event, details) => {
+      console.error("[renderer gone]", details);
+    });
+  }
   windowRef.webContents.setWindowOpenHandler(({ url }) => {
     try {
       const parsed = new URL(url);
@@ -312,11 +320,21 @@ ipcMain.handle(
       body: request.body === undefined ? undefined : JSON.stringify(request.body),
     });
     const text = await response.text();
-    const data = text ? (JSON.parse(text) as unknown) : null;
+    let data: unknown = null;
+    if (text) {
+      try {
+        data = JSON.parse(text) as unknown;
+      } catch {
+        // Hono unmatched routes return plain "404 Not Found", which JSON.parse
+        // misreads as the number 404 plus trailing text and throws.
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        throw new Error(`invalid JSON from ${request.path}`);
+      }
+    }
     if (!response.ok)
       throw new Error(
         typeof data === "object" && data !== null && "error" in data
-          ? String(data.error)
+          ? String((data as { error: unknown }).error)
           : `HTTP ${response.status}`,
       );
     return data;

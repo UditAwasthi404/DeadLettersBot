@@ -14,6 +14,8 @@ services:
         "cd /app/packages/shared && bun ./node_modules/drizzle-kit/bin.cjs migrate && cd /app && bun run packages/box-host/src/index.ts",
       ]
     environment:
+      # Dockerfile.host defaults to production; set NODE_ENV=development in .env for local Clerk mock login.
+      NODE_ENV: ${NODE_ENV:-production}
       PORT: 8787
       METRICS_ENABLED: ${METRICS_ENABLED:-0}
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-none}
@@ -31,8 +33,10 @@ services:
       VM_MEMORY_BYTES: ${VM_MEMORY_BYTES:-2147483648}
       VM_CPU_NANOS: ${VM_CPU_NANOS:-2000000000}
       VM_PIDS_LIMIT: ${VM_PIDS_LIMIT:-512}
+      VM_PREWARM_POOL_SIZE: ${VM_PREWARM_POOL_SIZE:-0}
       VM_BACKEND: ${VM_BACKEND:-docker}
       VM_EGRESS_POLICY: ${VM_EGRESS_POLICY:-allow_all}
+      VM_EGRESS_ALLOWLIST: "${VM_EGRESS_ALLOWLIST:-}"
       VM_IMAGE: ${VM_IMAGE:-agentos/vm-manager}
       VM_HOST_IN_DOCKER: "1"
       DATABASE_URL: postgresql://agentos:agentos@postgres:5432/agentos

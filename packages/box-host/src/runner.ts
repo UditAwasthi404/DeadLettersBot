@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
  */
 import {
   STATIC_CATALOG,
+  SUBAGENT_CONNECTOR_CALL_PARAMETERS,
   assembleTurnAction,
   buildDefaultSections,
   buildUserInfoMessage,
@@ -55,7 +56,10 @@ import { BrowserSession } from "@agentos/tools";
 import type { VMManager } from "@agentos/vm-manager";
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import { and, desc, eq, notInArray } from "drizzle-orm";
-import { describeConnectedConnectors } from "./connector-availability.ts";
+import {
+  describeConnectedConnectors,
+  describeSubagentReadOnlyConnectors,
+} from "./connector-availability.ts";
 import { TranscriptAppendAfterCheckpointError } from "./errors.ts";
 import { loggedError, logger, withLogContext } from "./logger.ts";
 import { withSpan, withTraceParent } from "./telemetry.ts";
@@ -431,10 +435,18 @@ async function ensureBrowser(ctx: RunContext): Promise<void> {
   const info = await ctx.vm.getVMStatus(vmId);
   if (info.status !== "running") await ctx.vm.wakeVM(vmId);
   const vmInfo = await ctx.vm.getVMStatus(vmId);
-  // Without an IP (e.g. MockVMManager), leave browser null → dispatcher error.
-  if (!vmInfo?.ipAddress) return;
-  const port = await ctx.vm.ensureBotBrowser(vmId, ctx.botId);
   ctx.browser = new BrowserSession();
+  const endpoint = ctx.vm.getBotBrowserEndpoint?.(vmId, ctx.botId);
+  if (endpoint) {
+    await ctx.browser.connectTo(endpoint.url, endpoint.headers);
+    return;
+  }
+  // Without a routed endpoint or VM IP, leave browser null → dispatcher error.
+  if (!vmInfo?.ipAddress) {
+    ctx.browser = null;
+    return;
+  }
+  const port = await ctx.vm.ensureBotBrowser(vmId, ctx.botId);
   await ctx.browser.connect(vmInfo.ipAddress, port);
 }
 
@@ -659,14 +671,20 @@ ${server.cachedTools
   .join("\n")}`;
   }
   const connectorRows =
-    ctx.bot.role === "subagent"
+    ctx.bot.role === "subagent" && !ctx.bot.tools.includes("ConnectorCall")
       ? []
       : await ctx.db
           .select({ service: connectorAccounts.service })
           .from(connectorAccounts)
           .where(eq(connectorAccounts.accountId, ctx.accountId));
   const connectorServices = connectorRows.map((row) => row.service);
-  sections.computer += `\n\n${describeConnectedConnectors(connectorServices)}`;
+  const connectorDescription =
+    ctx.bot.role === "subagent"
+      ? ctx.bot.tools.includes("ConnectorCall")
+        ? describeSubagentReadOnlyConnectors(connectorServices)
+        : ""
+      : describeConnectedConnectors(connectorServices);
+  if (connectorDescription) sections.computer += `\n\n${connectorDescription}`;
   const requestedSkills = new Set([
     ...ctx.bot.skills,
     ...(turnRow?.input.skillId ? [turnRow.input.skillId] : []),
@@ -745,11 +763,14 @@ ${server.cachedTools
   const activeToolCatalog = activeSkill
     ? toolCatalog
     : toolCatalog.filter((tool) => tool.name !== "CompleteSkillStep");
-  const connectorDescription = describeConnectedConnectors(connectorServices);
   const inferenceTools = activeToolCatalog.map((tool) => {
     const inferenceTool = toInferenceTool(tool);
     if (tool.name !== "ConnectorCall") return inferenceTool;
-    return { ...inferenceTool, description: connectorDescription };
+    return {
+      ...inferenceTool,
+      ...(ctx.bot.role === "subagent" ? { parameters: SUBAGENT_CONNECTOR_CALL_PARAMETERS } : {}),
+      description: connectorDescription,
+    };
   });
   let userInfoMessage = buildUserInfoMessage(inferenceTools);
   const userTurnMessage = assembleTurnAction(

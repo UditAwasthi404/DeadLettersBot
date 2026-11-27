@@ -202,7 +202,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** List pending memory conflict suggestions */
+    /** List pending memory update or deletion suggestions */
     get: operations["getV1BotsByBotIdMemoryReviews"];
     put?: never;
     post?: never;
@@ -221,7 +221,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Accept or reject a memory conflict suggestion */
+    /** Accept or reject a memory change suggestion */
     post: operations["postV1BotsByBotIdMemoryReviewsByReviewId"];
     delete?: never;
     options?: never;
@@ -274,7 +274,7 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Draft a skill from browser recording events */
+    /** Draft a skill from a task description or browser recording */
     post: operations["postV1SkillsDraft"];
     delete?: never;
     options?: never;
@@ -1983,7 +1983,7 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description List pending memory conflict suggestions */
+      /** @description List pending memory update or deletion suggestions */
       200: {
         headers: {
           [name: string]: unknown;
@@ -1993,8 +1993,12 @@ export interface operations {
             id: string;
             memoryId: string;
             turnId: string;
+            /** @enum {string} */
+            action: "update" | "delete";
             existingContent: string;
-            proposedContent: string;
+            currentContent: string | null;
+            proposedContent: string | null;
+            reason: string | null;
             createdAt: string;
           }[];
         };
@@ -2053,7 +2057,7 @@ export interface operations {
       };
     };
     responses: {
-      /** @description Accept or reject a memory conflict suggestion */
+      /** @description Accept or reject a memory change suggestion */
       200: {
         headers: {
           [name: string]: unknown;
@@ -2389,13 +2393,17 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": {
-          events: unknown[];
-        };
+        "application/json":
+          | {
+              events: unknown[];
+            }
+          | {
+              description: string;
+            };
       };
     };
     responses: {
-      /** @description Draft a skill from browser recording events */
+      /** @description Draft a skill from a task description or browser recording */
       200: {
         headers: {
           [name: string]: unknown;
@@ -4184,8 +4192,34 @@ export interface operations {
         content: {
           "application/json": {
             id: string;
-            status: string;
+            parentBotId: string;
             taskDescription: string;
+            allowedTools: string[];
+            /** @enum {string} */
+            status: "queued" | "running" | "completed" | "error" | "cancelled" | "stalled";
+            result: string;
+            usage: {
+              promptTokens: number;
+              completionTokens: number;
+              totalTokens: number;
+              cachedPromptTokens?: number;
+              cacheWritePromptTokens?: number;
+              /** @enum {string} */
+              source?: "provider" | "estimate";
+            } | null;
+            stallCount: number;
+            lastProgressAt: string | null;
+            stallEvents: {
+              at: string;
+              reason: string;
+            }[];
+            steeringEvents: {
+              at: string;
+              message: string;
+            }[];
+            createdAt: string;
+            startedAt: string | null;
+            completedAt: string | null;
           }[];
         };
       };
@@ -4243,7 +4277,34 @@ export interface operations {
         content: {
           "application/json": {
             id: string;
-            status: string;
+            parentBotId: string;
+            taskDescription: string;
+            allowedTools: string[];
+            /** @enum {string} */
+            status: "queued" | "running" | "completed" | "error" | "cancelled" | "stalled";
+            result: string;
+            usage: {
+              promptTokens: number;
+              completionTokens: number;
+              totalTokens: number;
+              cachedPromptTokens?: number;
+              cacheWritePromptTokens?: number;
+              /** @enum {string} */
+              source?: "provider" | "estimate";
+            } | null;
+            stallCount: number;
+            lastProgressAt: string | null;
+            stallEvents: {
+              at: string;
+              reason: string;
+            }[];
+            steeringEvents: {
+              at: string;
+              message: string;
+            }[];
+            createdAt: string;
+            startedAt: string | null;
+            completedAt: string | null;
           };
         };
       };

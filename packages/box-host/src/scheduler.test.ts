@@ -5,9 +5,14 @@ import { type QueuePayload, dequeue, enqueue } from "./scheduler.ts";
 function memoryRedis() {
   const z = new Map<string, Map<string, number>>();
   return {
-    async zadd(key: string, score: number, member: string) {
+    async zadd(key: string, ...args: Array<string | number>) {
+      const hasNx = args[0] === "NX";
+      const score = Number(args[hasNx ? 1 : 0]);
+      const member = String(args[hasNx ? 2 : 1]);
       if (!z.has(key)) z.set(key, new Map());
-      z.get(key)?.set(member, score);
+      const set = z.get(key);
+      if (hasNx && set?.has(member)) return 0;
+      set?.set(member, score);
       return 1;
     },
     async zpopmin(key: string, _count = 1) {

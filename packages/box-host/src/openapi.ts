@@ -46,6 +46,31 @@ const ChatHistoryItem = z.object({
   role: z.enum(["user", "assistant"]),
   content: z.string(),
 });
+const Subagent = z.object({
+  id: z.string(),
+  parentBotId: z.string(),
+  taskDescription: z.string(),
+  allowedTools: z.array(z.string()),
+  status: z.enum(["queued", "running", "completed", "error", "cancelled", "stalled"]),
+  result: z.string(),
+  usage: z
+    .object({
+      promptTokens: z.number(),
+      completionTokens: z.number(),
+      totalTokens: z.number(),
+      cachedPromptTokens: z.number().optional(),
+      cacheWritePromptTokens: z.number().optional(),
+      source: z.enum(["provider", "estimate"]).optional(),
+    })
+    .nullable(),
+  stallCount: z.number(),
+  lastProgressAt: z.string().nullable(),
+  stallEvents: z.array(z.object({ at: z.string(), reason: z.string() })),
+  steeringEvents: z.array(z.object({ at: z.string(), message: z.string() })),
+  createdAt: z.string(),
+  startedAt: z.string().nullable(),
+  completedAt: z.string().nullable(),
+});
 const Attachment = z.object({
   id: z.string(),
   name: z.string(),
@@ -498,6 +523,7 @@ add({
       turnId: z.string(),
       action: z.enum(["update", "delete"]),
       existingContent: z.string(),
+      currentContent: z.string().nullable(),
       proposedContent: z.string().nullable(),
       reason: z.string().nullable(),
       createdAt: z.string(),
@@ -539,8 +565,11 @@ add({
 add({
   method: "post",
   path: "/v1/skills/draft",
-  summary: "Draft a skill from browser recording events",
-  body: z.object({ events: z.array(z.unknown()).min(1).max(2000) }),
+  summary: "Draft a skill from a task description or browser recording",
+  body: z.union([
+    z.object({ events: z.array(z.unknown()).min(1).max(2000) }),
+    z.object({ description: z.string().trim().min(1).max(6000) }),
+  ]),
   response: z.object({ name: z.string(), description: z.string(), steps: z.array(SkillStep) }),
 });
 add({
@@ -734,14 +763,14 @@ add({
   method: "get",
   path: "/v1/subagents",
   summary: "List subagents",
-  response: z.array(z.object({ id: z.string(), status: z.string(), taskDescription: z.string() })),
+  response: z.array(Subagent),
 });
 add({
   method: "get",
   path: "/v1/subagents/{subagentId}",
   summary: "Read a subagent",
   params: z.object({ subagentId: z.string() }),
-  response: z.object({ id: z.string(), status: z.string() }),
+  response: Subagent,
 });
 add({
   method: "post",

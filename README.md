@@ -2,7 +2,7 @@
 
 AgentOS is a self-hostable, multi-bot agent runtime. It combines a TypeScript monorepo, a WebSocket turn gateway, provider adapters, a Docker-backed browser VM, scoped memory, approvals, peer messages, skills, and routines.
 
-> **Project status:** implementation is in progress. Core host, PostgreSQL and Redis persistence, account bootstrap, scoped memory and memory tools, peer messaging, approvals, skill/routine APIs, cron/webhook/file-change triggers, Google and Microsoft/Salesforce connector actions, browser skill recording, initial MCP support, and an Electron chat shell with session restore are present. Outbound signed webhooks have a durable retry queue and delivery history. Secure handoff, local PC execution, full subagent lifecycle, runtime compaction acceptance, connector-event triggers, production deployment hardening, and launch artifacts remain incomplete.
+> **Project status:** Phase 1–4 source implementations include the agent runtime, persistent memory and review workflows, approvals and secure handoff, multi-bot messaging and subagents, skills, scheduled and event-driven routines, Google/Microsoft/Salesforce connectors, MCP, signed webhooks, a typed SDK, and a Radix Themes desktop app. Compose self-hosting and a Kubernetes Helm chart are included. Remaining release gates are documented in [Project Status](docs/PROJECT_STATUS.md): Docker image/runtime acceptance, fresh-cluster Kubernetes acceptance, live provider credentials, measured performance and task evaluations, installer/signing acceptance, and credentialed package publication.
 
 ## Run the app
 
@@ -166,12 +166,12 @@ Restart Compose with the command above. In the desktop app, open **Connectors** 
 - `packages/shared` — protocol types, Drizzle schema, PostgreSQL, Redis and blob storage.
 - `packages/memory` — PostgreSQL memory store.
 - `packages/routines` — cron expression parser.
-- `packages/connectors` — OAuth PKCE, AES-GCM token storage helpers, and Google Gmail/Calendar/Drive actions.
-- `packages/desktop` — Electron chat shell with bot list, tool activity, interruption, approvals, and memory viewer/export.
+- `packages/connectors` — OAuth PKCE, AES-GCM token storage helpers, and Gmail, Google Calendar/Drive, OneDrive, Outlook, Teams, SharePoint, and Salesforce actions.
+- `packages/desktop` — Electron workspace for chat, tool activity, approvals, secure screen handoff, memory, skills, routines, connectors, subagents, webhooks, and settings. Radix Themes supplies accessible controls and dialogs; Lucide supplies icons.
 - `packages/sdk` — typed HTTP and gateway client for JavaScript/TypeScript applications.
 - `packages/tools/src/mcp.ts` — MCP HTTP JSON-RPC discovery and tool calls.
 - Box Host webhook subscriptions — signed turn, routine, and approval event delivery.
-- `packages/vm-manager` — Docker and no-op VM managers.
+- `packages/vm-manager` — Docker and Kubernetes VM backends plus a development no-op manager.
 - `docs/` — product, architecture, technical, agent, and phase planning documents.
 
 ## Development

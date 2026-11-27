@@ -2144,7 +2144,7 @@
     "/v1/bots/{botId}/memory/reviews": {
       "get": {
         "operationId": "getV1BotsByBotIdMemoryReviews",
-        "summary": "List pending memory conflict suggestions",
+        "summary": "List pending memory update or deletion suggestions",
         "security": [
           {
             "bearerAuth": []
@@ -2162,7 +2162,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List pending memory conflict suggestions",
+            "description": "List pending memory update or deletion suggestions",
             "content": {
               "application/json": {
                 "schema": {
@@ -2179,11 +2179,21 @@
                       "turnId": {
                         "type": "string"
                       },
+                      "action": {
+                        "type": "string",
+                        "enum": ["update", "delete"]
+                      },
                       "existingContent": {
                         "type": "string"
                       },
+                      "currentContent": {
+                        "type": ["string", "null"]
+                      },
                       "proposedContent": {
-                        "type": "string"
+                        "type": ["string", "null"]
+                      },
+                      "reason": {
+                        "type": ["string", "null"]
                       },
                       "createdAt": {
                         "type": "string"
@@ -2193,8 +2203,11 @@
                       "id",
                       "memoryId",
                       "turnId",
+                      "action",
                       "existingContent",
+                      "currentContent",
                       "proposedContent",
+                      "reason",
                       "createdAt"
                     ]
                   }
@@ -2256,7 +2269,7 @@
     "/v1/bots/{botId}/memory/reviews/{reviewId}": {
       "post": {
         "operationId": "postV1BotsByBotIdMemoryReviewsByReviewId",
-        "summary": "Accept or reject a memory conflict suggestion",
+        "summary": "Accept or reject a memory change suggestion",
         "security": [
           {
             "bearerAuth": []
@@ -2299,7 +2312,7 @@
         },
         "responses": {
           "200": {
-            "description": "Accept or reject a memory conflict suggestion",
+            "description": "Accept or reject a memory change suggestion",
             "content": {
               "application/json": {
                 "schema": {
@@ -2899,7 +2912,7 @@
     "/v1/skills/draft": {
       "post": {
         "operationId": "postV1SkillsDraft",
-        "summary": "Draft a skill from browser recording events",
+        "summary": "Draft a skill from a task description or browser recording",
         "security": [
           {
             "bearerAuth": []
@@ -2910,23 +2923,38 @@
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "properties": {
-                  "events": {
-                    "type": "array",
-                    "items": {},
-                    "minItems": 1,
-                    "maxItems": 2000
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "events": {
+                        "type": "array",
+                        "items": {},
+                        "minItems": 1,
+                        "maxItems": 2000
+                      }
+                    },
+                    "required": ["events"]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "description": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 6000
+                      }
+                    },
+                    "required": ["description"]
                   }
-                },
-                "required": ["events"]
+                ]
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Draft a skill from browser recording events",
+            "description": "Draft a skill from a task description or browser recording",
             "content": {
               "application/json": {
                 "schema": {
@@ -6067,14 +6095,112 @@
                       "id": {
                         "type": "string"
                       },
-                      "status": {
+                      "parentBotId": {
                         "type": "string"
                       },
                       "taskDescription": {
                         "type": "string"
+                      },
+                      "allowedTools": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": ["queued", "running", "completed", "error", "cancelled", "stalled"]
+                      },
+                      "result": {
+                        "type": "string"
+                      },
+                      "usage": {
+                        "type": ["object", "null"],
+                        "properties": {
+                          "promptTokens": {
+                            "type": "number"
+                          },
+                          "completionTokens": {
+                            "type": "number"
+                          },
+                          "totalTokens": {
+                            "type": "number"
+                          },
+                          "cachedPromptTokens": {
+                            "type": "number"
+                          },
+                          "cacheWritePromptTokens": {
+                            "type": "number"
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": ["provider", "estimate"]
+                          }
+                        },
+                        "required": ["promptTokens", "completionTokens", "totalTokens"]
+                      },
+                      "stallCount": {
+                        "type": "number"
+                      },
+                      "lastProgressAt": {
+                        "type": ["string", "null"]
+                      },
+                      "stallEvents": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "at": {
+                              "type": "string"
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "required": ["at", "reason"]
+                        }
+                      },
+                      "steeringEvents": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "at": {
+                              "type": "string"
+                            },
+                            "message": {
+                              "type": "string"
+                            }
+                          },
+                          "required": ["at", "message"]
+                        }
+                      },
+                      "createdAt": {
+                        "type": "string"
+                      },
+                      "startedAt": {
+                        "type": ["string", "null"]
+                      },
+                      "completedAt": {
+                        "type": ["string", "null"]
                       }
                     },
-                    "required": ["id", "status", "taskDescription"]
+                    "required": [
+                      "id",
+                      "parentBotId",
+                      "taskDescription",
+                      "allowedTools",
+                      "status",
+                      "result",
+                      "usage",
+                      "stallCount",
+                      "lastProgressAt",
+                      "stallEvents",
+                      "steeringEvents",
+                      "createdAt",
+                      "startedAt",
+                      "completedAt"
+                    ]
                   }
                 }
               }
@@ -6161,11 +6287,112 @@
                     "id": {
                       "type": "string"
                     },
-                    "status": {
+                    "parentBotId": {
                       "type": "string"
+                    },
+                    "taskDescription": {
+                      "type": "string"
+                    },
+                    "allowedTools": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": ["queued", "running", "completed", "error", "cancelled", "stalled"]
+                    },
+                    "result": {
+                      "type": "string"
+                    },
+                    "usage": {
+                      "type": ["object", "null"],
+                      "properties": {
+                        "promptTokens": {
+                          "type": "number"
+                        },
+                        "completionTokens": {
+                          "type": "number"
+                        },
+                        "totalTokens": {
+                          "type": "number"
+                        },
+                        "cachedPromptTokens": {
+                          "type": "number"
+                        },
+                        "cacheWritePromptTokens": {
+                          "type": "number"
+                        },
+                        "source": {
+                          "type": "string",
+                          "enum": ["provider", "estimate"]
+                        }
+                      },
+                      "required": ["promptTokens", "completionTokens", "totalTokens"]
+                    },
+                    "stallCount": {
+                      "type": "number"
+                    },
+                    "lastProgressAt": {
+                      "type": ["string", "null"]
+                    },
+                    "stallEvents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "at": {
+                            "type": "string"
+                          },
+                          "reason": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["at", "reason"]
+                      }
+                    },
+                    "steeringEvents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "at": {
+                            "type": "string"
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["at", "message"]
+                      }
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "startedAt": {
+                      "type": ["string", "null"]
+                    },
+                    "completedAt": {
+                      "type": ["string", "null"]
                     }
                   },
-                  "required": ["id", "status"]
+                  "required": [
+                    "id",
+                    "parentBotId",
+                    "taskDescription",
+                    "allowedTools",
+                    "status",
+                    "result",
+                    "usage",
+                    "stallCount",
+                    "lastProgressAt",
+                    "stallEvents",
+                    "steeringEvents",
+                    "createdAt",
+                    "startedAt",
+                    "completedAt"
+                  ]
                 }
               }
             }

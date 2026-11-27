@@ -11,6 +11,49 @@ export type CatalogTool = {
   permissionLevel: PermissionLevel;
 };
 
+export const SUBAGENT_CONNECTOR_READ_ACTIONS = {
+  gmail: ["ListMessages", "ReadMessage", "GetAttachment"],
+  "google-calendar": ["ListEvents", "GetFreeBusy"],
+  "google-drive": ["ListFiles", "ReadFile"],
+  onedrive: ["ListFiles", "ReadFile"],
+  "outlook-mail": ["ListMessages", "ReadMessage", "GetAttachment"],
+  "outlook-calendar": ["ListEvents", "GetFreeBusy"],
+  teams: ["ListChannels", "ReadChannel", "ListFiles"],
+  sharepoint: ["ListSites", "ListItems", "ReadItem"],
+  salesforce: ["QueryRecords", "GetRecord"],
+} as const;
+
+export const SUBAGENT_CONNECTOR_CALL_PARAMETERS = z.object({
+  service: z.enum([
+    "gmail",
+    "google-calendar",
+    "google-drive",
+    "onedrive",
+    "outlook-mail",
+    "outlook-calendar",
+    "teams",
+    "sharepoint",
+    "salesforce",
+  ]),
+  action: z.enum([
+    "ListMessages",
+    "ReadMessage",
+    "GetAttachment",
+    "ListEvents",
+    "GetFreeBusy",
+    "ListFiles",
+    "ReadFile",
+    "ListChannels",
+    "ReadChannel",
+    "ListSites",
+    "ListItems",
+    "ReadItem",
+    "QueryRecords",
+    "GetRecord",
+  ]),
+  params: z.record(z.string(), z.unknown()).default({}),
+});
+
 export const STATIC_CATALOG: CatalogTool[] = [
   {
     name: "CompleteSkillStep",
@@ -90,12 +133,12 @@ export const STATIC_CATALOG: CatalogTool[] = [
   {
     name: "CreateSubagent",
     description:
-      "Start a bounded background subagent for a focused task. An already queued or running subagent with the same normalized task, tool set, and step budget is reused to avoid duplicate work.",
+      "Start a bounded background subagent for a focused task. Choose only the tool categories needed; the connectors category grants read-only access to connected services. An already queued or running subagent with the same normalized task, tool set, and step budget is reused to avoid duplicate work.",
     parameters: z.object({
       taskDescription: z.string().min(1).max(2000),
       tools: z
-        .array(z.enum(["read", "browser", "search"]))
-        .max(3)
+        .array(z.enum(["read", "browser", "search", "connectors"]))
+        .max(4)
         .default(["read", "browser", "search"]),
       stepBudget: z.number().int().min(1).max(20).optional(),
     }),
