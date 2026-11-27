@@ -2,7 +2,7 @@
 
 import type { InferenceTool } from "@agentos/inference";
 import type { PermissionLevel } from "@agentos/shared";
-import { COMPUTER_DESCRIPTION, COMPUTER_PARAMETERS } from "@agentos/tools";
+import { COMPUTER_DESCRIPTION, COMPUTER_PARAMETERS } from "@agentos/tools/computer";
 import { type ZodTypeAny, z } from "zod";
 
 export type CatalogTool = {

@@ -52,7 +52,8 @@ import {
   subagents,
   turns,
 } from "@agentos/shared";
-import { BrowserSession, presentToolResult } from "@agentos/tools";
+import { X11_POINTER_SCRIPT, presentToolResult } from "@agentos/tools";
+import type { BrowserSession } from "@agentos/tools/browser";
 import type { VMManager } from "@agentos/vm-manager";
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import { and, desc, eq, notInArray } from "drizzle-orm";
@@ -256,6 +257,28 @@ function estimateTokens(messages: ModelMessage[]): number {
   const images = messages.reduce((count, message) => count + (message.images?.length ?? 0), 0);
   const lean = images ? messages.map((message) => withoutImagesMessage(message)) : messages;
   return Math.ceil(JSON.stringify(lean).length / 3.5 + images * 1_600);
+}
+
+async function waitIfPaused(ctx: RunContext): Promise<"run" | "cancelled"> {
+  const started = Date.now();
+  while ((await ctx.redis.get(`run:${ctx.runId}:paused`)) === "1") {
+    if (await isCancelled(ctx.redis, ctx.runId)) return "cancelled";
+    if (Date.now() - started > 15 * 60 * 1000) return "cancelled";
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return (await isCancelled(ctx.redis, ctx.runId)) ? "cancelled" : "run";
+}
+
+function activityLabelFor(name: string, args: Record<string, unknown>): string {
+  const action = typeof args.action === "string" ? args.action : name;
+  const query = typeof args.query === "string" ? args.query.slice(0, 40) : "";
+  const mark = typeof args.mark === "number" ? ` #${args.mark}` : "";
+  if (action === "plan") return "Updating the plan";
+  if (action === "click" || action === "double_click")
+    return `Clicking${mark || (query ? ` ${query}` : "")}`;
+  if (action === "type") return "Typing";
+  if (action === "screenshot" || action === "zoom") return "Looking at the screen";
+  return action;
 }
 
 function toolImages(result: object): ModelMessage["images"] {
@@ -462,19 +485,32 @@ async function ensureBrowser(ctx: RunContext): Promise<void> {
   const info = await ctx.vm.getVMStatus(vmId);
   if (info.status !== "running") await ctx.vm.wakeVM(vmId);
   const vmInfo = await ctx.vm.getVMStatus(vmId);
-  ctx.browser = new BrowserSession({
+  const { BrowserSession: Session } = await import("@agentos/tools/browser");
+  ctx.browser = new Session({
     osPointer: async (point) => {
       const vmId = ctx.vmId;
       if (!vmId) return;
-      const result = await ctx.vm.execInContainer(vmId, [
+      const x = String(Math.round(point.x));
+      const y = String(Math.round(point.y));
+      const installed = await ctx.vm.execInContainer(vmId, [
         "bash",
         "/usr/local/bin/agentos-pointer",
         ctx.botId,
         "mousemove",
-        String(Math.round(point.x)),
-        String(Math.round(point.y)),
+        x,
+        y,
       ]);
-      if (result.exitCode !== 0) throw new Error(result.stderr || "pointer helper failed");
+      if (installed.exitCode === 0) return;
+      const builtin = await ctx.vm.execInContainer(vmId, [
+        "node",
+        "-e",
+        X11_POINTER_SCRIPT,
+        ctx.botId,
+        x,
+        y,
+      ]);
+      if (builtin.exitCode !== 0)
+        throw new Error(builtin.stderr || installed.stderr || "pointer helper failed");
     },
   });
   const endpoint = ctx.vm.getBotBrowserEndpoint?.(vmId, ctx.botId);
@@ -834,6 +870,7 @@ ${server.cachedTools
   const stepBudget = Math.max(1, Math.min(ctx.stepBudget ?? BOT_STEP_BUDGET, BOT_STEP_BUDGET));
   let endTurnFlag = false;
   let stoppedOnTools = false;
+  let livePlan = "";
   let skillFailureNotice: string | null = null;
   let skillFailureNoticePersisted = false;
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -931,6 +968,26 @@ ${server.cachedTools
 
     while (stepIndex < stepBudget) {
       const stepStartedAt = performance.now();
+      if ((await waitIfPaused(ctx)) === "cancelled") {
+        await ctx.db.update(turns).set({ state: "cancelled" }).where(eq(turns.id, ctx.turnId));
+        ctx.send({
+          type: "error",
+          agentId: ctx.agentId,
+          runId: ctx.runId,
+          code: "cancelled",
+          message: "run cancelled",
+        });
+        return;
+      }
+      ctx.send({
+        type: "activity",
+        agentId: ctx.agentId,
+        runId: ctx.runId,
+        step: stepIndex + 1,
+        stepBudget,
+        label: livePlan ? "Following the plan" : "Working",
+        ...(livePlan ? { plan: livePlan } : {}),
+      });
       if (activeSkill && skillProgressIndex >= activeSkill.steps.length) break;
       if (await isCancelled(ctx.redis, ctx.runId)) {
         await ctx.db.update(turns).set({ state: "cancelled" }).where(eq(turns.id, ctx.turnId));
@@ -1454,6 +1511,26 @@ ${server.cachedTools
           },
         );
         observeMillis("tool_duration_ms", performance.now() - toolStartedAt, { tool: tc.name });
+        if (typeof tc.args.plan === "string" && tc.args.plan.trim())
+          livePlan = tc.args.plan.trim().slice(0, 400);
+        const shots = toolImages(tr);
+        if (
+          tc.name === "Computer" ||
+          tc.name === "BrowserClick" ||
+          tc.name === "BrowserScreenshot"
+        ) {
+          const thumb = shots?.[0]?.data;
+          ctx.send({
+            type: "activity",
+            agentId: ctx.agentId,
+            runId: ctx.runId,
+            step: stepIndex + 1,
+            stepBudget,
+            label: activityLabelFor(tc.name, tc.args),
+            ...(livePlan ? { plan: livePlan } : {}),
+            ...(thumb && thumb.length <= 48_000 ? { thumbnail: thumb } : {}),
+          });
+        }
         if (tc.name === "Computer" || tc.name === "BrowserClick" || tc.name === "BrowserType") {
           logger.info(
             {
@@ -1484,7 +1561,6 @@ ${server.cachedTools
           tool: tc.name,
           outcome: approvalDenied ? "denied" : tr.isError ? "error" : "success",
         });
-        const shots = toolImages(tr);
         toolResults.push(shots?.length ? { ...tr, images: undefined } : tr);
 
         // Keep failed skill actions in the checkpoint before applying the

@@ -1,11 +1,9 @@
 /** Tool dispatch (REQ-A06) — routes to @agentos/tools implementations. */
 
 import type { ApprovalPolicy, ToolCall, ToolResult } from "@agentos/shared";
-import type { BrowserSession } from "@agentos/tools";
 import {
   appendFile,
   deleteFile,
-  detachImage,
   fetchURL,
   listDirectory,
   readFile,
@@ -13,6 +11,8 @@ import {
   searchWeb,
   writeFile,
 } from "@agentos/tools";
+import type { BrowserSession } from "@agentos/tools/browser";
+import { detachImage } from "@agentos/tools/computer";
 import type { VMManager } from "@agentos/vm-manager";
 import { PermissionDeniedError, checkPermission } from "./permissions.ts";
 import type { CatalogTool } from "./tools/catalog.ts";

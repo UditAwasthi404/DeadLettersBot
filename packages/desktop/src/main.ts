@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, app, ipcMain, session, shell } from "electron";
-import { autoUpdater } from "electron-updater";
 import WebSocket from "ws";
 import { type LocalMachineAccess, runLocalCommand } from "./local-daemon";
 
@@ -41,6 +40,7 @@ let vncEpoch = 0;
 const localPolicy = new Map<string, LocalMachineAccess>();
 const sessionAllow = new Set<string>();
 const pendingLocal = new Map<string, (decision: "allow" | "deny" | "allow_session") => void>();
+let installUpdate: (() => void) | null = null;
 
 function sendGateway(frame: unknown): void {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -474,7 +474,7 @@ ipcMain.handle("vnc:close", () => {
 });
 
 ipcMain.handle("app:restart", () => {
-  autoUpdater.quitAndInstall();
+  installUpdate?.();
 });
 
 ipcMain.handle("app:open-external", async (event, value: unknown) => {
@@ -540,20 +540,21 @@ ipcMain.handle(
   },
 );
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createWindow();
   // Updates are published by the tag-triggered workflow for the configured GitHub repository.
-  if (app.isPackaged) {
-    autoUpdater.on("update-available", () => {
-      windowRef?.webContents.send("update:available");
-    });
-    autoUpdater.on("update-downloaded", () => {
-      windowRef?.webContents.send("update:ready");
-    });
-    void autoUpdater.checkForUpdatesAndNotify().catch((err: unknown) => {
-      console.warn("[desktop] update check failed", err);
-    });
-  }
+  if (!app.isPackaged) return;
+  const { autoUpdater } = await import("electron-updater");
+  installUpdate = () => autoUpdater.quitAndInstall();
+  autoUpdater.on("update-available", () => {
+    windowRef?.webContents.send("update:available");
+  });
+  autoUpdater.on("update-downloaded", () => {
+    windowRef?.webContents.send("update:ready");
+  });
+  void autoUpdater.checkForUpdatesAndNotify().catch((err: unknown) => {
+    console.warn("[desktop] update check failed", err);
+  });
 });
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
