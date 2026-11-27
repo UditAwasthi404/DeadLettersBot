@@ -2,6 +2,14 @@
 
 import type { Page } from "playwright";
 import {
+  alternateTarget,
+  chooseRecovery,
+  markRef,
+  needsUser,
+  shouldPaste,
+  zoomClip,
+} from "./computer-recovery.ts";
+import {
   type ComputerRequest,
   type ModelImage,
   type ScreenGeometry,
@@ -25,6 +33,8 @@ export interface ComputerRuntime {
   geometry: ScreenGeometry | null;
   elements: TargetElement[];
   stuck: StuckState;
+  plan: string;
+  lastShotAt: number;
 }
 
 export interface ComputerHooks {
@@ -59,7 +69,7 @@ interface Observed {
 }
 
 export function emptyRuntime(): ComputerRuntime {
-  return { geometry: null, elements: [], stuck: emptyStuck() };
+  return { geometry: null, elements: [], stuck: emptyStuck(), plan: "", lastShotAt: 0 };
 }
 
 export async function runComputerAction(
@@ -69,25 +79,52 @@ export async function runComputerAction(
   hooks: ComputerHooks = {},
 ): Promise<ComputerOutcome> {
   const started = performance.now();
+  const marked = markRef(request.mark);
+  const actionRequest = marked && !request.ref ? { ...request, ref: marked } : request;
   try {
-    if (request.action === "screenshot" || request.action === "find")
-      return await look(page, request, runtime, started);
-    if (request.action === "key") return await pressKey(page, request, runtime, started);
-    if (request.action === "type") return await typeText(page, request, runtime, hooks, started);
-    if (request.action === "scroll")
-      return await scrollWheel(page, request, runtime, hooks, started);
-    if (request.action === "drag") return await dragPointer(page, request, runtime, hooks, started);
-    if (request.action === "move") return await movePointer(page, request, runtime, hooks, started);
+    if (actionRequest.action === "plan") return planUpdate(actionRequest, runtime);
+    if (actionRequest.action === "zoom") return await zoom(page, actionRequest, runtime, started);
+    if (actionRequest.action === "wait")
+      return await waitQuiet(page, actionRequest, runtime, started);
+    if (actionRequest.action === "screenshot" || actionRequest.action === "find")
+      return await look(page, actionRequest, runtime, started);
+    if (actionRequest.action === "key")
+      return await pressKey(page, actionRequest, runtime, started);
+    if (actionRequest.action === "type")
+      return await typeText(page, actionRequest, runtime, hooks, started);
+    if (actionRequest.action === "scroll")
+      return await scrollWheel(page, actionRequest, runtime, hooks, started);
+    if (actionRequest.action === "drag")
+      return await dragPointer(page, actionRequest, runtime, hooks, started);
+    if (actionRequest.action === "move")
+      return await movePointer(page, actionRequest, runtime, hooks, started);
+    if (
+      actionRequest.action === "tabs" ||
+      actionRequest.action === "switch_tab" ||
+      actionRequest.action === "dialog" ||
+      actionRequest.action === "upload" ||
+      actionRequest.action === "download"
+    ) {
+      return {
+        runtime,
+        result: {
+          ok: false,
+          action: actionRequest.action,
+          message: "This action is handled by the browser session.",
+        },
+      };
+    }
+    await waitForQuiet(page);
     return await performClick(
       page,
       {
-        ref: request.ref,
-        query: request.query,
-        x: request.x,
-        y: request.y,
-        button: request.action === "right_click" ? "right" : "left",
-        clickCount: request.action === "double_click" ? 2 : 1,
-        plan: request.plan,
+        ref: actionRequest.ref,
+        query: actionRequest.query,
+        x: actionRequest.x,
+        y: actionRequest.y,
+        button: actionRequest.action === "right_click" ? "right" : "left",
+        clickCount: actionRequest.action === "double_click" ? 2 : 1,
+        plan: actionRequest.plan,
       },
       runtime,
       hooks,
@@ -232,6 +269,27 @@ async function look(
   runtime: ComputerRuntime,
   started: number,
 ): Promise<ComputerOutcome> {
+  if (
+    request.action === "screenshot" &&
+    runtime.lastShotAt > 0 &&
+    Date.now() - runtime.lastShotAt < 1500 &&
+    runtime.elements.length > 0 &&
+    runtime.geometry
+  ) {
+    return {
+      runtime,
+      result: {
+        ok: true,
+        action: "screenshot",
+        cached: true,
+        verified: true,
+        elements: summarizeElements(runtime.elements, runtime.geometry),
+        message: "The screen was just captured. Act on the numbered marks.",
+        ...(runtime.plan ? { plan: runtime.plan } : {}),
+        durationMs: Math.round(performance.now() - started),
+      },
+    };
+  }
   const observed = await observe(page, runtime, true);
   const match = request.query ? findElement(observed.runtime.elements, request.query) : null;
   return {
@@ -302,6 +360,7 @@ async function typeText(
 ): Promise<ComputerOutcome> {
   const text = request.text ?? "";
   if (!text) return { runtime, result: { ok: false, action: "type", message: "text is required" } };
+  await waitForQuiet(page);
   const elements = await elementsFor(page, runtime, request);
   const geo = geometryOf(runtime, await viewportOf(page));
   const before = screenFingerprint(page.url(), elements);
@@ -317,7 +376,8 @@ async function typeText(
     );
     if (resolved.kind === "point") await clickAt(page, resolved.x, resolved.y, "left", 1, hooks);
   }
-  await page.keyboard.insertText(text.slice(0, 4000));
+  const typed = text.slice(0, 8000);
+  await insertText(page, typed);
   if (request.submit) await page.keyboard.press("Enter");
   return finish(
     page,
@@ -326,7 +386,8 @@ async function typeText(
     before,
     {
       action: "type",
-      typedCharacters: Math.min(text.length, 4000),
+      typedCharacters: Math.min(text.length, 8000),
+      pasted: shouldPaste(text),
       submit: Boolean(request.submit),
     },
     started,
@@ -439,6 +500,17 @@ async function movePointer(
   };
 }
 
+function planUpdate(request: ComputerRequest, runtime: ComputerRuntime): ComputerOutcome {
+  const plan = (request.plan ?? "").trim().slice(0, 400);
+  if (!plan) {
+    return { runtime, result: { ok: false, action: "plan", message: "plan text is required" } };
+  }
+  return {
+    runtime: { ...runtime, plan },
+    result: { ok: true, action: "plan", plan, verified: true },
+  };
+}
+
 async function finish(
   page: Page,
   runtime: ComputerRuntime,
@@ -448,19 +520,33 @@ async function finish(
   started: number,
 ): Promise<ComputerOutcome> {
   await page.waitForTimeout(140);
-  const observed = await observe(page, runtime, true);
+  let observed = await observe(page, runtime, true);
   const fingerprint = screenFingerprint(observed.url, observed.runtime.elements);
   const stuck = noteStuck(observed.runtime.stuck, actionSignature(request), fingerprint);
   observed.runtime.stuck = stuck.state;
   const changed = before !== fingerprint;
-  let hint = typeof result.hint === "string" ? result.hint : "";
-  if (stuck.stuck) {
-    hint =
-      "This action did not change the screen. Choose a different control, or press Enter to submit.";
-  } else if (!changed && request.action !== "move") {
-    hint =
-      hint || "The screen looked unchanged. Check the element list before repeating this action.";
+  const user = needsUser(
+    observed.url,
+    observed.runtime.elements.map((element) => element.name),
+  );
+  const recovery = chooseRecovery(stuck.state.repeats, user);
+  let recoveryTaken = "";
+  if (stuck.stuck && recovery.kind === "scroll") {
+    await page.mouse.wheel(0, 480);
+    recoveryTaken = "scrolled";
+    observed = await observe(page, observed.runtime, true);
+  } else if (stuck.stuck && recovery.kind === "keyboard") {
+    await page.keyboard.press(recovery.key ?? "Tab");
+    recoveryTaken = "pressed Tab";
+    observed = await observe(page, observed.runtime, true);
   }
+  const alternate =
+    recovery.kind === "alternate" || !changed
+      ? alternateTarget(observed.runtime.elements, request.ref)
+      : null;
+  const verified = changed || request.action === "move" || request.action === "plan";
+  const plan = (request.plan ?? observed.runtime.plan).trim();
+  if (plan) observed.runtime.plan = plan.slice(0, 400);
   return {
     runtime: observed.runtime,
     image: observed.image,
@@ -469,14 +555,27 @@ async function finish(
       ...result,
       url: observed.url,
       changed,
+      verified,
+      recovery: recovery.kind,
       elements: summarizeElements(observed.runtime.elements, observed.geo),
       imageBytes: observed.imageBytes,
       viewport: { width: observed.geo.viewportWidth, height: observed.geo.viewportHeight },
       imageSize: { width: observed.geo.imageWidth, height: observed.geo.imageHeight },
       deviceScaleFactor: observed.geo.deviceScaleFactor,
       coordinateSpace: "screenshot pixels",
-      ...(request.plan ? { plan: request.plan } : {}),
-      ...(hint ? { hint } : {}),
+      ...(observed.runtime.plan ? { plan: observed.runtime.plan } : {}),
+      ...(user ? { askUser: true } : {}),
+      ...(recoveryTaken ? { recoveryTaken } : {}),
+      ...(alternate
+        ? {
+            alternate: {
+              ref: alternate.ref,
+              name: alternate.name,
+              mark: markNumber(alternate.ref),
+            },
+          }
+        : {}),
+      hint: user ?? recovery.hint,
       durationMs: Math.round(performance.now() - started),
     },
   };
@@ -494,6 +593,7 @@ async function observe(
   let imageWidth = viewport.width;
   let imageHeight = viewport.height;
   if (withImage) {
+    await paintMarks(page, elements);
     const shot = await captureJpeg(page);
     image = { mediaType: "image/jpeg", data: shot.data };
     imageBytes = shot.bytes;
@@ -510,7 +610,12 @@ async function observe(
     deviceScaleFactor: viewport.deviceScaleFactor,
   };
   return {
-    runtime: { ...runtime, elements, geometry: geo },
+    runtime: {
+      ...runtime,
+      elements,
+      geometry: geo,
+      lastShotAt: withImage ? Date.now() : runtime.lastShotAt,
+    },
     geo,
     url: page.url(),
     image,
@@ -732,6 +837,139 @@ async function readElements(page: Page): Promise<TargetElement[]> {
     return found;
   });
   return raw.map((element, index) => ({ ...element, ref: `e${index + 1}` }));
+}
+
+async function zoom(
+  page: Page,
+  request: ComputerRequest,
+  runtime: ComputerRuntime,
+  started: number,
+): Promise<ComputerOutcome> {
+  if (request.x === undefined || request.y === undefined) {
+    return { runtime, result: { ok: false, action: "zoom", message: "zoom requires x and y" } };
+  }
+  const viewport = await viewportOf(page);
+  const geo = geometryOf(runtime, viewport);
+  const css = imageToCss(request.x, request.y, geo);
+  const clip = zoomClip(css.x, css.y, request.delta ?? 240, viewport);
+  await paintMarks(page, runtime.elements);
+  const buffer = await page.screenshot({
+    type: "jpeg",
+    quality: 55,
+    scale: "css",
+    clip,
+    timeout: 5_000,
+    style: "#__agentos_cursor{display:none !important}",
+  });
+  const parsed = jpegSize(buffer);
+  return {
+    runtime: { ...runtime, lastShotAt: Date.now() },
+    image: { mediaType: "image/jpeg", data: buffer.toString("base64") },
+    result: {
+      ok: true,
+      action: "zoom",
+      verified: true,
+      origin: cssToImage(clip.x, clip.y, geo),
+      clip,
+      imageSize: { width: parsed?.width ?? clip.width, height: parsed?.height ?? clip.height },
+      coordinateSpace: "crop pixels; add origin to map back to the full screenshot",
+      ...(runtime.plan ? { plan: runtime.plan } : {}),
+      durationMs: Math.round(performance.now() - started),
+    },
+  };
+}
+
+async function waitQuiet(
+  page: Page,
+  request: ComputerRequest,
+  runtime: ComputerRuntime,
+  started: number,
+): Promise<ComputerOutcome> {
+  const quiet = await waitForQuiet(page, request.delta ?? 800);
+  return {
+    runtime,
+    result: {
+      ok: true,
+      action: "wait",
+      verified: true,
+      waitedMs: quiet,
+      ...(runtime.plan ? { plan: runtime.plan } : {}),
+      durationMs: Math.round(performance.now() - started),
+    },
+  };
+}
+
+async function waitForQuiet(page: Page, maxMs = 800): Promise<number> {
+  const cap = Math.max(100, Math.min(5_000, maxMs));
+  await page.waitForLoadState("domcontentloaded", { timeout: 1_000 }).catch(() => {});
+  let last = Date.now();
+  const touch = () => {
+    last = Date.now();
+  };
+  page.on("request", touch);
+  const started = Date.now();
+  try {
+    while (Date.now() - started < cap) {
+      if (Date.now() - last >= 200) break;
+      await page.waitForTimeout(50);
+    }
+  } finally {
+    page.off("request", touch);
+  }
+  return Date.now() - started;
+}
+
+async function insertText(page: Page, text: string): Promise<void> {
+  if (!shouldPaste(text)) {
+    await page.keyboard.insertText(text);
+    return;
+  }
+  await page
+    .context()
+    .grantPermissions(["clipboard-read", "clipboard-write"])
+    .catch(() => {});
+  const pasted = await page
+    .evaluate(async (value) => {
+      try {
+        await navigator.clipboard.writeText(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }, text)
+    .catch(() => false);
+  if (pasted) {
+    await page.keyboard.press("Control+V");
+    return;
+  }
+  await page.keyboard.insertText(text);
+}
+
+async function paintMarks(page: Page, elements: TargetElement[]): Promise<void> {
+  const marks = elements.slice(0, 36).map((element) => ({
+    n: markNumber(element.ref),
+    x: Math.round(element.x + element.width / 2),
+    y: Math.round(element.y),
+  }));
+  await page.evaluate((badges) => {
+    document.getElementById("__agentos_marks")?.remove();
+    const root = document.createElement("div");
+    root.id = "__agentos_marks";
+    root.setAttribute("aria-hidden", "true");
+    root.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483646;";
+    for (const badge of badges) {
+      const node = document.createElement("div");
+      node.textContent = String(badge.n);
+      node.style.cssText = `position:absolute;left:${badge.x}px;top:${badge.y}px;transform:translate(-50%,-100%);min-width:16px;height:16px;padding:0 3px;border-radius:8px;background:#4f46e5;color:#fff;font:700 11px/16px sans-serif;text-align:center;box-shadow:0 0 0 1px #fff;`;
+      root.appendChild(node);
+    }
+    document.documentElement.appendChild(root);
+  }, marks);
+}
+
+function markNumber(ref: string): number {
+  const value = Number(ref.slice(1));
+  return Number.isInteger(value) && value > 0 ? value : 0;
 }
 
 async function paintCursor(page: Page, x: number, y: number): Promise<void> {
