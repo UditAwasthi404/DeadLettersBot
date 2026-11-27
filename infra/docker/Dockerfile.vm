@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash coreutils findutils util-linux ca-certificates curl gpg inotify-tools iptables x11vnc xvfb \
+      bash coreutils findutils util-linux ca-certificates curl gpg inotify-tools iptables x11vnc xdotool xvfb \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
@@ -39,12 +39,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY ensure-bot-browser.sh /usr/local/bin/agentos-ensure-browser
 COPY ensure-bot-vnc.sh /usr/local/bin/agentos-ensure-vnc
+COPY agentos-pointer.sh /usr/local/bin/agentos-pointer
 COPY controlled-exec.sh /usr/local/bin/agentos-controlled-exec
 COPY agentos-vm-entrypoint.mjs /usr/local/bin/agentos-vm-entrypoint.mjs
 COPY agentos-vm-entrypoint.sh /usr/local/bin/agentos-vm-entrypoint.sh
 COPY --from=file-tools-build /usr/local/bin/agentos-file /usr/local/bin/agentos-file
 COPY --from=file-tools-build /usr/local/bin/agentos-shell /usr/local/bin/agentos-shell
-RUN chmod 0755 /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-ensure-vnc /usr/local/bin/agentos-controlled-exec /usr/local/bin/agentos-vm-entrypoint.mjs /usr/local/bin/agentos-vm-entrypoint.sh /usr/local/bin/agentos-file /usr/local/bin/agentos-shell \
+RUN chmod 0755 /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-ensure-vnc /usr/local/bin/agentos-pointer /usr/local/bin/agentos-controlled-exec /usr/local/bin/agentos-vm-entrypoint.mjs /usr/local/bin/agentos-vm-entrypoint.sh /usr/local/bin/agentos-file /usr/local/bin/agentos-shell \
     && node --version \
     && npm --version \
     && chromium --version

@@ -101,6 +101,19 @@ if ! cdp_ready "$port"; then
     --no-sandbox \
     --disable-dev-shm-usage \
     --disable-gpu \
+    --force-device-scale-factor=1 \
+    --window-position=0,0 \
+    --window-size=1280,800 \
+    --start-maximized \
+    --ozone-platform=x11 \
+    --disable-background-networking \
+    --disable-sync \
+    --disable-default-apps \
+    --disable-extensions \
+    --disable-renderer-backgrounding \
+    --mute-audio \
+    --no-first-run \
+    --no-default-browser-check \
     --remote-debugging-port="$port" \
     --remote-debugging-address=0.0.0.0 \
     --user-data-dir="$state_dir/profile-$bot_id" \

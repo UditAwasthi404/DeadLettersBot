@@ -2685,7 +2685,13 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
             socket.on("data", (chunk: Buffer) => {
               if (closed) return;
               try {
-                ws.send(Uint8Array.from(chunk));
+                ws.send(
+                  new Uint8Array(
+                    chunk.buffer,
+                    chunk.byteOffset,
+                    chunk.byteLength,
+                  ) as Uint8Array<ArrayBuffer>,
+                );
               } catch (err) {
                 logger.debug({ ...loggedError(err), botId }, "vnc websocket send failed");
                 stop();
