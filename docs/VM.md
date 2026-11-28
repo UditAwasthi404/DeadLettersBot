@@ -79,7 +79,7 @@ Results measured 2026-11-28 (Windows Docker Desktop):
 
 | Metric | Before | After |
 | --- | --- | --- |
-| Image size (`agentos/vm-manager:latest`) | 1.53 GB | 1.93 GB (live commit with tint2; clean rebuild after HTTPS Dockerfile fix still in progress / may vary) |
+| Image size (`agentos/vm-manager:latest`) | 1.53 GB | **2.22 GB** clean `vm-template` rebuild (tint2 + JetBrains Mono + Noto fonts + Playwright Chromium) |
 | Warm `ensure-browser` | — | 3152.5 ms |
 
 ## Related

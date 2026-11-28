@@ -102,8 +102,8 @@ Re-verify this table at the end of each milestone. Mark ✕ only when intentiona
 2. Chromium relaunched with `--window-size=1280,764`, new feature disables, `Initial Preferences` present.
 3. `xterm` themed (JetBrains Mono / token colours), iconified.
 4. Warm ensure-browser ~3.2 s; CDP port answered (`9224`).
-5. Clean `docker compose … build vm-template` initially failed on HTTP apt in `file-tools-build`; Dockerfile now forces HTTPS there — rebuild kicked off.
-6. Electron relaunched against Vite; gallery/tokens CSS return HTTP 200.
+5. Clean `docker compose … build vm-template` succeeded after HTTPS apt + Landlock unused-param fix; image tagged `agentos/vm-manager:latest` @ 2.22 GB with `tint2` + prefs baked in.
+6. Electron relaunched against Vite; gallery/tokens CSS return HTTP 200; gateway healthy.
 
 ### M4 — Rust core (partial — clean stop)
 
@@ -135,9 +135,9 @@ Measured 2026-11-28 on Windows (`win32`, Node v24.22.1). Electron cold-start scr
 | Electron Browser process RSS | n/a | **137.4 MiB** | same bench sample |
 | Electron all processes RSS | n/a | **616.1 MiB** | Browser+GPU+Utility+Tab |
 | Warm `ensure-browser` | n/a | **3152.5 ms** | timed `docker exec … agentos-ensure-browser` |
-| VM image `agentos/vm-manager:latest` | **1.53 GB** | **1.93 GB** (committed live VM with tint2 + profile state; clean Dockerfile rebuild still blocked by archive.ubuntu.com HTTP flakiness — HTTPS fix landed in Dockerfile) | `docker images` |
+| VM image `agentos/vm-manager:latest` | **1.53 GB** | **2.22 GB** clean rebuild (`docker compose … build vm-template`) with tint2 + fonts; live-commit mid-point was 1.93 GB | `docker images` |
 
-Notes: §8 cold-start target (&lt;800 ms) is for the future Tauri shell; this Electron+Playwright number is the reproducible baseline to beat. VM size still exceeds the &lt;1.2 GB target.
+Notes: §8 cold-start target (&lt;800 ms) is for the future Tauri shell; this Electron+Playwright number is the reproducible baseline to beat. VM size still exceeds the &lt;1.2 GB target (Playwright Chromium dominates).
 
 ## Manual QA script (§10)
 
