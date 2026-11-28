@@ -1,0 +1,21 @@
+{
+  "appName": "AgentOS",
+  "workspace": "Workspace",
+  "search": "Search bots, pages, and actions…",
+  "openSearch": "Search workspace",
+  "toggleSidebar": "Toggle sidebar",
+  "minimize": "Minimize window",
+  "maximize": "Maximize or restore window",
+  "closeWindow": "Close window",
+  "commandTitle": "Command palette",
+  "commandDescription": "Search bots, pages, and actions. Use the arrow keys to choose and Enter to open.",
+  "commandEmpty": "No matching actions",
+  "showScreen": "Show screen",
+  "hideScreen": "Hide screen",
+  "newBot": "New bot",
+  "toggleTheme": "Toggle theme",
+  "idle": "Idle",
+  "working": "Working",
+  "waiting": "Waiting for you",
+  "messagePlaceholder": "Message {bot}…"
+}

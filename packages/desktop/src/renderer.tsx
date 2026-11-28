@@ -58,9 +58,14 @@ import { ThemeToggle } from "./components/ThemeToggle.tsx";
 import { ToastStack } from "./components/Toast.tsx";
 import { Welcome } from "./components/Welcome.tsx";
 import { RawVncSession } from "./rfb.ts";
-import { ThemeController } from "./theme.tsx";
+import { ThemeController, useThemeMode } from "./theme.tsx";
+import { CommandPalette } from "./command-palette.tsx";
+import { WindowTitlebar } from "./titlebar.tsx";
+import { t } from "./i18n/index.ts";
 import "@radix-ui/themes/styles.css";
 import "./style.css";
+import "./design/tokens.css";
+import "./shell.css";
 
 const ClerkBoundary = React.lazy(() =>
   import("./ClerkBoundary.tsx").then((module) => ({ default: module.ClerkBoundary })),
@@ -527,6 +532,15 @@ interface Frame {
 }
 
 function App({ clerk }: { clerk?: ClerkBridge } = {}) {
+  const { cycle: cycleTheme } = useThemeMode();
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("agentos:sidebar-collapsed") === "1"; } catch { return false; }
+  });
+  const shortcutActionsRef = useRef<Record<string, () => void>>({});
+  useEffect(() => {
+    try { localStorage.setItem("agentos:sidebar-collapsed", sidebarCollapsed ? "1" : "0"); } catch { }
+  }, [sidebarCollapsed]);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8787");
   const [token, setToken] = useState("");
   const [status, setStatus] = useState("disconnected");
@@ -1003,8 +1017,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         setBotDraftOpen(true);
       } else if (key === "k") {
         event.preventDefault();
-        showWorkspace("chat");
-        window.setTimeout(() => composerRef.current?.focus(), 0);
+        setCommandOpen((open) => !open);
+      } else if (event.shiftKey && key === "s") {
+        event.preventDefault();
+        shortcutActionsRef.current.screen?.();
+      } else if (/^[1-9]$/.test(key)) {
+        event.preventDefault();
+        shortcutActionsRef.current[key]?.();
       } else if (key === ",") {
         event.preventDefault();
         setConnectOpen(true);
@@ -2695,7 +2714,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   : workspace === "model"
                     ? "Model & privacy"
                     : (selectedBot?.name ?? "Choose a bot");
-  const headerTitle = selectedBot?.name ?? workspaceTitle;
+  const headerTitle = workspace === "chat" ? (selectedBot?.name ?? workspaceTitle) : workspaceTitle;
   const headerSubtitle = selectedBot
     ? workspace === "chat" && activeRun
       ? agentActivity || "Working"
@@ -2777,6 +2796,20 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     },
   ];
 
+  const toggleScreen = () => {
+    if (!botId || screenMode === "handoff") return;
+    setScreenMode((mode) => (mode === "view" || mode === "control" ? null : "view"));
+  };
+  shortcutActionsRef.current = Object.fromEntries(navItems.map((item, index) => [String(index + 1), () => { if (!item.disabled) item.onClick(); }]));
+  shortcutActionsRef.current.screen = toggleScreen;
+  const commands = [
+    ...navItems.filter((item) => !item.disabled).map((item, index) => ({ id: `page:${item.id}`, label: item.label, group: "Pages", shortcut: `Ctrl+${index + 1}`, run: item.onClick })),
+    ...bots.map((bot) => ({ id: `bot:${bot.id}`, label: bot.name, group: "Bots", run: () => { setBotId(bot.id); setItems([]); showWorkspace("chat"); } })),
+    { id: "theme", label: t("toggleTheme"), group: "Actions", run: cycleTheme },
+    ...(botId ? [{ id: "screen", label: t(screenActive ? "hideScreen" : "showScreen"), group: "Actions", shortcut: "Ctrl+Shift+S", run: toggleScreen }] : []),
+    ...(token ? [{ id: "new-bot", label: t("newBot"), group: "Actions", shortcut: "Ctrl+N", run: () => { setBotDraftName(""); setBotDraftOpen(true); } }] : []),
+  ];
+
   useEffect(() => {
     if (workspace !== "subagents" || !signedIn || !token) return;
     const timer = window.setInterval(() => {
@@ -2789,7 +2822,18 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }, [workspace, signedIn, token, baseUrl]);
 
   return (
-    <div className="app-shell">
+    <div className={sidebarCollapsed ? "app-shell is-sidebar-collapsed" : "app-shell"}>
+      <WindowTitlebar
+        collapsed={sidebarCollapsed}
+        onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
+        onSearch={() => setCommandOpen(true)}
+        onError={(err) => setError(err instanceof Error ? err.message : String(err))}
+      />
+      <CommandPalette
+        open={commandOpen}
+        onOpenChange={setCommandOpen}
+        commands={commands}
+      />
       {!signedIn && clerk?.enabled && (
         <AuthShell>
           <div className="auth-card">
@@ -2976,7 +3020,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               key={item.id}
               icon={item.icon}
               label={item.label}
-              tooltip={item.tooltip}
+              tooltip={`${item.tooltip} · ${window.agentOS.platform === "darwin" ? "⌘" : "Ctrl+"}${navItems.indexOf(item) + 1}`}
               active={workspace === item.id}
               disabled={item.disabled}
               onClick={item.onClick}
@@ -3130,6 +3174,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               </div>
             </div>
             <div className="header-actions">
+              {workspace === "chat" && <span className="chat-status" role="status" aria-live="polite">{handoff ? t("waiting") : activeRun ? `${t("working")}${stepProgress ? ` · ${stepProgress.step}/${stepProgress.stepBudget}` : ""}` : t("idle")}</span>}
               {showJumpToLatest && workspace === "chat" && (
                 <AppButton
                   type="button"
@@ -3173,7 +3218,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 disabled={screenMode === "handoff"}
               >
                 <Monitor className="glyph" aria-hidden="true" />
-                {screenMode === "view" || screenMode === "control" ? "Hide screen" : "Agent screen"}
+                {t(screenMode === "view" || screenMode === "control" ? "hideScreen" : "showScreen")}
               </AppButton>
             </div>
           </header>
@@ -5449,13 +5494,30 @@ function Root() {
   );
 }
 
+const GalleryPage = React.lazy(() => import("./gallery.tsx"));
+
+function GalleryRoot() {
+  return (
+    <React.Suspense fallback={<div className="auth-loading">Loading gallery…</div>}>
+      <GalleryPage />
+    </React.Suspense>
+  );
+}
+
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("root mount node is missing");
+const isGallery = window.location.pathname === "/__gallery" || window.location.hash === "#/__gallery";
 createRoot(rootElement).render(
   <React.StrictMode>
     <ThemeController>
       <ErrorBoundary fallbackTitle="AgentOS hit a display error">
-        {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
+        {isGallery ? (
+          <GalleryRoot />
+        ) : typeof window.agentOS?.onFrame === "function" ? (
+          <Root />
+        ) : (
+          <DesktopRequired />
+        )}
       </ErrorBoundary>
     </ThemeController>
   </React.StrictMode>,

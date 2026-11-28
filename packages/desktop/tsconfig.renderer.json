@@ -6,5 +6,17 @@
     "types": ["vite/client"],
     "noEmit": true
   },
-  "include": ["src/renderer.tsx", "src/preload.d.ts", "src/clerk-env.d.ts"]
+  "include": [
+    "src/renderer.tsx",
+    "src/preload.d.ts",
+    "src/clerk-env.d.ts",
+    "src/gallery.tsx",
+    "src/command-palette.tsx",
+    "src/command-search.ts",
+    "src/titlebar.tsx",
+    "src/i18n/**/*.ts",
+    "src/design/**/*.ts",
+    "src/components/**/*.tsx",
+    "src/components/**/*.ts"
+  ]
 }
