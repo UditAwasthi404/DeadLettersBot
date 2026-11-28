@@ -58,6 +58,7 @@ static uint64_t workspace_access(int abi) {
 #ifdef LANDLOCK_ACCESS_FS_TRUNCATE
   if (abi >= 3) access |= LANDLOCK_ACCESS_FS_TRUNCATE;
 #endif
+  (void)abi; /* used only when newer Landlock access bits are available in headers */
   return access;
 }
 
