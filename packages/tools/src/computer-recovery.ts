@@ -50,12 +50,12 @@ export function chooseRecovery(repeats: number, userNeeded: string | null): Reco
   if (repeats >= 2) {
     return {
       kind: "alternate",
-      hint: "Pick a different numbered mark. Do not repeat the same click.",
+      hint: "Pick a different mark/ref from the latest element list. Do not repeat the same click.",
     };
   }
   return {
     kind: "rescreenshot",
-    hint: "The screen looked unchanged. Use the numbered marks on the latest view.",
+    hint: "The screen looked unchanged. Screenshot again and use mark/ref from the element list.",
   };
 }
 

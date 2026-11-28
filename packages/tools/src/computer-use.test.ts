@@ -8,6 +8,7 @@ import {
   jpegSize,
   nextJpegQuality,
   normalizeKey,
+  normalizeNavigateUrl,
   noteStuck,
   presentToolResult,
 } from "./computer-use.ts";
@@ -164,8 +165,15 @@ describe("computer-use guards", () => {
   test("accepts typing keys and rejects shell-like chords", () => {
     expect(normalizeKey("Enter")).toBe("Enter");
     expect(normalizeKey("Control+Enter")).toBe("Control+Enter");
+    expect(normalizeKey("ctrl+t")).toBe("Control+t");
     expect(normalizeKey("rm -rf")).toBeNull();
     expect(normalizeKey("")).toBeNull();
+  });
+
+  test("normalizes site typos into https URLs", () => {
+    expect(normalizeNavigateUrl("chatgpt,com")).toBe("https://chatgpt.com/");
+    expect(normalizeNavigateUrl("https://chatgpt.com/")).toBe("https://chatgpt.com/");
+    expect(normalizeNavigateUrl("")).toBeNull();
   });
 
   test("flags the third identical unchanged action as stuck", () => {

@@ -42,7 +42,11 @@ import { ConnectorBrandIcon } from "./ConnectorBrandIcon.tsx";
 import { ErrorBoundary } from "./ErrorBoundary.tsx";
 import { UpdateBanner } from "./UpdateBanner.tsx";
 import { AgentAvatar } from "./components/AgentAvatar.tsx";
-import { AgentScreen, type ScreenPhase } from "./components/AgentScreen.tsx";
+import {
+  AgentScreen,
+  type DesktopApp,
+  type ScreenPhase,
+} from "./components/AgentScreen.tsx";
 import { AppButton } from "./components/AppButton.tsx";
 import { AuthShell } from "./components/AuthShell.tsx";
 import { BotRow } from "./components/BotRow.tsx";
@@ -682,14 +686,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const [allowLocalSession, setAllowLocalSession] = useState(false);
   const [screenMode, setScreenMode] = useState<null | "view" | "control" | "handoff">(null);
   const [agentActivity, setAgentActivity] = useState("");
-  const [livePlan, setLivePlan] = useState("");
   const [stepProgress, setStepProgress] = useState<{ step: number; stepBudget: number } | null>(
     null,
   );
   const [pausedRun, setPausedRun] = useState(false);
-  const [timeline, setTimeline] = useState<
-    Array<{ id: string; label: string; thumbnail?: string }>
-  >([]);
+  const [desktopApp, setDesktopApp] = useState<DesktopApp>("browser");
   const tokenHold = useRef<{ runId: string; agentId?: string; text: string } | null>(null);
   const tokenPaint = useRef(0);
   const [handoff, setHandoff] = useState<{
@@ -754,20 +755,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       } else if (frame.type === "activity") {
         if (typeof frame.step === "number" && typeof frame.stepBudget === "number")
           setStepProgress({ step: frame.step, stepBudget: frame.stepBudget });
-        if (typeof frame.plan === "string") setLivePlan(frame.plan);
         if (frame.label) setAgentActivity(frame.label);
-        if (frame.label && frame.label !== "Working" && frame.label !== "Following the plan") {
-          setTimeline((old) =>
-            [
-              {
-                id: crypto.randomUUID(),
-                label: frame.label ?? "Working",
-                ...(typeof frame.thumbnail === "string" ? { thumbnail: frame.thumbnail } : {}),
-              },
-              ...old,
-            ].slice(0, 12),
-          );
-        }
       } else if (frame.type === "toolStart") {
         setAgentActivity(activityLabel(frame.toolName, frame.params));
         setItems((old) => [
@@ -3445,12 +3433,24 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               error={screenError}
               reason={handoff?.reason}
               interactive={screenInteractive}
+              activeApp={desktopApp}
               canvasRef={setScreenCanvas}
-              plan={livePlan}
               paused={pausedRun}
-              timeline={timeline}
               onRetry={() => setScreenAttempt((attempt) => attempt + 1)}
               onClose={() => setScreenMode(null)}
+              onFocusApp={(app) => {
+                setDesktopApp(app);
+                if (!token || !baseUrl || !screenBotId) return;
+                void window.agentOS
+                  .apiRequest({
+                    baseUrl,
+                    token,
+                    path: `/v1/bots/${encodeURIComponent(screenBotId)}/desktop/focus`,
+                    method: "POST",
+                    body: { app },
+                  })
+                  .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+              }}
               onSetMode={(mode) => {
                 setScreenMode(mode);
                 if (!activeRun || !screenBotId) return;

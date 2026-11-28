@@ -52,7 +52,7 @@ import {
   subagents,
   turns,
 } from "@agentos/shared";
-import { X11_POINTER_SCRIPT, presentToolResult } from "@agentos/tools";
+import { X11_POINTER_SCRIPT, detachImage, presentToolResult } from "@agentos/tools";
 import type { BrowserSession } from "@agentos/tools/browser";
 import type { VMManager } from "@agentos/vm-manager";
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
@@ -62,6 +62,7 @@ import {
   describeSubagentReadOnlyConnectors,
 } from "./connector-availability.ts";
 import { TranscriptAppendAfterCheckpointError } from "./errors.ts";
+import { decodeTextAttachment, sanitizeForJsonb } from "./jsonb-safe.ts";
 import { loggedError, logger, withLogContext } from "./logger.ts";
 import { withSpan, withTraceParent } from "./telemetry.ts";
 import { deliverWebhookEvent } from "./webhooks.ts";
@@ -232,7 +233,7 @@ async function loadMessages(
   }
   const raw = await ctx.blob.get(BUCKETS.conversationBlobs, conversationBlobKey(ctx));
   if (!raw) return [];
-  return JSON.parse(new TextDecoder().decode(raw)) as ModelMessage[];
+  return sanitizeForJsonb(JSON.parse(new TextDecoder().decode(raw)) as ModelMessage[]);
 }
 
 async function isCancelled(redis: RedisClient, runId: string): Promise<boolean> {
@@ -540,7 +541,7 @@ async function attachmentsForModel(
       continue;
     }
     const bytes = await ctx.blob.get(BUCKETS.conversationBlobs, attachment.uri);
-    rendered.push({ ...attachment, text: new TextDecoder().decode(bytes ?? new Uint8Array()) });
+    rendered.push({ ...attachment, text: decodeTextAttachment(bytes ?? new Uint8Array()) });
   }
   return rendered;
 }
@@ -1261,12 +1262,40 @@ ${server.cachedTools
                 isError: true,
               }
             : tc.name === "SecureHandoff"
-              ? {
-                  toolCallId: tc.id,
-                  name: tc.name,
-                  result: { returned: true },
-                  isError: false,
-                }
+              ? await (async () => {
+                  let shot: unknown = {
+                    returned: true,
+                    continueTask: true,
+                    instruction:
+                      "Control returned. Look at the screenshot. If askUser is true or a login wall is still visible, call SecureHandoff again. Otherwise continue the original user task now (open/navigate, type, press send). Do not SendToUser asking them to log in.",
+                  };
+                  try {
+                    await ensureBrowser(ctx);
+                    if (ctx.browser) {
+                      const look = (await ctx.browser.computer({
+                        action: "screenshot",
+                      })) as Record<string, unknown>;
+                      shot = {
+                        ...look,
+                        returned: true,
+                        continueTask: true,
+                        instruction: look.askUser
+                          ? "Login/captcha wall is still on screen. Call SecureHandoff again so the user can finish. Do not end the turn."
+                          : "No login wall detected. Continue the original user task now (navigate/type/send). Do not ask them to log in in chat.",
+                      };
+                    }
+                  } catch (err) {
+                    logger.warn(loggedError(err), "post-handoff screenshot failed");
+                  }
+                  const split = detachImage(shot);
+                  return {
+                    toolCallId: tc.id,
+                    name: tc.name,
+                    result: split.result,
+                    isError: false,
+                    ...(split.images ? { images: split.images } : {}),
+                  };
+                })()
               : tc.name === "CompleteSkillStep"
                 ? (() => {
                     const requestedStep = Number(tc.args.stepIndex);
@@ -1780,16 +1809,16 @@ ${server.cachedTools
         const historySteps: Array<typeof steps.$inferInsert> = takenSteps.map((step) => ({
           turnId: ctx.turnId,
           index: step.index,
-          modelMessages: step.modelMessages,
-          toolCalls: step.toolCalls,
-          toolResults: step.toolResults,
+          modelMessages: sanitizeForJsonb(step.modelMessages),
+          toolCalls: sanitizeForJsonb(step.toolCalls),
+          toolResults: sanitizeForJsonb(step.toolResults),
           checkpointBlobId: step.checkpointBlobId,
         }));
         if (!noticeSnapshotExists) {
           historySteps.push({
             turnId: ctx.turnId,
             index: stepIndex,
-            modelMessages: withoutImages(exchangeMessages),
+            modelMessages: sanitizeForJsonb(withoutImages(exchangeMessages)),
             toolCalls: [],
             toolResults: [],
             checkpointBlobId: null,
@@ -1898,7 +1927,7 @@ async function settleTurn(
   await ctx.blob.put(
     BUCKETS.conversationBlobs,
     rootKey,
-    JSON.stringify(withoutImages(messages)),
+    JSON.stringify(sanitizeForJsonb(withoutImages(messages))),
     "application/json",
   );
 
@@ -1919,9 +1948,9 @@ async function settleTurn(
           takenSteps.map((step) => ({
             turnId: ctx.turnId,
             index: step.index,
-            modelMessages: withoutImages(step.modelMessages),
-            toolCalls: step.toolCalls,
-            toolResults: step.toolResults,
+            modelMessages: sanitizeForJsonb(withoutImages(step.modelMessages)),
+            toolCalls: sanitizeForJsonb(step.toolCalls),
+            toolResults: sanitizeForJsonb(step.toolResults),
             checkpointBlobId: step.checkpointBlobId,
           })),
         );

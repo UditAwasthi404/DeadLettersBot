@@ -345,7 +345,7 @@ export const STATIC_CATALOG: CatalogTool[] = [
   {
     name: "SecureHandoff",
     description:
-      "Pause the turn and hand the VM screen to the user for a password, 2FA code, or payment. Resume only after the user returns control.",
+      "Pause the turn and hand the VM screen to the user for a password, 2FA code, or payment. After the user returns control, the tool result includes a fresh screenshot: if askUser is still true, call SecureHandoff again; otherwise continue the original task (navigate, type, send). Do not end the turn by asking the user to log in in chat.",
     parameters: z.object({ reason: z.string().min(1).max(240) }),
     permissionLevel: 3,
   },

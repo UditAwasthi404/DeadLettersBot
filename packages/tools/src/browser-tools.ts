@@ -12,7 +12,11 @@ import {
   runComputerAction,
   wheelScroll,
 } from "./browser-actions.ts";
-import { type ComputerRequest, parseComputerRequest } from "./computer-use.ts";
+import {
+  type ComputerRequest,
+  normalizeNavigateUrl,
+  parseComputerRequest,
+} from "./computer-use.ts";
 import { RECORDING_EVENT_CAP, RECORDING_LIMIT_MS, recordingAccepts } from "./recording.ts";
 
 function errMsg(err: unknown): string {
@@ -233,6 +237,40 @@ export class BrowserSession {
           active: page === this.page,
         })),
       };
+    }
+    if (request.action === "new_tab") {
+      const context = this.requirePage().context();
+      const next = await context.newPage();
+      this.watchPage(next);
+      this.page = next;
+      await next.bringToFront().catch(() => {});
+      this.runtime = { ...this.runtime, elements: [], lastShotAt: 0 };
+      const target = normalizeNavigateUrl(request.url);
+      if (target) {
+        await next.goto(target, { waitUntil: "domcontentloaded" });
+      }
+      const pages = context.pages();
+      return {
+        ok: true,
+        action: "new_tab",
+        index: pages.indexOf(next),
+        url: next.url(),
+        verified: true,
+        ...(target ? { navigated: target } : {}),
+      };
+    }
+    if (request.action === "navigate") {
+      const target = normalizeNavigateUrl(request.url);
+      if (!target)
+        return {
+          ok: false,
+          action: "navigate",
+          message: "navigate requires a url such as https://chatgpt.com/",
+        };
+      const page = this.requirePage();
+      await page.goto(target, { waitUntil: "domcontentloaded" });
+      this.runtime = { ...this.runtime, elements: [], lastShotAt: 0 };
+      return { ok: true, action: "navigate", url: page.url(), verified: true };
     }
     if (request.action === "switch_tab") {
       const pages = this.page?.context().pages() ?? [];

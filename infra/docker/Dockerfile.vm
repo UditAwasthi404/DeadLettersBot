@@ -14,10 +14,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/agent \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Prefer HTTPS mirrors (HTTP to deb.debian.org/ubuntu often fails in Docker Desktop builds).
-RUN sed -i 's|http://|https://|g' /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true \
+# Install CA certs over HTTP first, then prefer HTTPS mirrors (HTTP apt often fails in Docker Desktop).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && sed -i 's|http://|https://|g' /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true \
  && apt-get update && apt-get install -y --no-install-recommends \
-      bash coreutils findutils util-linux ca-certificates curl gpg inotify-tools iptables \
+      bash coreutils findutils util-linux curl gpg inotify-tools iptables \
       x11vnc xdotool xvfb x11-utils x11-xserver-utils openbox xterm \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -43,12 +44,13 @@ RUN sed -i 's|http://|https://|g' /etc/apt/sources.list /etc/apt/sources.list.d/
 COPY ensure-bot-browser.sh /usr/local/bin/agentos-ensure-browser
 COPY ensure-bot-vnc.sh /usr/local/bin/agentos-ensure-vnc
 COPY agentos-pointer.sh /usr/local/bin/agentos-pointer
+COPY agentos-desktop-focus.sh /usr/local/bin/agentos-desktop-focus
 COPY controlled-exec.sh /usr/local/bin/agentos-controlled-exec
 COPY agentos-vm-entrypoint.mjs /usr/local/bin/agentos-vm-entrypoint.mjs
 COPY agentos-vm-entrypoint.sh /usr/local/bin/agentos-vm-entrypoint.sh
 COPY --from=file-tools-build /usr/local/bin/agentos-file /usr/local/bin/agentos-file
 COPY --from=file-tools-build /usr/local/bin/agentos-shell /usr/local/bin/agentos-shell
-RUN chmod 0755 /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-ensure-vnc /usr/local/bin/agentos-pointer /usr/local/bin/agentos-controlled-exec /usr/local/bin/agentos-vm-entrypoint.mjs /usr/local/bin/agentos-vm-entrypoint.sh /usr/local/bin/agentos-file /usr/local/bin/agentos-shell \
+RUN chmod 0755 /usr/local/bin/agentos-ensure-browser /usr/local/bin/agentos-ensure-vnc /usr/local/bin/agentos-pointer /usr/local/bin/agentos-desktop-focus /usr/local/bin/agentos-controlled-exec /usr/local/bin/agentos-vm-entrypoint.mjs /usr/local/bin/agentos-vm-entrypoint.sh /usr/local/bin/agentos-file /usr/local/bin/agentos-shell \
     && node --version \
     && npm --version \
     && chromium --version

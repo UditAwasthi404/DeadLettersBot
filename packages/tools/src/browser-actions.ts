@@ -101,6 +101,8 @@ export async function runComputerAction(
     if (
       actionRequest.action === "tabs" ||
       actionRequest.action === "switch_tab" ||
+      actionRequest.action === "navigate" ||
+      actionRequest.action === "new_tab" ||
       actionRequest.action === "dialog" ||
       actionRequest.action === "upload" ||
       actionRequest.action === "download"
@@ -284,7 +286,7 @@ async function look(
         cached: true,
         verified: true,
         elements: summarizeElements(runtime.elements, runtime.geometry),
-        message: "The screen was just captured. Act on the numbered marks.",
+        message: "The screen was just captured. Use element mark/ref from the last screenshot.",
         ...(runtime.plan ? { plan: runtime.plan } : {}),
         durationMs: Math.round(performance.now() - started),
       },
@@ -343,6 +345,18 @@ async function pressKey(
         ok: false,
         action: "key",
         message: "Use a key such as Enter, Tab, Escape, or Control+Enter",
+      },
+    };
+  }
+  if (/^(Control|Meta)\+[tT]$/.test(key)) {
+    return {
+      runtime,
+      result: {
+        ok: false,
+        action: "key",
+        key,
+        message:
+          "Browser shortcuts like Control+t do not open tabs here. Call Computer action new_tab (optionally with url), or navigate with url on the current tab.",
       },
     };
   }
@@ -593,7 +607,9 @@ async function observe(
   let imageWidth = viewport.width;
   let imageHeight = viewport.height;
   if (withImage) {
-    await paintMarks(page, elements);
+    // Capture the clean desktop for both the model and the user VNC view —
+    // marks live in the element list (mark/ref), not painted on the page.
+    await clearMarks(page);
     const shot = await captureJpeg(page);
     image = { mediaType: "image/jpeg", data: shot.data };
     imageBytes = shot.bytes;
@@ -852,7 +868,7 @@ async function zoom(
   const geo = geometryOf(runtime, viewport);
   const css = imageToCss(request.x, request.y, geo);
   const clip = zoomClip(css.x, css.y, request.delta ?? 240, viewport);
-  await paintMarks(page, runtime.elements);
+  await clearMarks(page);
   const buffer = await page.screenshot({
     type: "jpeg",
     quality: 55,
@@ -945,26 +961,12 @@ async function insertText(page: Page, text: string): Promise<void> {
   await page.keyboard.insertText(text);
 }
 
-async function paintMarks(page: Page, elements: TargetElement[]): Promise<void> {
-  const marks = elements.slice(0, 36).map((element) => ({
-    n: markNumber(element.ref),
-    x: Math.round(element.x + element.width / 2),
-    y: Math.round(element.y),
-  }));
-  await page.evaluate((badges) => {
-    document.getElementById("__agentos_marks")?.remove();
-    const root = document.createElement("div");
-    root.id = "__agentos_marks";
-    root.setAttribute("aria-hidden", "true");
-    root.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483646;";
-    for (const badge of badges) {
-      const node = document.createElement("div");
-      node.textContent = String(badge.n);
-      node.style.cssText = `position:absolute;left:${badge.x}px;top:${badge.y}px;transform:translate(-50%,-100%);min-width:16px;height:16px;padding:0 3px;border-radius:8px;background:#4f46e5;color:#fff;font:700 11px/16px sans-serif;text-align:center;box-shadow:0 0 0 1px #fff;`;
-      root.appendChild(node);
-    }
-    document.documentElement.appendChild(root);
-  }, marks);
+async function clearMarks(page: Page): Promise<void> {
+  await page
+    .evaluate(() => {
+      document.getElementById("__agentos_marks")?.remove();
+    })
+    .catch(() => {});
 }
 
 function markNumber(ref: string): number {

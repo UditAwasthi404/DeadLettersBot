@@ -1315,6 +1315,38 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
   const recordings = new Map<string, BrowserSession>();
   const recordingStarts = new Map<string, Promise<BrowserSession>>();
 
+  app.post("/v1/bots/:botId/desktop/focus", async (c) => {
+    const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
+    const botId = c.req.param("botId");
+    const [bot] = await deps.db
+      .select({ id: bots.id })
+      .from(bots)
+      .where(and(eq(bots.id, botId), eq(bots.accountId, auth.accountId), ne(bots.role, "subagent")))
+      .limit(1);
+    if (!bot) return c.json({ error: "bot not found" }, 404);
+    const body = await c.req.json<{ app?: string }>().catch(() => ({} as { app?: string }));
+    const appName = body.app === "terminal" ? "terminal" : body.app === "browser" ? "browser" : "";
+    if (!appName) return c.json({ error: "app must be browser or terminal" }, 400);
+    try {
+      const vmInfo = await deps.vm.provisionVM(auth.accountId);
+      await deps.vm.ensureBotBrowser(vmInfo.vmId, botId);
+      const result = await deps.vm.execInContainer(vmInfo.vmId, [
+        "bash",
+        "/usr/local/bin/agentos-desktop-focus",
+        botId,
+        appName,
+      ]);
+      if (result.exitCode !== 0)
+        return c.json(
+          { error: result.stderr.trim() || result.stdout.trim() || `failed to focus ${appName}` },
+          503,
+        );
+      return c.json({ ok: true, app: appName });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 503);
+    }
+  });
+
   app.post("/v1/bots/:botId/browser-recording/start", async (c) => {
     const auth = await authenticateRequest(c.req.header("Authorization"), deps.db);
     const botId = c.req.param("botId");

@@ -31,7 +31,15 @@ export const logger = pino({
   },
 });
 
-export function loggedError(err: unknown): { err: string; stack?: string } {
-  if (err instanceof Error) return { err: err.message, stack: err.stack };
+export function loggedError(err: unknown): { err: string; stack?: string; cause?: string } {
+  if (err instanceof Error) {
+    const cause =
+      err.cause instanceof Error
+        ? err.cause.message
+        : err.cause !== undefined
+          ? String(err.cause)
+          : undefined;
+    return { err: err.message, stack: err.stack, ...(cause ? { cause } : {}) };
+  }
   return { err: String(err) };
 }

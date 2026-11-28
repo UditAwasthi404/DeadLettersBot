@@ -256,19 +256,21 @@ elif command -v openbox >/dev/null 2>&1; then
 fi
 
 if command -v xsetroot >/dev/null 2>&1; then
-  DISPLAY=":$display" xsetroot -solid "#121614" >/dev/null 2>&1 || true
+  # Soft desktop backdrop; the Electron shell draws the Grok-style taskbar.
+  DISPLAY=":$display" xsetroot -solid "#1a1f24" >/dev/null 2>&1 || true
 fi
 
 term_pid_file="$state_dir/xterm-$bot_id.pid"
 if [[ -r "$term_pid_file" ]] && kill -0 "$(cat "$term_pid_file")" 2>/dev/null; then
   :
 elif command -v xterm >/dev/null 2>&1; then
-  # Dock a usable terminal across the bottom third of the 1280x800 desktop.
+  # Keep Terminal available but iconified — open it from the desktop taskbar.
   nohup env DISPLAY=":$display" xterm \
-    -geometry 158x16+0+560 \
+    -geometry 120x32+80+60 \
     -fa Monospace -fs 12 \
     -bg "#0b0f0d" -fg "#d5ebe0" -cr "#7dffa6" \
     -title "Terminal" \
+    -iconic \
     -xrm 'XTerm*scrollBar:true' \
     -xrm 'XTerm*rightScrollBar:true' \
     >"$state_dir/xterm-$bot_id.log" 2>&1 9>&- &
@@ -293,7 +295,7 @@ if ! cdp_ready "$local_port"; then
     pkill -f "--remote-debugging-port=$port" 2>/dev/null || true
     sleep 0.3
   fi
-  # Leave room for the docked terminal; openbox supplies the title bar + resize.
+  # Full-desktop Chromium; Terminal stays iconified until the taskbar opens it.
   nohup env DISPLAY=":$display" "$chromium_bin" \
     --no-sandbox \
     --disable-dev-shm-usage \
@@ -310,8 +312,9 @@ if ! cdp_ready "$local_port"; then
     --mute-audio \
     --no-first-run \
     --no-default-browser-check \
+    --start-maximized \
     --window-position=0,0 \
-    --window-size=1280,540 \
+    --window-size=1280,800 \
     --remote-debugging-port="$local_port" \
     --remote-allow-origins='*' \
     --user-data-dir="$profile_dir" \

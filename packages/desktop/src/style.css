@@ -3270,8 +3270,6 @@ fieldset input[type="checkbox"] {
 }
 
 .agent-screen.is-controlling {
-  padding: 0;
-  gap: 0;
   background: #050605;
 }
 
@@ -3470,59 +3468,108 @@ fieldset input[type="checkbox"] {
   margin-top: 10px;
 }
 
-.agent-screen-hint {
+.agent-taskbar {
+  flex-shrink: 0;
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 40%),
+    color-mix(in srgb, #0c1014 88%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+
+.agent-taskbar-apps {
+  display: flex;
   gap: 8px;
   align-items: center;
-  justify-content: center;
-  margin: 0;
-  color: var(--text-3);
-  font-size: var(--fs-12);
-  text-align: center;
-  line-height: 1.45;
 }
 
-.agent-screen-hint strong {
-  color: var(--text-2);
-  font-weight: 600;
-}
-
-.screen-plan {
-  margin: 0;
-  color: var(--text-2);
-  white-space: pre-wrap;
-}
-
-.screen-timeline {
-  display: flex;
+.agent-taskbar-app {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
-  overflow-x: auto;
-  padding: 0 2px 2px;
+  min-height: 40px;
+  padding: 0 12px 0 8px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: rgba(245, 248, 252, 0.88);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 560;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    transform 140ms ease;
 }
 
-.screen-timeline figure {
-  flex: none;
-  width: 112px;
-  margin: 0;
+.agent-taskbar-app:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
-.screen-timeline img,
-.screen-timeline span {
-  display: block;
-  width: 112px;
-  height: 64px;
-  object-fit: cover;
-  border-radius: 8px;
-  background: #111;
+.agent-taskbar-app:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
-.screen-timeline figcaption {
-  overflow: hidden;
-  color: var(--text-2);
-  font-size: 11px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+.agent-taskbar-app.is-active {
+  background: rgba(125, 180, 255, 0.14);
+  border-color: rgba(125, 180, 255, 0.28);
+}
+
+.agent-taskbar-app.is-active::after {
+  content: "";
+  width: 4px;
+  height: 4px;
+  margin-left: 2px;
+  border-radius: 50%;
+  background: #8ec5ff;
+  box-shadow: 0 0 0 3px rgba(142, 197, 255, 0.18);
+}
+
+.agent-taskbar-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  color: #f5f8fc;
+}
+
+.agent-taskbar-icon--browser {
+  background: linear-gradient(145deg, #4da3ff, #1b6fd8);
+}
+
+.agent-taskbar-icon--terminal {
+  background: linear-gradient(145deg, #2c333a, #15191d);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.agent-taskbar-tray {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(245, 248, 252, 0.62);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-taskbar-clock {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.agent-screen.is-controlling .agent-taskbar {
+  background: color-mix(in srgb, #070b0f 92%, transparent);
 }
 
 .screen-view p {

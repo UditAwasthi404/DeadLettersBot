@@ -1,4 +1,14 @@
-import { LoaderCircle, Monitor, MonitorX, MousePointer2, RefreshCw, X } from "lucide-react";
+import {
+  Globe,
+  LoaderCircle,
+  MonitorX,
+  MousePointer2,
+  Pause,
+  Play,
+  RefreshCw,
+  SquareTerminal,
+  X,
+} from "lucide-react";
 import { type PointerEvent as ReactPointerEvent, useState } from "react";
 import deskImage from "../assets/agent-desk.jpg";
 import { AgentAvatar } from "./AgentAvatar.tsx";
@@ -6,6 +16,7 @@ import { AppButton } from "./AppButton.tsx";
 
 export type ScreenMode = "view" | "control" | "handoff";
 export type ScreenPhase = "connecting" | "live" | "error";
+export type DesktopApp = "browser" | "terminal";
 
 const PHASE_LABEL: Record<ScreenPhase, string> = {
   connecting: "Connecting",
@@ -16,10 +27,8 @@ const PHASE_LABEL: Record<ScreenPhase, string> = {
 const MODE_LABEL: Record<ScreenMode, string> = {
   view: "Watching",
   control: "You're in control",
-  handoff: "Control handed to you",
+  handoff: "Finish login on this screen, then click Done",
 };
-
-type TimelineItem = { id: string; label: string; thumbnail?: string };
 
 type AgentScreenProps = {
   mode: ScreenMode;
@@ -28,16 +37,16 @@ type AgentScreenProps = {
   status: string;
   error: string;
   reason?: string;
-  plan?: string;
   paused?: boolean;
-  timeline?: TimelineItem[];
   interactive: boolean;
+  activeApp?: DesktopApp;
   canvasRef: (node: HTMLCanvasElement | null) => void;
   onRetry: () => void;
   onClose: () => void;
   onSetMode: (mode: "view" | "control") => void;
   onReturnControl: () => void;
   onTogglePause?: () => void;
+  onFocusApp?: (app: DesktopApp) => void;
 };
 
 export function AgentScreen({
@@ -47,20 +56,21 @@ export function AgentScreen({
   status,
   error,
   reason,
-  plan,
   paused = false,
-  timeline = [],
   interactive,
+  activeApp = "browser",
   canvasRef,
   onRetry,
   onClose,
   onSetMode,
   onReturnControl,
   onTogglePause,
+  onFocusApp,
 }: AgentScreenProps) {
   const controlling = interactive && phase === "live";
   const subtitle = mode === "handoff" && reason ? reason : MODE_LABEL[mode];
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+  const clock = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   const trackCursor = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!controlling) return;
@@ -77,26 +87,52 @@ export function AgentScreen({
       role="dialog"
       aria-label={`Computer for ${botName}`}
     >
-      {controlling ? (
-        <div className="agent-control-bar" role="toolbar" aria-label="Control session">
-          <span className="agent-control-pill">
-            <i aria-hidden="true" />
-            Controlling {botName}
-          </span>
-          <span className="agent-control-hint">Click · type · drag windows · Esc releases</span>
+      <header className="agent-screen-bar">
+        <div className="agent-screen-identity">
+          <AgentAvatar kind="agent" name={botName} />
+          <div>
+            <strong>{botName}'s computer</strong>
+            <span>{subtitle}</span>
+          </div>
+        </div>
+        <span className={`agent-screen-status is-${phase}`}>
+          <i aria-hidden="true" />
+          {PHASE_LABEL[phase]}
+          {status ? ` · ${status}` : ""}
+        </span>
+        <div className="agent-screen-actions">
           {mode === "handoff" ? (
             <AppButton type="button" className="primary" onClick={onReturnControl}>
-              Return to Bot
+              Done · Return to Bot
             </AppButton>
-          ) : (
+          ) : controlling ? (
             <AppButton type="button" className="primary" onClick={() => onSetMode("view")}>
               Release · Esc
             </AppButton>
+          ) : (
+            <>
+              {onTogglePause && (
+                <AppButton type="button" onClick={onTogglePause} aria-label={paused ? "Resume" : "Pause"}>
+                  {paused ? <Play size={14} aria-hidden="true" /> : <Pause size={14} aria-hidden="true" />}
+                  {paused ? "Resume" : "Pause"}
+                </AppButton>
+              )}
+              <AppButton
+                type="button"
+                className="primary"
+                disabled={phase !== "live"}
+                onClick={() => onSetMode("control")}
+              >
+                <MousePointer2 size={14} aria-hidden="true" />
+                Take control
+              </AppButton>
+            </>
           )}
-          <AppButton type="button" onClick={onRetry} aria-label="Reset desktop">
-            <RefreshCw size={14} aria-hidden="true" />
-            Reset
-          </AppButton>
+          {phase !== "connecting" && (
+            <AppButton type="button" onClick={onRetry} aria-label="Reset desktop">
+              <RefreshCw size={14} aria-hidden="true" />
+            </AppButton>
+          )}
           <AppButton
             type="button"
             className="agent-screen-close"
@@ -106,60 +142,7 @@ export function AgentScreen({
             <X size={15} aria-hidden="true" />
           </AppButton>
         </div>
-      ) : (
-        <header className="agent-screen-bar">
-          <div className="agent-screen-identity">
-            <AgentAvatar kind="agent" name={botName} />
-            <div>
-              <strong>{botName}'s computer</strong>
-              <span>{subtitle}</span>
-            </div>
-          </div>
-          <span className={`agent-screen-status is-${phase}`}>
-            <i aria-hidden="true" />
-            {PHASE_LABEL[phase]}
-          </span>
-          <div className="agent-screen-actions">
-            {mode === "handoff" ? (
-              <AppButton type="button" className="primary" onClick={onReturnControl}>
-                Return to Bot
-              </AppButton>
-            ) : (
-              <>
-                {onTogglePause && (
-                  <AppButton type="button" onClick={onTogglePause}>
-                    {paused ? "Resume" : "Pause"}
-                  </AppButton>
-                )}
-                <AppButton
-                  type="button"
-                  className="primary"
-                  disabled={phase !== "live"}
-                  onClick={() => onSetMode("control")}
-                >
-                  <MousePointer2 size={14} aria-hidden="true" />
-                  Take control
-                </AppButton>
-              </>
-            )}
-            {phase !== "connecting" && (
-              <AppButton type="button" onClick={onRetry} aria-label="Reset desktop">
-                <RefreshCw size={14} aria-hidden="true" />
-                Reset
-              </AppButton>
-            )}
-            <AppButton
-              type="button"
-              className="agent-screen-close"
-              aria-label="Close computer"
-              onClick={onClose}
-            >
-              <X size={15} aria-hidden="true" />
-              Close
-            </AppButton>
-          </div>
-        </header>
-      )}
+      </header>
 
       <div className={`agent-desktop${interactive ? " is-interactive" : ""}`}>
         <div
@@ -191,7 +174,7 @@ export function AgentScreen({
             <div className="agent-screen-overlay">
               <LoaderCircle className="spin" size={28} aria-hidden="true" />
               <strong>Starting the remote desktop</strong>
-              <span>{status || "Booting window manager, browser, and terminal…"}</span>
+              <span>{status || "Booting window manager, browser, and desktop…"}</span>
             </div>
           )}
           {phase === "error" && (
@@ -213,31 +196,37 @@ export function AgentScreen({
             </div>
           )}
         </div>
-      </div>
 
-      {!controlling && plan ? <p className="screen-plan">{plan}</p> : null}
-      {!controlling && timeline.length > 0 && (
-        <div className="screen-timeline">
-          {timeline.map((item) => (
-            <figure key={item.id}>
-              {item.thumbnail ? (
-                <img alt="" src={`data:image/jpeg;base64,${item.thumbnail}`} />
-              ) : (
-                <span />
-              )}
-              <figcaption>{item.label}</figcaption>
-            </figure>
-          ))}
-        </div>
-      )}
-      {!controlling && (
-        <footer className="agent-screen-hint">
-          <Monitor size={13} aria-hidden="true" />
-          {phase === "live"
-            ? "Live VM desktop · browser on top, terminal below · Take control to click and type"
-            : "The agent’s browser and terminal run inside this desktop"}
-        </footer>
-      )}
+        <nav className="agent-taskbar" aria-label="Desktop apps">
+          <div className="agent-taskbar-apps">
+            <button
+              type="button"
+              className={`agent-taskbar-app${activeApp === "browser" ? " is-active" : ""}`}
+              disabled={phase !== "live" || !onFocusApp}
+              onClick={() => onFocusApp?.("browser")}
+            >
+              <span className="agent-taskbar-icon agent-taskbar-icon--browser" aria-hidden="true">
+                <Globe size={18} />
+              </span>
+              <span>Chrome</span>
+            </button>
+            <button
+              type="button"
+              className={`agent-taskbar-app${activeApp === "terminal" ? " is-active" : ""}`}
+              disabled={phase !== "live" || !onFocusApp}
+              onClick={() => onFocusApp?.("terminal")}
+            >
+              <span className="agent-taskbar-icon agent-taskbar-icon--terminal" aria-hidden="true">
+                <SquareTerminal size={18} />
+              </span>
+              <span>Terminal</span>
+            </button>
+          </div>
+          <div className="agent-taskbar-tray">
+            <span className="agent-taskbar-clock">{clock}</span>
+          </div>
+        </nav>
+      </div>
     </section>
   );
 }
