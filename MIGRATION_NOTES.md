@@ -32,7 +32,7 @@ Re-verify this table at the end of each milestone. Mark ✕ only when intentiona
 
 ## Known issues (pre-existing on main)
 
-- None newly introduced for M1. If something on main looks wrong, leave it and note it here.
+- `packages/desktop/src/rfb.test.ts` “fast framebuffer blit beats a per-pixel copy” is occasionally flaky under load (timing assertion). Left as-is; not a regression from AgentOS 2.0.
 
 ## Milestones
 
@@ -60,9 +60,24 @@ Re-verify this table at the end of each milestone. Mark ✕ only when intentiona
 
 **Benchmarks** — run after Electron + Vite are up: `node bench/desktop-launch.mjs m1-baseline` (results under `.tmp/agentos-bench/`).
 
-### M2 — My computer dock
+### M2 — My computer dock (complete)
 
-Not started.
+**Delivered**
+
+- Docked / expanded / fullscreen presentation on `AgentScreen` (control + handoff force fullscreen).
+- Chat column keeps composer visible while docked/expanded.
+- Takeover pill (watch / control / handoff).
+- Agent strip: PlanChecklist, step counter, recent timeline (last 20), collapse toggle.
+- Ghost cursor in watch mode from Computer tool `x`/`y` (120 ms glide + click ripple).
+- Connecting overlay uses Spinner; after 10 s offers Reconnect.
+
+**Manual QA (M2)**
+
+1. Open Show screen → dock appears on the right; chat + composer remain usable.
+2. Expand → ~70% width; Fullscreen → covers chat; Expand again cycles back.
+3. Take over → fullscreen + local input; Esc / Release returns to watch.
+4. While agent runs Computer moves, ghost cursor glides in watch mode.
+5. Narrow window (<1200 px) → dock becomes bottom sheet.
 
 ### M3 — VM image
 
