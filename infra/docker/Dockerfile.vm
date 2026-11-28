@@ -14,8 +14,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/home/agent \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash coreutils findutils util-linux ca-certificates curl gpg inotify-tools iptables x11vnc xdotool xvfb \
+# Prefer HTTPS mirrors (HTTP to deb.debian.org/ubuntu often fails in Docker Desktop builds).
+RUN sed -i 's|http://|https://|g' /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true \
+ && apt-get update && apt-get install -y --no-install-recommends \
+      bash coreutils findutils util-linux ca-certificates curl gpg inotify-tools iptables \
+      x11vnc xdotool xvfb x11-utils x11-xserver-utils openbox xterm \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \

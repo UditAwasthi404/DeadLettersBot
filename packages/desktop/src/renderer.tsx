@@ -9,27 +9,30 @@ import {
   Tabs,
   TextArea,
   TextField,
-  Theme,
-  Tooltip,
 } from "@radix-ui/themes";
 import {
   ArrowDown,
-  ArrowRight,
+  ArrowUp,
   Bookmark,
+  Bot as BotIcon,
+  BrainCircuit,
   Computer,
-  Copy,
   GitFork,
   Link2,
   ListChecks,
+  LoaderCircle,
   MessageSquare,
   Monitor,
+  MoreHorizontal,
   Paperclip,
+  Plug,
   Plus,
   Settings2,
   ShieldCheck,
-  Sparkles,
   Square,
   Trash2,
+  Webhook,
+  X,
 } from "lucide-react";
 import * as React from "react";
 import { useEffect, useRef, useState } from "react";
@@ -38,11 +41,23 @@ import type { ClerkBridge } from "./ClerkBoundary.tsx";
 import { ConnectorBrandIcon } from "./ConnectorBrandIcon.tsx";
 import { ErrorBoundary } from "./ErrorBoundary.tsx";
 import { UpdateBanner } from "./UpdateBanner.tsx";
+import { AgentAvatar } from "./components/AgentAvatar.tsx";
+import { AgentScreen, type ScreenPhase } from "./components/AgentScreen.tsx";
+import { AppButton } from "./components/AppButton.tsx";
+import { AuthShell } from "./components/AuthShell.tsx";
+import { BotRow } from "./components/BotRow.tsx";
+import { ChatMessage } from "./components/ChatMessage.tsx";
+import { EmptyState } from "./components/EmptyState.tsx";
+import { NavItem } from "./components/NavItem.tsx";
+import { PanelHeader } from "./components/PanelHeader.tsx";
+import { ThemeToggle } from "./components/ThemeToggle.tsx";
+import { ToastStack } from "./components/Toast.tsx";
+import { Welcome } from "./components/Welcome.tsx";
 import { RawVncSession } from "./rfb.ts";
+import { ThemeController } from "./theme.tsx";
 import "@radix-ui/themes/styles.css";
 import "./style.css";
 
-const AssistantMarkdown = React.lazy(() => import("./AssistantMarkdown.tsx"));
 const ClerkBoundary = React.lazy(() =>
   import("./ClerkBoundary.tsx").then((module) => ({ default: module.ClerkBoundary })),
 );
@@ -60,20 +75,6 @@ function clerkPublishableKey(): string {
 
 const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const MAX_PROMPT_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-
-type AppButtonProps = React.ComponentProps<typeof Button>;
-
-function AppButton({ className, variant, size, ...props }: AppButtonProps) {
-  const primary = className?.split(/\s+/).includes("primary") ?? false;
-  return (
-    <Button
-      {...props}
-      className={className}
-      variant={variant ?? (primary ? "solid" : "ghost")}
-      size={size ?? "2"}
-    />
-  );
-}
 
 type AppSelectProps = {
   value?: string | number;
@@ -288,6 +289,31 @@ function subagentToolLabels(allowedTools: string[]): string[] {
   ].filter(Boolean);
 }
 
+const PROVIDER_LABELS: Record<string, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google: "Google",
+  mistral: "Mistral",
+  ollama: "Ollama",
+  local: "Local",
+};
+
+function providerLabel(id: string): string {
+  return PROVIDER_LABELS[id] ?? id.replace(/^\w/, (letter) => letter.toUpperCase());
+}
+
+const CONNECTOR_LABELS: Record<string, string> = {
+  gmail: "Gmail",
+  "google-calendar": "Google Calendar",
+  "google-drive": "Google Drive",
+  microsoft: "Microsoft",
+  salesforce: "Salesforce",
+};
+
+function connectorServiceLabel(service: string): string {
+  return CONNECTOR_LABELS[service] ?? providerLabel(service);
+}
+
 type ConnectorEventTrigger = Extract<RoutineItem["trigger"], { type: "connector_event" }>;
 
 function connectorEventTriggerFromDraft(input: {
@@ -339,6 +365,23 @@ function gatewayHost(value: string): string {
   } catch {
     return "Set a gateway";
   }
+}
+
+function screenErrorMessage(raw: string): string {
+  const message = raw.trim();
+  if (!message) return "The remote display is unavailable right now.";
+  const lower = message.toLowerCase();
+  if (lower.includes("econnrefused") || lower.includes("fetch failed"))
+    return "Can't reach the gateway. Make sure the local AgentOS stack is running.";
+  if (lower.includes("timed out") || lower.includes("timeout"))
+    return "Timed out while waiting for the agent screen. The VM may still be starting.";
+  if (lower.includes("unauthorized") || lower.includes("401"))
+    return "Your session expired. Sign in again, then reopen the agent screen.";
+  if (lower.includes("not found") || lower.includes("404"))
+    return "This bot's VM screen isn't available yet. Try again in a moment.";
+  if (lower.includes("closed") || lower.includes("disconnect"))
+    return "The VM screen connection closed. Retry to reconnect.";
+  return message;
 }
 
 function isAccountEmail(value: string): boolean {
@@ -575,7 +618,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  const screenRef = useRef<HTMLCanvasElement>(null);
+  const [screenCanvas, setScreenCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [screenStatus, setScreenStatus] = useState("");
+  const [screenPhase, setScreenPhase] = useState<ScreenPhase>("connecting");
+  const [screenError, setScreenError] = useState("");
+  const [screenAttempt, setScreenAttempt] = useState(0);
+  const screenSessionRef = useRef<RawVncSession | null>(null);
   const [pendingFiles, setPendingFiles] = useState<PendingAttachment[]>([]);
   const [sendingPrompt, setSendingPrompt] = useState(false);
   const [localOpen, setLocalOpen] = useState(false);
@@ -649,7 +697,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     runId: string;
     reason: string;
   } | null>(null);
+  const screenActive = screenMode !== null;
   const screenBotId = screenMode === "handoff" ? handoff?.agentId : botId;
+  const screenInteractive = screenMode === "control" || screenMode === "handoff";
+  const screenModeRef = useRef(screenMode);
+  screenModeRef.current = screenMode;
 
   useEffect(() => {
     const flushTokens = (reason: "paint" | "boundary") => {
@@ -1013,90 +1065,169 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }, [botId, bots]);
 
   useEffect(() => {
-    if (!screenMode || !screenBotId) return;
-    const canvas = screenRef.current;
-    if (!canvas) return;
-    let closed = false;
+    if (!screenActive || !screenBotId || !screenCanvas) return;
+    const canvas = screenCanvas;
+    let dead = false;
+    let sawPixels = false;
+    let timeout = 0;
+    setScreenPhase("connecting");
+    setScreenError("");
+    setScreenStatus("Opening a secure connection to the VM…");
+    const fail = (raw: string) => {
+      if (dead) return;
+      dead = true;
+      window.clearTimeout(timeout);
+      screenSessionRef.current?.dispose();
+      screenSessionRef.current = null;
+      setScreenPhase("error");
+      setScreenError(screenErrorMessage(raw));
+      setScreenStatus("");
+      void window.agentOS.closeVnc();
+    };
     const session = new RawVncSession(
       canvas,
       (bytes) => {
-        void window.agentOS.sendVnc(bytes);
+        if (!dead) void window.agentOS.sendVnc(bytes);
       },
-      (message) => {
-        if (!closed) setError(message);
-      },
+      (message) => fail(message),
     );
+    screenSessionRef.current = session;
     const stopData = window.agentOS.onVncData((bytes) => {
-      if (!closed) session.push(asBytes(bytes));
+      if (dead) return;
+      const chunk = asBytes(bytes);
+      if (chunk.byteLength === 0) return;
+      if (!sawPixels) {
+        sawPixels = true;
+        window.clearTimeout(timeout);
+        setScreenPhase("live");
+        setScreenStatus("");
+      }
+      session.push(chunk);
     });
     const stopStatus = window.agentOS.onVncStatus((next) => {
-      if (!closed && next) setError(next);
+      if (next) fail(next);
     });
-    void window.agentOS.openVnc(screenBotId).catch((err) => {
-      if (!closed) setError(err instanceof Error ? err.message : String(err));
-    });
+    timeout = window.setTimeout(() => {
+      fail("Timed out while waiting for the agent screen. The VM may still be starting.");
+    }, 25_000);
+    void window.agentOS
+      .openVnc(screenBotId)
+      .then(() => {
+        if (!dead) setScreenStatus("Connected. Waiting for the display…");
+      })
+      .catch((err) => fail(err instanceof Error ? err.message : String(err)));
+    return () => {
+      dead = true;
+      window.clearTimeout(timeout);
+      stopData();
+      stopStatus();
+      session.dispose();
+      screenSessionRef.current = null;
+      void window.agentOS.closeVnc();
+      setScreenStatus("");
+    };
+  }, [screenActive, screenBotId, screenCanvas, screenAttempt]);
+
+  useEffect(() => {
+    if (!screenInteractive || !screenCanvas) return;
+    const canvas = screenCanvas;
     let pointerFrame = 0;
     let pendingPointer: { x: number; y: number; buttons: number } | null = null;
-    const sendPointer = (immediate: boolean) => {
-      const next = pendingPointer;
-      if (!next) return;
-      if (!immediate) {
-        if (pointerFrame) return;
-        pointerFrame = requestAnimationFrame(() => {
-          pointerFrame = 0;
-          const point = pendingPointer;
-          pendingPointer = null;
-          if (point) session.pointer(point.x, point.y, point.buttons);
-        });
+    const point = (event: PointerEvent) => {
+      const active = screenSessionRef.current;
+      if (!active) return;
+      const mapped = active.mapClientPoint(event.clientX, event.clientY);
+      if (!mapped) return;
+      pendingPointer = { x: mapped.x, y: mapped.y, buttons: event.buttons };
+      const send = () => {
+        const next = pendingPointer;
+        pendingPointer = null;
+        if (next) active.pointer(next.x, next.y, next.buttons);
+      };
+      if (event.type !== "pointermove") {
+        if (pointerFrame) cancelAnimationFrame(pointerFrame);
+        pointerFrame = 0;
+        send();
         return;
       }
-      if (pointerFrame) cancelAnimationFrame(pointerFrame);
-      pointerFrame = 0;
-      pendingPointer = null;
-      session.pointer(next.x, next.y, next.buttons);
+      if (pointerFrame) return;
+      pointerFrame = requestAnimationFrame(() => {
+        pointerFrame = 0;
+        send();
+      });
     };
-    const point = (event: PointerEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      if (rect.width < 1 || rect.height < 1) return;
-      pendingPointer = {
-        x: ((event.clientX - rect.left) / rect.width) * canvas.width,
-        y: ((event.clientY - rect.top) / rect.height) * canvas.height,
-        buttons: event.buttons,
-      };
-      sendPointer(event.type !== "pointermove");
+    const pointerDown = (event: PointerEvent) => {
+      event.preventDefault();
+      canvas.focus();
+      try {
+        canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // pointer capture is best-effort
+      }
+      point(event);
+    };
+    // Always stream moves so hover works; not only while a button is held.
+    const pointerMove = (event: PointerEvent) => point(event);
+    const pointerUp = (event: PointerEvent) => {
+      point(event);
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    };
+    const pointerCancel = (event: PointerEvent) => {
+      if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
     };
     const downKey = (event: KeyboardEvent) => {
+      const active = screenSessionRef.current;
+      if (!active) return;
+      if (event.key === "Escape") {
+        if (screenMode === "control") {
+          event.preventDefault();
+          setScreenMode("view");
+          setPausedRun(false);
+          if (activeRun && screenBotId) {
+            void window.agentOS.send({
+              type: "resume",
+              agentId: screenBotId,
+              runId: activeRun,
+            });
+          }
+        }
+        return;
+      }
       const symbol = keysym(event.key);
       if (symbol === null) return;
       event.preventDefault();
-      session.key(symbol, true);
+      active.key(symbol, true);
     };
     const upKey = (event: KeyboardEvent) => {
+      const active = screenSessionRef.current;
+      if (!active) return;
       const symbol = keysym(event.key);
       if (symbol === null) return;
-      session.key(symbol, false);
+      active.key(symbol, false);
     };
-    if (screenMode === "handoff" || screenMode === "control") {
-      canvas.addEventListener("pointerdown", point);
-      canvas.addEventListener("pointermove", point);
-      canvas.addEventListener("pointerup", point);
-      window.addEventListener("keydown", downKey);
-      window.addEventListener("keyup", upKey);
-    }
+    const blockContext = (event: Event) => event.preventDefault();
+    canvas.addEventListener("pointerdown", pointerDown);
+    canvas.addEventListener("pointermove", pointerMove);
+    canvas.addEventListener("pointerup", pointerUp);
+    canvas.addEventListener("pointercancel", pointerCancel);
+    canvas.addEventListener("keydown", downKey);
+    canvas.addEventListener("keyup", upKey);
+    canvas.addEventListener("contextmenu", blockContext);
     return () => {
-      closed = true;
-      stopData();
-      stopStatus();
-      canvas.removeEventListener("pointerdown", point);
-      canvas.removeEventListener("pointermove", point);
-      canvas.removeEventListener("pointerup", point);
-      window.removeEventListener("keydown", downKey);
-      window.removeEventListener("keyup", upKey);
       if (pointerFrame) cancelAnimationFrame(pointerFrame);
-      session.dispose();
-      void window.agentOS.closeVnc();
+      canvas.removeEventListener("pointerdown", pointerDown);
+      canvas.removeEventListener("pointermove", pointerMove);
+      canvas.removeEventListener("pointerup", pointerUp);
+      canvas.removeEventListener("pointercancel", pointerCancel);
+      canvas.removeEventListener("keydown", downKey);
+      canvas.removeEventListener("keyup", upKey);
+      canvas.removeEventListener("contextmenu", blockContext);
     };
-  }, [screenMode, screenBotId]);
+  }, [screenInteractive, screenMode, screenCanvas, activeRun, screenBotId]);
+
+  useEffect(() => {
+    if (screenMode === "control") screenCanvas?.focus();
+  }, [screenMode, screenCanvas]);
 
   async function connect(next?: { baseUrl?: string; token?: string }): Promise<boolean> {
     const url = next?.baseUrl ?? baseUrl;
@@ -2576,12 +2707,87 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   : workspace === "model"
                     ? "Model & privacy"
                     : (selectedBot?.name ?? "Choose a bot");
-  const workspaceSubtitle =
-    workspace === "chat"
-      ? activeRun
-        ? agentActivity || "Working"
-        : (selectedBot?.role ?? "Agent conversation")
-      : (selectedBot?.name ?? "Workspace");
+  const headerTitle = selectedBot?.name ?? workspaceTitle;
+  const headerSubtitle = selectedBot
+    ? workspace === "chat" && activeRun
+      ? agentActivity || "Working"
+      : selectedBot.role
+    : "Workspace";
+
+  const navItems = [
+    {
+      id: "chat",
+      label: "Chat",
+      tooltip: "Chat",
+      icon: <MessageSquare className="glyph" aria-hidden="true" />,
+      disabled: false,
+      onClick: () => showWorkspace("chat"),
+    },
+    {
+      id: "memory",
+      label: "Memory",
+      tooltip: "Memory",
+      icon: <Bookmark className="glyph" aria-hidden="true" />,
+      disabled: !botId,
+      onClick: () => void loadMemories(),
+    },
+    {
+      id: "security",
+      label: "Security",
+      tooltip: "Security & approvals",
+      icon: <ShieldCheck className="glyph" aria-hidden="true" />,
+      disabled: !botId || !token,
+      onClick: () => void loadSecuritySettings(),
+    },
+    {
+      id: "automation",
+      label: "Automations",
+      tooltip: "Automations",
+      icon: <ListChecks className="glyph" aria-hidden="true" />,
+      disabled: !token,
+      onClick: () => void loadAutomations(),
+    },
+    {
+      id: "subagents",
+      label: "Subagents",
+      tooltip: "Subagents",
+      icon: <GitFork className="glyph" aria-hidden="true" />,
+      disabled: !token,
+      onClick: () => void loadSubagents(),
+    },
+    {
+      id: "connectors",
+      label: "Connectors",
+      tooltip: "Connectors",
+      icon: <Link2 className="glyph" aria-hidden="true" />,
+      disabled: !token,
+      onClick: () => void loadConnectors(),
+    },
+    {
+      id: "webhooks",
+      label: "Webhooks",
+      tooltip: "Webhooks",
+      icon: <Webhook className="glyph" aria-hidden="true" />,
+      disabled: !token,
+      onClick: () => void loadWebhooks(),
+    },
+    {
+      id: "model",
+      label: "Model",
+      tooltip: "Model settings",
+      icon: <Settings2 className="glyph" aria-hidden="true" />,
+      disabled: !botId,
+      onClick: () => void loadInferenceSettings(),
+    },
+    {
+      id: "local",
+      label: "This computer",
+      tooltip: "This computer",
+      icon: <Computer className="glyph" aria-hidden="true" />,
+      disabled: !botId,
+      onClick: () => void openLocalSettings(),
+    },
+  ];
 
   useEffect(() => {
     if (workspace !== "subagents" || !signedIn || !token) return;
@@ -2597,14 +2803,21 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   return (
     <div className="app-shell">
       {!signedIn && clerk?.enabled && (
-        <section className="auth-gate" aria-label="Account">
+        <AuthShell>
           <div className="auth-card">
-            <div className="auth-mark">A</div>
-            <h1>{clerk.signedIn ? "Signing in" : "Sign in"}</h1>
+            <h1>
+              {clerk.signedIn
+                ? "Signing you in"
+                : clerkScreen === "in"
+                  ? "Welcome back"
+                  : "Create your account"}
+            </h1>
             <p>
-              {clerk.loaded
-                ? "Sign in with Clerk. Gmail, Drive, and the other connectors stay separate and are connected later."
-                : "Loading sign-in…"}
+              {clerk.signedIn
+                ? "One moment while we connect to your gateway."
+                : clerk.loaded
+                  ? "Sign in to reach your workspace. Connectors stay separate and are added later."
+                  : "Preparing a secure sign-in…"}
             </p>
             {clerk.loaded && (
               <label htmlFor="agentos-control-01">
@@ -2640,10 +2853,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               </p>
             )}
           </div>
-        </section>
+        </AuthShell>
       )}
       {!signedIn && !clerk?.enabled && (
-        <section className="auth-gate" aria-label="Account">
+        <AuthShell>
           <form
             className="auth-card"
             onSubmit={(event) => {
@@ -2653,14 +2866,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               else void connect();
             }}
           >
-            <div className="auth-mark">A</div>
             <h1>{authMode === "create" ? "Create your account" : "Sign in"}</h1>
             <p>
-              {sessionReady
-                ? authMode === "create"
-                  ? "This creates the first account on the gateway and keeps you signed in on this computer."
-                  : "Use the token from the account that already exists on this gateway."
-                : "Opening your saved session…"}
+              {!sessionReady
+                ? "Opening your saved session…"
+                : authMode === "create"
+                  ? "Set up the first account on this gateway. You’ll stay signed in on this computer."
+                  : "Paste the account token issued by your gateway."}
             </p>
             {sessionReady && authMode === "create" && (
               <>
@@ -2759,142 +2971,35 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 </AppButton>
               ))}
           </form>
-        </section>
+        </AuthShell>
       )}
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">A</span>
-          <span>AgentOS</span>
+          <span>
+            AgentOS
+            <small className="brand-sub">Workspace</small>
+          </span>
         </div>
+        <div className="sidebar-label">Workspace</div>
         <nav className="sidebar-nav" aria-label="Workspace">
-          <Tooltip content="Chat" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "chat" ? "active" : ""}`}
-              title="Chat"
-              aria-current={workspace === "chat" ? "page" : undefined}
-              onClick={() => showWorkspace("chat")}
-            >
-              <MessageSquare className="glyph" aria-hidden="true" />
-              Chat
-            </Button>
-          </Tooltip>
-          <Tooltip content="Memory" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "memory" ? "active" : ""}`}
-              title="Memory"
-              aria-current={workspace === "memory" ? "page" : undefined}
-              disabled={!botId}
-              onClick={() => void loadMemories()}
-            >
-              <Bookmark className="glyph" aria-hidden="true" />
-              Memory
-            </Button>
-          </Tooltip>
-          <Tooltip content="Security & approvals" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "security" ? "active" : ""}`}
-              title="Security & approvals"
-              aria-current={workspace === "security" ? "page" : undefined}
-              disabled={!botId || !token}
-              onClick={() => void loadSecuritySettings()}
-            >
-              <ShieldCheck className="glyph" aria-hidden="true" />
-              Security
-            </Button>
-          </Tooltip>
-          <Tooltip content="Automations" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "automation" ? "active" : ""}`}
-              title="Automations"
-              aria-current={workspace === "automation" ? "page" : undefined}
-              disabled={!token}
-              onClick={() => void loadAutomations()}
-            >
-              <ListChecks className="glyph" aria-hidden="true" />
-              Automations
-            </Button>
-          </Tooltip>
-          <Tooltip content="Subagents" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "subagents" ? "active" : ""}`}
-              title="Subagents"
-              aria-current={workspace === "subagents" ? "page" : undefined}
-              disabled={!token}
-              onClick={() => void loadSubagents()}
-            >
-              <GitFork className="glyph" aria-hidden="true" />
-              Subagents
-            </Button>
-          </Tooltip>
-          <Tooltip content="Connectors" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "connectors" ? "active" : ""}`}
-              title="Connectors"
-              aria-current={workspace === "connectors" ? "page" : undefined}
-              disabled={!token}
-              onClick={() => void loadConnectors()}
-            >
-              <Link2 className="glyph" aria-hidden="true" />
-              Connectors
-            </Button>
-          </Tooltip>
-          <Tooltip content="Webhooks" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "webhooks" ? "active" : ""}`}
-              title="Webhooks"
-              aria-current={workspace === "webhooks" ? "page" : undefined}
-              disabled={!token}
-              onClick={() => void loadWebhooks()}
-            >
-              <Sparkles className="glyph" aria-hidden="true" />
-              Webhooks
-            </Button>
-          </Tooltip>
-          <Tooltip content="Model settings" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "model" ? "active" : ""}`}
-              title="Model settings"
-              aria-current={workspace === "model" ? "page" : undefined}
-              disabled={!botId}
-              onClick={() => void loadInferenceSettings()}
-            >
-              <Settings2 className="glyph" aria-hidden="true" />
-              Model
-            </Button>
-          </Tooltip>
-          <Tooltip content="This computer" side="right" delayDuration={250}>
-            <Button
-              type="button"
-              variant="ghost"
-              className={`nav-item ${workspace === "local" ? "active" : ""}`}
-              title="This computer"
-              aria-current={workspace === "local" ? "page" : undefined}
-              disabled={!botId}
-              onClick={() => void openLocalSettings()}
-            >
-              <Computer className="glyph" aria-hidden="true" />
-              This computer
-            </Button>
-          </Tooltip>
+          {navItems.map((item) => (
+            <NavItem
+              key={item.id}
+              icon={item.icon}
+              label={item.label}
+              tooltip={item.tooltip}
+              active={workspace === item.id}
+              disabled={item.disabled}
+              onClick={item.onClick}
+            />
+          ))}
         </nav>
         <div className="roster-head">
-          <span>Bots</span>
+          <span>
+            Bots
+            {bots.length > 0 && <span className="roster-count">{bots.length}</span>}
+          </span>
           <AppButton
             type="button"
             className="icon-button"
@@ -2913,36 +3018,43 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           className="app-field sidebar-search"
           value={botQuery}
           onChange={(event) => setBotQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setBotQuery("");
+              event.currentTarget.blur();
+            }
+          }}
           placeholder="Search bots"
           aria-label="Search bots"
         />
         <div className="roster">
           {visibleBots.map((bot) => (
-            <AppButton
-              type="button"
+            <BotRow
               key={bot.id}
-              className={`bot-row ${bot.id === botId ? "selected" : ""}`}
-              title={`${bot.name} · ${bot.role}`}
-              aria-label={`${bot.name}, ${bot.role}`}
+              name={bot.name}
+              role={bot.role}
+              selected={bot.id === botId}
               onClick={() => {
                 setBotId(bot.id);
                 setItems([]);
                 showWorkspace("chat");
               }}
-            >
-              <span className="bot-avatar">{bot.name.slice(0, 1).toUpperCase()}</span>
-              <span className="bot-name">
-                {bot.name}
-                <small>{bot.role}</small>
-              </span>
-            </AppButton>
+            />
           ))}
-          {!bots.length && <p className="empty-note">Connect to load your bots.</p>}
+          {!bots.length && (
+            <EmptyState
+              compact
+              icon={BotIcon}
+              title="No bots yet"
+              description="Connect to load your workspace bots."
+            />
+          )}
           {!!bots.length && !visibleBots.length && (
             <p className="empty-note">No bots match that search.</p>
           )}
         </div>
         <div className="sidebar-footer">
+          <ThemeToggle withLabel />
           <Popover.Root open={connectOpen} onOpenChange={setConnectOpen}>
             <Popover.Trigger>
               <AppButton
@@ -3019,12 +3131,15 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             onRestart={() => void window.agentOS.restartToUpdate()}
           />
           <header className="chat-header">
-            <div className="title-block">
-              <strong>{workspaceTitle}</strong>
-              <span>
-                {activeRun && workspace === "chat" && <i className="working-dot" />}
-                {workspaceSubtitle}
-              </span>
+            <div className="header-leading">
+              {selectedBot && <AgentAvatar name={selectedBot.name} size="sm" />}
+              <div className="title-block">
+                <strong>{headerTitle}</strong>
+                <span>
+                  {activeRun && workspace === "chat" && <i className="working-dot" />}
+                  {headerSubtitle}
+                </span>
+              </div>
             </div>
             <div className="header-actions">
               {showJumpToLatest && workspace === "chat" && (
@@ -3057,12 +3172,20 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               )}
               <AppButton
                 type="button"
-                className={screenMode === "view" ? "primary" : ""}
-                onClick={() => setScreenMode((mode) => (mode === "view" ? null : "view"))}
-                disabled={!botId || screenMode === "handoff"}
+                className={`no-drag${screenMode === "view" || screenMode === "control" ? " primary" : ""}`}
+                title={!botId ? "Select a bot first" : "Open the agent VM screen"}
+                onClick={() => {
+                  if (!botId) {
+                    setError("Select a bot before opening the agent screen.");
+                    return;
+                  }
+                  setError("");
+                  setScreenMode((mode) => (mode === "view" || mode === "control" ? null : "view"));
+                }}
+                disabled={screenMode === "handoff"}
               >
                 <Monitor className="glyph" aria-hidden="true" />
-                {screenMode === "view" ? "Hide screen" : "Agent screen"}
+                {screenMode === "view" || screenMode === "control" ? "Hide screen" : "Agent screen"}
               </AppButton>
             </div>
           </header>
@@ -3108,17 +3231,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </Dialog.Root>
           {workspace === "security" && (
             <section className="messages memory-view security-view">
-              <div className="memory-toolbar">
-                <div>
-                  <h2>Security & approvals</h2>
-                  <p className="empty-note">
-                    Choose how this bot handles tool permissions and exceptions.
-                  </p>
-                </div>
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
-                </AppButton>
-              </div>
+              <PanelHeader
+                title="Security & approvals"
+                subtitle="Choose how this bot handles tool permissions and exceptions."
+              ></PanelHeader>
               <article className="memory-entry security-policy-card">
                 <h3>Default permission level</h3>
                 <div className="approval-default-field">
@@ -3231,27 +3347,44 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           )}
           {workspace === "local" && (
             <section className="messages memory-view">
-              <h2>Local computer execution</h2>
-              {(
-                [
-                  ["always_confirm", "Always require approval"],
-                  ["always_allow", "Always allow"],
-                  ["never", "Never allow"],
-                ] as const
-              ).map(([value, label]) => (
-                <label key={value} className="skill-approval-toggle choice-card">
-                  <input
-                    type="radio"
-                    name="local-machine-access"
-                    checked={localAccess === value}
-                    onChange={() => void saveLocalAccess(value)}
-                  />
-                  {label}
-                </label>
-              ))}
-              <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                Back to chat
-              </AppButton>
+              <PanelHeader
+                title="This computer"
+                subtitle="Decide what this bot may do on your machine. Commands always run locally."
+              ></PanelHeader>
+              <div className="policy-list">
+                {(
+                  [
+                    [
+                      "always_confirm",
+                      "Ask every time",
+                      "The agent pauses and shows the exact command before anything runs.",
+                    ],
+                    [
+                      "always_allow",
+                      "Allow without asking",
+                      "Commands run as soon as the agent asks. Best for a trusted, dedicated setup.",
+                    ],
+                    [
+                      "never",
+                      "Never allow",
+                      "The agent cannot run anything on this computer. Nothing is executed.",
+                    ],
+                  ] as const
+                ).map(([value, label, description]) => (
+                  <label key={value} className="policy-card">
+                    <input
+                      type="radio"
+                      name="local-machine-access"
+                      checked={localAccess === value}
+                      onChange={() => void saveLocalAccess(value)}
+                    />
+                    <span>
+                      <strong>{label}</strong>
+                      <small>{description}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
             </section>
           )}
           <Dialog.Root
@@ -3300,152 +3433,122 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             )}
           </Dialog.Root>
           {screenMode && screenBotId && (
-            <section className="screen-view">
-              <div className="screen-toolbar">
-                <p className="screen-status">
-                  <i className={agentActivity ? "working-dot" : ""} />
-                  {screenMode === "handoff"
-                    ? handoff?.reason
-                    : screenMode === "control"
-                      ? "You have the pointer. Resume to hand it back."
-                      : agentActivity || "Viewing the agent screen. The turn keeps running."}
-                  {stepProgress ? ` · step ${stepProgress.step}/${stepProgress.stepBudget}` : ""}
-                </p>
-                {screenMode !== "handoff" && activeRun ? (
-                  <div className="screen-controls">
-                    <AppButton
-                      type="button"
-                      onClick={() => {
-                        setPausedRun(true);
-                        setScreenMode("control");
-                        void window.agentOS.send({
-                          type: "pause",
-                          agentId: screenBotId,
-                          runId: activeRun,
-                        });
-                      }}
-                    >
-                      Take over
-                    </AppButton>
-                    <AppButton
-                      type="button"
-                      onClick={() => {
-                        const next = !pausedRun;
-                        setPausedRun(next);
-                        if (!next && screenMode === "control") setScreenMode("view");
-                        void window.agentOS.send({
-                          type: next ? "pause" : "resume",
-                          agentId: screenBotId,
-                          runId: activeRun,
-                        });
-                      }}
-                    >
-                      {pausedRun ? "Resume" : "Pause"}
-                    </AppButton>
-                  </div>
-                ) : null}
-              </div>
-              {livePlan ? <p className="screen-plan">{livePlan}</p> : null}
-              {timeline.length ? (
-                <div className="screen-timeline">
-                  {timeline.map((item) => (
-                    <figure key={item.id}>
-                      {item.thumbnail ? (
-                        <img alt="" src={`data:image/jpeg;base64,${item.thumbnail}`} />
-                      ) : (
-                        <span />
-                      )}
-                      <figcaption>{item.label}</figcaption>
-                    </figure>
-                  ))}
-                </div>
-              ) : null}
-              <canvas ref={screenRef} width={1280} height={800} />
-              {screenMode === "handoff" ? (
-                <AppButton type="button" onClick={() => void returnControl()}>
-                  Return to Bot
-                </AppButton>
-              ) : (
-                <AppButton type="button" onClick={() => setScreenMode(null)}>
-                  Close
-                </AppButton>
-              )}
-            </section>
+            <AgentScreen
+              mode={screenMode}
+              phase={screenPhase}
+              botName={bots.find((bot) => bot.id === screenBotId)?.name ?? "Agent"}
+              status={
+                agentActivity
+                  ? `${agentActivity}${stepProgress ? ` · step ${stepProgress.step}/${stepProgress.stepBudget}` : ""}`
+                  : screenStatus
+              }
+              error={screenError}
+              reason={handoff?.reason}
+              interactive={screenInteractive}
+              canvasRef={setScreenCanvas}
+              plan={livePlan}
+              paused={pausedRun}
+              timeline={timeline}
+              onRetry={() => setScreenAttempt((attempt) => attempt + 1)}
+              onClose={() => setScreenMode(null)}
+              onSetMode={(mode) => {
+                setScreenMode(mode);
+                if (!activeRun || !screenBotId) return;
+                const pause = mode === "control";
+                setPausedRun(pause);
+                void window.agentOS.send({
+                  type: pause ? "pause" : "resume",
+                  agentId: screenBotId,
+                  runId: activeRun,
+                });
+              }}
+              onReturnControl={() => void returnControl()}
+              onTogglePause={() => {
+                if (!activeRun || !screenBotId) return;
+                const next = !pausedRun;
+                setPausedRun(next);
+                void window.agentOS.send({
+                  type: next ? "pause" : "resume",
+                  agentId: screenBotId,
+                  runId: activeRun,
+                });
+              }}
+            />
           )}
           {workspace === "model" && (
             <section className="messages memory-view">
-              <h2>Model settings · {bots.find((bot) => bot.id === botId)?.name}</h2>
-              <div className="form-field">
-                <span>Primary provider</span>
-                <AppSelect
-                  aria-label="Primary provider"
-                  value={inferenceProviderId}
-                  onChange={(event) => setInferenceProviderId(event.target.value)}
-                >
-                  <option value="">Account default</option>
-                  {inferenceProviders.map((provider) => (
-                    <option key={provider} value={provider}>
-                      {provider}
-                    </option>
-                  ))}
-                </AppSelect>
-              </div>
-              <label htmlFor="agentos-control-10">
-                Model override (optional)
-                <TextField.Root
-                  id="agentos-control-10"
-                  value={inferenceModel}
-                  onChange={(event) => setInferenceModel(event.target.value)}
-                  placeholder="Use provider default"
-                  maxLength={200}
-                  className="app-field"
-                />
-              </label>
-              <h2>Privacy</h2>
-              <label className="skill-approval-toggle">
-                <input
-                  type="checkbox"
-                  checked={retainData}
-                  onChange={(event) => void saveRetainData(event.target.checked)}
-                />
-                Allow AgentOS to retain conversation data for product improvement
-              </label>
-              <p>
-                Disabling this does not delete existing data. Use Memory → Export and then delete
-                entries to remove stored facts.
-              </p>
-              <div className="memory-actions">
-                <AppButton
-                  type="button"
-                  className="primary"
-                  onClick={() => void saveInferenceSettings()}
-                >
-                  Save model settings
-                </AppButton>
-                <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                  Back to chat
-                </AppButton>
-              </div>
+              <PanelHeader
+                title="Model & privacy"
+                subtitle={`How ${bots.find((bot) => bot.id === botId)?.name ?? "this bot"} thinks and what it keeps.`}
+              ></PanelHeader>
+              <article className="memory-entry">
+                <h3>Inference</h3>
+                <div className="form-field">
+                  <span>Primary provider</span>
+                  <AppSelect
+                    aria-label="Primary provider"
+                    value={inferenceProviderId}
+                    onChange={(event) => setInferenceProviderId(event.target.value)}
+                  >
+                    <option value="">Account default</option>
+                    {inferenceProviders.map((provider) => (
+                      <option key={provider} value={provider}>
+                        {providerLabel(provider)}
+                      </option>
+                    ))}
+                  </AppSelect>
+                </div>
+                <label htmlFor="agentos-control-10">
+                  Model override (optional)
+                  <TextField.Root
+                    id="agentos-control-10"
+                    value={inferenceModel}
+                    onChange={(event) => setInferenceModel(event.target.value)}
+                    placeholder="Use provider default"
+                    maxLength={200}
+                    className="app-field"
+                  />
+                </label>
+                <div className="memory-actions">
+                  <AppButton
+                    type="button"
+                    className="primary"
+                    onClick={() => void saveInferenceSettings()}
+                  >
+                    Save model settings
+                  </AppButton>
+                </div>
+              </article>
+              <article className="memory-entry">
+                <h3>Privacy</h3>
+                <label className="skill-approval-toggle">
+                  <input
+                    type="checkbox"
+                    checked={retainData}
+                    onChange={(event) => void saveRetainData(event.target.checked)}
+                  />
+                  Allow AgentOS to retain conversation data for product improvement
+                </label>
+                <p>
+                  Turning this off does not delete existing data. Open Memory → Export, then delete
+                  entries to remove stored facts.
+                </p>
+              </article>
             </section>
           )}
           {workspace === "subagents" ? (
             <section className="messages memory-view">
-              <div className="memory-toolbar">
-                <div>
-                  <h2>Subagents</h2>
-                  <p className="empty-note">Background tasks started by your agents.</p>
-                </div>
-                <div>
-                  <AppButton type="button" onClick={() => void loadSubagents(false)}>
-                    Refresh
-                  </AppButton>
-                  <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                    Back to chat
-                  </AppButton>
-                </div>
-              </div>
+              <PanelHeader title="Subagents" subtitle="Background tasks started by your agents.">
+                <AppButton type="button" onClick={() => void loadSubagents(false)}>
+                  Refresh
+                </AppButton>
+              </PanelHeader>
               {!subagentItems.length && (
-                <p className="empty-note">No background tasks have been started.</p>
+                <EmptyState
+                  icon={GitFork}
+                  title="No background tasks yet"
+                  description="When an agent delegates work to a subagent, progress and results appear here."
+                />
               )}
               {subagentItems.map((item) => {
                 const active = item.status === "queued" || item.status === "running";
@@ -3475,18 +3578,18 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                           : ""}
                       </p>
                     )}
-                    {item.result && (
-                      <details>
-                        <summary>Result</summary>
-                        <pre className="subagent-result">{item.result}</pre>
-                      </details>
-                    )}
                     {item.usage && (
                       <small>
                         Tokens: {item.usage.totalTokens.toLocaleString()} total ·{" "}
                         {item.usage.promptTokens.toLocaleString()} prompt ·{" "}
                         {item.usage.completionTokens.toLocaleString()} completion
                       </small>
+                    )}
+                    {item.result && (
+                      <details>
+                        <summary>Result</summary>
+                        <pre className="subagent-result">{item.result}</pre>
+                      </details>
                     )}
                     {active && (
                       <>
@@ -3545,17 +3648,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             </section>
           ) : workspace === "webhooks" ? (
             <section className="messages memory-view">
-              <div className="memory-toolbar">
-                <h2>Outbound webhooks</h2>
-                <div>
-                  <AppButton type="button" onClick={() => void loadWebhooks()}>
-                    Refresh
-                  </AppButton>
-                  <AppButton type="button" onClick={() => setWebhookOpen(false)}>
-                    Back to chat
-                  </AppButton>
-                </div>
-              </div>
+              <PanelHeader title="Outbound webhooks">
+                <AppButton type="button" onClick={() => void loadWebhooks()}>
+                  Refresh
+                </AppButton>
+              </PanelHeader>
               <p className="empty-note">
                 Deliveries are signed with HMAC-SHA256. Terminal delivery history is retained for 30
                 days by default.
@@ -3570,44 +3667,61 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   </AppButton>
                 </output>
               )}
-              <form className="mcp-server-form" onSubmit={(event) => void createWebhook(event)}>
-                <TextField.Root
-                  aria-label="Webhook HTTPS URL"
-                  type="url"
-                  value={webhookUrl}
-                  onChange={(event) => setWebhookUrl(event.target.value)}
-                  placeholder="https://example.com/agentos-events"
-                  required
-                  className="app-field"
-                />
-                <fieldset>
+              <form
+                className="mcp-server-form webhook-form"
+                onSubmit={(event) => void createWebhook(event)}
+              >
+                <label className="form-field">
+                  Endpoint URL
+                  <TextField.Root
+                    aria-label="Webhook HTTPS URL"
+                    type="url"
+                    value={webhookUrl}
+                    onChange={(event) => setWebhookUrl(event.target.value)}
+                    placeholder="https://example.com/agentos-events"
+                    required
+                    className="app-field"
+                  />
+                </label>
+                <fieldset className="webhook-events">
                   <legend>Events</legend>
-                  {(["turn.settled", "routine.completed", "approval.required"] as const).map(
-                    (eventName) => (
-                      <label key={eventName}>
-                        <input
-                          type="checkbox"
-                          checked={webhookEvents.includes(eventName)}
-                          onChange={(event) =>
-                            setWebhookEvents((current) =>
-                              event.target.checked
-                                ? [...current, eventName]
-                                : current.filter((item) => item !== eventName),
-                            )
-                          }
-                        />
-                        {eventName}
-                      </label>
-                    ),
-                  )}
+                  <div className="webhook-event-options">
+                    {(["turn.settled", "routine.completed", "approval.required"] as const).map(
+                      (eventName) => (
+                        <label key={eventName}>
+                          <input
+                            type="checkbox"
+                            checked={webhookEvents.includes(eventName)}
+                            onChange={(event) =>
+                              setWebhookEvents((current) =>
+                                event.target.checked
+                                  ? [...current, eventName]
+                                  : current.filter((item) => item !== eventName),
+                              )
+                            }
+                          />
+                          {eventName}
+                        </label>
+                      ),
+                    )}
+                  </div>
                 </fieldset>
-                <AppButton type="submit" disabled={!token || webhookEvents.length === 0}>
+                <AppButton
+                  type="submit"
+                  className="primary"
+                  disabled={!token || webhookEvents.length === 0}
+                >
                   Create webhook
                 </AppButton>
               </form>
               <h3>Subscriptions</h3>
               {!webhookSubscriptions.length && (
-                <p className="empty-note">No webhook subscriptions.</p>
+                <EmptyState
+                  compact
+                  icon={Webhook}
+                  title="No subscriptions"
+                  description="Add an HTTPS endpoint above to start receiving signed events."
+                />
               )}
               {webhookSubscriptions.map((subscription) => (
                 <article className="memory-entry" key={subscription.id}>
@@ -3616,13 +3730,24 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     <small>Created {new Date(subscription.createdAt).toLocaleString()}</small>
                   </div>
                   <p>Events: {subscription.events.join(", ")}</p>
-                  <AppButton type="button" onClick={() => void removeWebhook(subscription)}>
+                  <AppButton
+                    type="button"
+                    className="danger-quiet"
+                    onClick={() => void removeWebhook(subscription)}
+                  >
                     Delete subscription
                   </AppButton>
                 </article>
               ))}
               <h3>Recent deliveries</h3>
-              {!webhookDeliveries.length && <p className="empty-note">No deliveries recorded.</p>}
+              {!webhookDeliveries.length && (
+                <EmptyState
+                  compact
+                  icon={Webhook}
+                  title="No deliveries yet"
+                  description="Delivery attempts and responses will be listed here."
+                />
+              )}
               {webhookDeliveries.map((delivery) => (
                 <article className="memory-entry" key={delivery.id}>
                   <div>
@@ -3650,17 +3775,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             </section>
           ) : workspace === "connectors" ? (
             <section className="messages memory-view">
-              <div className="memory-toolbar">
-                <h2>Connectors</h2>
-                <div>
-                  <AppButton type="button" onClick={() => void loadConnectors()}>
-                    Refresh
-                  </AppButton>
-                  <AppButton type="button" onClick={() => setConnectorOpen(false)}>
-                    Back to chat
-                  </AppButton>
-                </div>
-              </div>
+              <PanelHeader title="Connectors">
+                <AppButton type="button" onClick={() => void loadConnectors()}>
+                  Refresh
+                </AppButton>
+              </PanelHeader>
               <div className="connector-grid">
                 {CONNECTOR_CARDS.map((card) => {
                   const connected = connectorItems.some(
@@ -3701,12 +3820,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   );
                 })}
               </div>
+              {connectorItems.length > 0 && <h3>Connected accounts</h3>}
               {connectorItems.map((connector) => (
                 <article className="memory-entry connector-connected-row" key={connector.service}>
                   <div className="connector-card-head">
                     <ConnectorBrandIcon service={connector.service} size={24} />
                     <div>
-                      <strong>{connector.service}</strong>
+                      <strong>{connectorServiceLabel(connector.service)}</strong>
                       <small>Connected {new Date(connector.connectedAt).toLocaleString()}</small>
                     </div>
                   </div>
@@ -3758,7 +3878,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   Add MCP server
                 </AppButton>
               </form>
-              {!mcpItems.length && <p className="empty-note">No MCP servers configured.</p>}
+              {!mcpItems.length && (
+                <EmptyState
+                  compact
+                  icon={Plug}
+                  title="No MCP servers"
+                  description="Connect an HTTPS MCP endpoint above to discover its tools."
+                />
+              )}
               {mcpItems.map((server) => (
                 <article className="memory-entry" key={server.id}>
                   <div>
@@ -3774,7 +3901,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   {server.lastError && <output>{server.lastError}</output>}
                   <p>{server.cachedTools?.length ?? 0} discovered tools</p>
                   <div className="memory-actions">
-                    <AppButton type="button" onClick={() => void removeMcpServer(server)}>
+                    <AppButton
+                      type="button"
+                      className="danger-quiet"
+                      onClick={() => void removeMcpServer(server)}
+                    >
                       Remove
                     </AppButton>
                   </div>
@@ -3783,13 +3914,10 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             </section>
           ) : workspace === "automation" ? (
             <section className="messages memory-view">
-              <div className="memory-toolbar">
-                <div>
-                  <h2>Skills and routines</h2>
-                  <p className="page-subtitle">
-                    Procedures this workspace can run on a schedule or an event.
-                  </p>
-                </div>
+              <PanelHeader
+                title="Skills & routines"
+                subtitle="Procedures this workspace can run on a schedule or an event."
+              >
                 <div className="toolbar-actions">
                   <AppButton type="button" onClick={() => void toggleRecording()} disabled={!botId}>
                     {recording ? "Stop recording" : "Record browser task"}
@@ -3844,11 +3972,8 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                       </DropdownMenu.Item>
                     </DropdownMenu.Content>
                   </DropdownMenu.Root>
-                  <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                    Back to chat
-                  </AppButton>
                 </div>
-              </div>
+              </PanelHeader>
               {routineWebhookSetup && (
                 <output className="routine-webhook-setup">
                   <strong>Save this webhook secret now</strong>
@@ -4134,7 +4259,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 </form>
               )}
               <h3>Skills</h3>
-              {!skillItems.length && <p className="empty-note">No skills configured.</p>}
+              {!skillItems.length && (
+                <EmptyState
+                  compact
+                  icon={ListChecks}
+                  title="No skills yet"
+                  description="Create a skill or record a browser task to automate repeatable work."
+                />
+              )}
               {skillItems.map((skill) => (
                 <article className="memory-entry" key={skill.id}>
                   <strong>{skill.name}</strong>
@@ -4349,25 +4481,36 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                         Test {skillTests[skill.id]?.status}
                       </AppButton>
                     )}
-                    <AppButton type="button" onClick={() => void deleteSkill(skill)}>
-                      Delete
-                    </AppButton>
-                    <AppSelect
-                      aria-label={`Copy ${skill.name} to another bot`}
-                      value=""
-                      onChange={(event) => {
-                        if (event.target.value) void assignSkill(skill, event.target.value);
-                      }}
-                    >
-                      <option value="">Copy to bot…</option>
-                      {bots
-                        .filter((bot) => bot.id !== skill.ownerBotId)
-                        .map((bot) => (
-                          <option key={bot.id} value={bot.id}>
-                            {bot.name}
-                          </option>
-                        ))}
-                    </AppSelect>
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="icon-button action-more"
+                          aria-label={`More actions for ${skill.name}`}
+                          title="More actions"
+                        >
+                          <MoreHorizontal size={16} aria-hidden="true" />
+                        </Button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Content align="end" sideOffset={6}>
+                        <DropdownMenu.Label>Copy to</DropdownMenu.Label>
+                        {bots
+                          .filter((bot) => bot.id !== skill.ownerBotId)
+                          .map((bot) => (
+                            <DropdownMenu.Item
+                              key={bot.id}
+                              onSelect={() => void assignSkill(skill, bot.id)}
+                            >
+                              {bot.name}
+                            </DropdownMenu.Item>
+                          ))}
+                        <DropdownMenu.Separator />
+                        <DropdownMenu.Item color="red" onSelect={() => void deleteSkill(skill)}>
+                          Delete skill
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Root>
                   </div>
                 </article>
               ))}
@@ -4634,45 +4777,54 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     </AppButton>
                     <AppButton
                       type="button"
-                      onClick={() => void updateRoutine(routine, { test: true })}
-                    >
-                      Test run
-                    </AppButton>
-                    <AppButton type="button" onClick={() => void loadRoutineHistory(routine)}>
-                      History
-                    </AppButton>
-                    <AppButton
-                      type="button"
                       onClick={() => void updateRoutine(routine, { enabled: !routine.enabled })}
                     >
                       {routine.enabled ? "Pause" : "Resume"}
                     </AppButton>
-                    <AppButton
-                      type="button"
-                      onClick={() => void updateRoutine(routine, { delete: true })}
-                    >
-                      Delete
-                    </AppButton>
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="icon-button action-more"
+                          aria-label={`More actions for ${routine.name}`}
+                          title="More actions"
+                        >
+                          <MoreHorizontal size={16} aria-hidden="true" />
+                        </Button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Content align="end" sideOffset={6}>
+                        <DropdownMenu.Item
+                          onSelect={() => void updateRoutine(routine, { test: true })}
+                        >
+                          Test run
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item onSelect={() => void loadRoutineHistory(routine)}>
+                          History
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Separator />
+                        <DropdownMenu.Item
+                          color="red"
+                          onSelect={() => void updateRoutine(routine, { delete: true })}
+                        >
+                          Delete routine
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Root>
                   </div>
                 </article>
               ))}
             </section>
           ) : workspace === "memory" ? (
             <section className="messages memory-view">
-              <div className="memory-toolbar">
-                <h2>Memory</h2>
-                <div>
-                  <AppButton type="button" onClick={() => void loadMemories()}>
-                    Refresh
-                  </AppButton>
-                  <AppButton type="button" onClick={() => void exportMemories()}>
-                    Export JSON
-                  </AppButton>
-                  <AppButton type="button" onClick={() => showWorkspace("chat")}>
-                    Back to chat
-                  </AppButton>
-                </div>
-              </div>
+              <PanelHeader title="Memory">
+                <AppButton type="button" onClick={() => void loadMemories()}>
+                  Refresh
+                </AppButton>
+                <AppButton type="button" onClick={() => void exportMemories()}>
+                  Export JSON
+                </AppButton>
+              </PanelHeader>
               {!!memoryReviewSuggestions.length && (
                 <section aria-labelledby="memory-review-heading">
                   <h3 id="memory-review-heading">Suggested memory changes</h3>
@@ -4733,7 +4885,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 </section>
               )}
               {!memoryEntries.length && (
-                <p className="empty-note">No saved memories for this bot.</p>
+                <EmptyState
+                  icon={BrainCircuit}
+                  title="No saved memories"
+                  description="Facts the agent retains for this bot will appear here after conversations."
+                />
               )}
               {memoryEntries.map((memory) => (
                 <article className="memory-entry" key={memory.id}>
@@ -4754,7 +4910,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     <AppButton type="button" onClick={() => void editMemory(memory)}>
                       Edit
                     </AppButton>
-                    <AppButton type="button" onClick={() => void deleteMemory(memory)}>
+                    <AppButton
+                      type="button"
+                      className="danger-quiet"
+                      onClick={() => void deleteMemory(memory)}
+                    >
                       Delete
                     </AppButton>
                   </div>
@@ -4776,111 +4936,33 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           ) : workspace === "chat" ? (
             <div className="messages" ref={scrollRef} onScroll={handleConversationScroll}>
               {!items.length && (
-                <div className="welcome">
-                  <div className="welcome-icon">
-                    <Sparkles className="glyph" aria-hidden="true" />
-                  </div>
-                  <h1>{selectedBot ? `Message ${selectedBot.name}` : "What can I help with?"}</h1>
-                  <p>
-                    Send a task to the selected agent. Tool activity, files, and approval requests
-                    stay in this conversation.
-                  </p>
-                  <div className="suggestion-row">
-                    {[
-                      "Summarize what you can do",
-                      "Check my connected accounts",
-                      "Plan the next routine",
-                    ].map((suggestion) => (
-                      <AppButton
-                        key={suggestion}
-                        type="button"
-                        disabled={!botId}
-                        onClick={() => {
-                          setDraft(suggestion);
-                          composerRef.current?.focus();
-                        }}
-                      >
-                        {suggestion}
-                      </AppButton>
-                    ))}
-                  </div>
-                </div>
+                <Welcome
+                  botName={selectedBot?.name}
+                  disabled={!botId}
+                  onPick={(suggestion) => {
+                    setDraft(suggestion);
+                    composerRef.current?.focus();
+                  }}
+                />
               )}
-              {items.map((item) => (
-                <article key={item.id} className={`message ${item.role}`}>
-                  {item.role === "tool" ? (
-                    <details open={item.approval !== undefined}>
-                      <summary>{item.toolName}</summary>
-                      <pre>{item.content}</pre>
-                      {item.approval && (
-                        <div className="approval-actions">
-                          <AppButton type="button" onClick={() => void decide(item, "allow_once")}>
-                            Allow once
-                          </AppButton>
-                          <AppButton
-                            type="button"
-                            onClick={() => void decide(item, "always_allow")}
-                          >
-                            Always allow
-                          </AppButton>
-                          <AppButton
-                            type="button"
-                            className="deny"
-                            onClick={() => void decide(item, "deny")}
-                          >
-                            Deny
-                          </AppButton>
-                        </div>
-                      )}
-                    </details>
-                  ) : (
-                    <div className="message-bubble">
-                      <div className="message-label">
-                        {item.role === "user" ? "You" : (selectedBot?.name ?? "Agent")}
-                        {item.role === "assistant" && (
-                          <AppButton
-                            type="button"
-                            className="copy-button"
-                            onClick={() => void navigator.clipboard.writeText(item.content)}
-                          >
-                            <Copy size={12} aria-hidden="true" />
-                            Copy
-                          </AppButton>
-                        )}
-                      </div>
-                      <div
-                        className={`message-content${item.role === "assistant" ? " markdown-content" : ""}`}
-                      >
-                        {item.role === "assistant" ? (
-                          <React.Suspense
-                            fallback={<span className="markdown-loading">Formatting reply…</span>}
-                          >
-                            <AssistantMarkdown
-                              content={item.content}
-                              onError={(err) =>
-                                setError(err instanceof Error ? err.message : String(err))
-                              }
-                            />
-                          </React.Suspense>
-                        ) : (
-                          item.content
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </article>
+              {items.map((item, index) => (
+                <ChatMessage
+                  key={item.id}
+                  item={item}
+                  index={index}
+                  botName={selectedBot?.name ?? "Agent"}
+                  onDecide={decide}
+                  onError={(err) => setError(err instanceof Error ? err.message : String(err))}
+                />
               ))}
             </div>
           ) : null}
-          {error && (
-            <div className="error-banner" role="alert">
-              {error}
-              <AppButton type="button" onClick={() => setError("")} aria-label="Dismiss">
-                ×
-              </AppButton>
-            </div>
-          )}
-          {notice && <output className="notice-banner">{notice}</output>}
+          <ToastStack
+            error={error}
+            notice={notice}
+            onDismissError={() => setError("")}
+            onDismissNotice={() => setNotice("")}
+          />
           {workspace === "chat" && !screenMode && (
             <form
               className={`composer${dragOver ? " dragover" : ""}`}
@@ -4909,13 +4991,16 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                       {file.name}
                       <AppButton
                         type="button"
+                        className="attachment-remove"
+                        aria-label={`Remove ${file.name}`}
+                        title="Remove attachment"
                         onClick={() =>
                           setPendingFiles((current) =>
                             current.filter((item) => item.id !== file.id),
                           )
                         }
                       >
-                        ×
+                        <X size={12} aria-hidden="true" />
                       </AppButton>
                     </span>
                   ))}
@@ -4982,9 +5067,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   className="primary"
                   disabled={sendingPrompt || !botId || (!draft.trim() && pendingFiles.length === 0)}
                   aria-busy={sendingPrompt}
+                  aria-label={sendingPrompt ? "Sending message" : "Send message"}
+                  title="Send · Enter"
                 >
-                  {sendingPrompt ? "Sending…" : "Send"}
-                  <ArrowRight className="glyph" aria-hidden="true" />
+                  {sendingPrompt ? (
+                    <LoaderCircle className="glyph spin" aria-hidden="true" />
+                  ) : (
+                    <ArrowUp className="glyph" aria-hidden="true" />
+                  )}
                 </Button>
               </div>
             </form>
@@ -5317,6 +5407,9 @@ function asBytes(value: unknown): Uint8Array {
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (ArrayBuffer.isView(value))
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (Array.isArray(value)) return Uint8Array.from(value.filter((n) => typeof n === "number"));
+  if (value && typeof value === "object" && "data" in value)
+    return asBytes((value as { data: unknown }).data);
   return new Uint8Array();
 }
 
@@ -5360,10 +5453,10 @@ const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("root mount node is missing");
 createRoot(rootElement).render(
   <React.StrictMode>
-    <Theme appearance="dark" accentColor="teal" grayColor="sage" radius="medium">
+    <ThemeController>
       <ErrorBoundary fallbackTitle="AgentOS hit a display error">
         {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
       </ErrorBoundary>
-    </Theme>
+    </ThemeController>
   </React.StrictMode>,
 );

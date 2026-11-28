@@ -82,23 +82,35 @@ function isAuthorized(request: IncomingMessage, token: Uint8Array): boolean {
   return supplied.byteLength === token.byteLength && timingSafeEqual(supplied, token);
 }
 
+/** Close codes 1005/1006 (and other reserved values) must not be sent in a close frame. */
+function safeWsCloseCode(code: number): number | undefined {
+  if (!Number.isInteger(code)) return undefined;
+  if (code === 1005 || code === 1006 || code === 1015) return undefined;
+  if (code < 1000 || code > 4999) return undefined;
+  if (code >= 1016 && code <= 2999) return undefined;
+  return code;
+}
+
 function parseBrowserRoute(pathname: string): BrowserRoute | null {
-  const segments = pathname.split("/");
-  if (segments[1] !== "v1" || segments[2] !== "browser" || segments.length < 5) return null;
+  // Playwright's connectOverCDP probes `/json/version/` (trailing slash). Drop empty
+  // path segments so that still matches the daemon's `/json/version` handler.
+  const segments = pathname.split("/").filter((segment) => segment.length > 0);
+  if (segments[0] !== "v1" || segments[1] !== "browser" || segments.length < 3) return null;
   let vmId: string;
   let botId: string;
   try {
-    vmId = decodeURIComponent(segments[3] ?? "");
-    botId = decodeURIComponent(segments[4] ?? "");
+    vmId = decodeURIComponent(segments[2] ?? "");
+    botId = decodeURIComponent(segments[3] ?? "");
   } catch {
     return null;
   }
-  if (!/^[A-Za-z0-9_-]{1,256}$/.test(vmId) || !/^[0-9a-f-]{36}$/i.test(botId)) return null;
+  if (!/^[A-Za-z0-9_.-]{1,256}$/.test(vmId) || !/^[0-9a-f-]{36}$/i.test(botId)) return null;
+  const rest = segments.slice(4);
   return {
     vmId,
     botId,
-    basePath: `/${segments.slice(1, 5).join("/")}`,
-    suffix: `/${segments.slice(5).join("/")}`,
+    basePath: `/v1/browser/${segments[2]}/${segments[3]}`,
+    suffix: rest.length > 0 ? `/${rest.join("/")}` : "",
   };
 }
 
@@ -344,7 +356,10 @@ export async function startExecutionDaemon(
         });
         upstream.on("close", (code, reason) => {
           upstreamSockets.delete(upstream);
-          if (client.readyState === WebSocket.OPEN) client.close(code, reason);
+          if (client.readyState !== WebSocket.OPEN) return;
+          const safeCode = safeWsCloseCode(code);
+          if (safeCode === undefined) client.close();
+          else client.close(safeCode, reason);
         });
         client.on("error", () => upstream.terminate());
         upstream.on("error", () => {

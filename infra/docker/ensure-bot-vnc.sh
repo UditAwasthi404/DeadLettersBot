@@ -22,6 +22,15 @@ if [[ ! "$display" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+display_alive() {
+  DISPLAY=":$1" xdpyinfo >/dev/null 2>&1
+}
+
+if ! display_alive "$display"; then
+  echo "browser display :$display is not running" >&2
+  exit 1
+fi
+
 vnc_port=$((6900 + display))
 port_open() {
   (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1

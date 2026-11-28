@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { BrowserWindow, app, ipcMain, session, shell } from "electron";
+import { BrowserWindow, app, ipcMain, nativeTheme, session, shell } from "electron";
 import WebSocket from "ws";
 import { type LocalMachineAccess, runLocalCommand } from "./local-daemon";
 
@@ -64,7 +64,7 @@ function createWindow(): void {
     height: 840,
     minWidth: 980,
     minHeight: 680,
-    backgroundColor: "#0e1110",
+    backgroundColor: "#141414",
     ...(darwin
       ? {
           titleBarStyle: "hiddenInset" as const,
@@ -72,7 +72,7 @@ function createWindow(): void {
         }
       : {
           titleBarStyle: "hidden" as const,
-          titleBarOverlay: { color: "#0e1110", symbolColor: "#eef3f0", height: 52 },
+          titleBarOverlay: { color: "#1b1b1c", symbolColor: "#a7a6a3", height: 56 },
         }),
     webPreferences: {
       preload: join(__dirname, "preload.js"),
@@ -449,7 +449,14 @@ ipcMain.handle("vnc:open", (_event, botId: string) => {
     });
     sock.on("message", (data) => {
       if (epoch !== vncEpoch) return;
-      const bytes = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+      // Copy into a fresh Uint8Array so IPC structured-clone cannot keep a Buffer view.
+      const bytes = Buffer.isBuffer(data)
+        ? Uint8Array.from(data)
+        : data instanceof ArrayBuffer
+          ? new Uint8Array(data.slice(0))
+          : ArrayBuffer.isView(data)
+            ? Uint8Array.from(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
+            : new TextEncoder().encode(String(data));
       windowRef?.webContents.send("vnc:data", bytes);
     });
     sock.on("close", (code, reason) => {
@@ -465,9 +472,16 @@ ipcMain.handle("vnc:open", (_event, botId: string) => {
     });
   });
 });
-ipcMain.handle("vnc:send", (_event, bytes: Uint8Array) => {
+ipcMain.handle("vnc:send", (_event, bytes: Uint8Array | ArrayBuffer | number[]) => {
   if (!vncSocket || vncSocket.readyState !== WebSocket.OPEN) return;
-  vncSocket.send(Buffer.from(bytes));
+  const payload =
+    bytes instanceof ArrayBuffer
+      ? Buffer.from(new Uint8Array(bytes))
+      : Array.isArray(bytes)
+        ? Buffer.from(bytes)
+        : Buffer.from(bytes);
+  if (payload.byteLength === 0) return;
+  vncSocket.send(payload);
 });
 ipcMain.handle("vnc:close", () => {
   stopVnc();
@@ -475,6 +489,20 @@ ipcMain.handle("vnc:close", () => {
 
 ipcMain.handle("app:restart", () => {
   installUpdate?.();
+});
+
+ipcMain.handle("app:set-theme", (_event, theme: "light" | "dark") => {
+  if (theme !== "light" && theme !== "dark") return;
+  nativeTheme.themeSource = theme;
+  const light = theme === "light";
+  windowRef?.setBackgroundColor(light ? "#f2f1ee" : "#141414");
+  if (process.platform !== "darwin") {
+    windowRef?.setTitleBarOverlay({
+      color: light ? "#faf9f7" : "#1b1b1c",
+      symbolColor: light ? "#58585d" : "#a7a6a3",
+      height: 56,
+    });
+  }
 });
 
 ipcMain.handle("app:open-external", async (event, value: unknown) => {
