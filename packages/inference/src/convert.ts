@@ -6,6 +6,11 @@ import type { InferenceTool } from "./session.ts";
 export function toCoreMessages(messages: ModelMessage[]): AIModelMessage[] {
   return messages.map((m): AIModelMessage => {
     if (m.role === "tool") {
+      const images = (m.images ?? []).slice(0, 1).map((image) => ({
+        type: "file" as const,
+        mediaType: image.mediaType,
+        data: { type: "data" as const, data: image.data },
+      }));
       return {
         role: "tool",
         content: [
@@ -13,7 +18,12 @@ export function toCoreMessages(messages: ModelMessage[]): AIModelMessage[] {
             type: "tool-result",
             toolCallId: m.toolCallId ?? "",
             toolName: m.name ?? "",
-            output: { type: "text", value: m.content },
+            output: images.length
+              ? {
+                  type: "content" as const,
+                  value: [{ type: "text" as const, text: m.content }, ...images],
+                }
+              : { type: "text" as const, value: m.content },
           },
         ],
       };

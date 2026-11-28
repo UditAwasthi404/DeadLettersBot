@@ -1186,7 +1186,11 @@ export async function drainAgent(
               ...(categories.includes("read") ? ["ReadFile", "ListDirectory"] : []),
               ...(categories.includes("browser")
                 ? [
+                    "Computer",
                     "BrowserNavigate",
+                    "BrowserClick",
+                    "BrowserType",
+                    "BrowserScroll",
                     "BrowserExtractContent",
                     "BrowserScreenshot",
                     "BrowserWaitForElement",

@@ -103,8 +103,8 @@
   --s-7: 32px;
 
   /* Type — Sora for presence, Inter for UI */
-  --font: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable",
-    "Segoe UI", sans-serif;
+  --font: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI",
+    sans-serif;
   --font-display: "Sora", "SF Pro Display", "Inter", -apple-system, BlinkMacSystemFont,
     "Segoe UI Variable", sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
@@ -386,9 +386,11 @@ code {
   inset: 0;
   z-index: -2;
   pointer-events: none;
-  background:
-    radial-gradient(42% 36% at 0% 0%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 70%),
-    radial-gradient(34% 30% at 100% 100%, rgba(196, 160, 90, 0.07), transparent 72%),
+  background: radial-gradient(
+      42% 36% at 0% 0%,
+      color-mix(in srgb, var(--accent) 18%, transparent),
+      transparent 70%
+    ), radial-gradient(34% 30% at 100% 100%, rgba(196, 160, 90, 0.07), transparent 72%),
     radial-gradient(60% 50% at 50% 40%, rgba(255, 255, 255, 0.015), transparent 70%);
 }
 
@@ -399,8 +401,7 @@ code {
   z-index: -1;
   pointer-events: none;
   opacity: 0.35;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+  background-image: linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
   background-size: 48px 48px;
   -webkit-mask-image: radial-gradient(70% 60% at 50% 40%, #000 10%, transparent 75%);
@@ -409,8 +410,7 @@ code {
 
 :root[data-theme="light"] .app-shell::after {
   opacity: 0.22;
-  background-image:
-    linear-gradient(rgba(20, 28, 24, 0.03) 1px, transparent 1px),
+  background-image: linear-gradient(rgba(20, 28, 24, 0.03) 1px, transparent 1px),
     linear-gradient(90deg, rgba(20, 28, 24, 0.03) 1px, transparent 1px);
 }
 
@@ -740,8 +740,8 @@ html[data-platform="darwin"] .brand {
   color: var(--tone-teal);
   background: var(--fill-2);
   box-shadow: var(--shadow-inset);
-  transition: transform var(--dur-2) var(--ease), background var(--dur-2) var(--ease-soft),
-    color var(--dur-2) var(--ease-soft);
+  transition: transform var(--dur-2) var(--ease), background var(--dur-2) var(--ease-soft), color
+    var(--dur-2) var(--ease-soft);
 }
 
 .agent-avatar--sm {
@@ -1676,9 +1676,16 @@ html[data-platform="win32"] .chat-header {
 .welcome-hero-glow {
   position: absolute;
   inset: 0;
-  background:
-    linear-gradient(180deg, transparent 35%, color-mix(in srgb, var(--bg-elevated) 88%, transparent)),
-    radial-gradient(60% 50% at 50% 20%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 70%);
+  background: linear-gradient(
+      180deg,
+      transparent 35%,
+      color-mix(in srgb, var(--bg-elevated) 88%, transparent)
+    ),
+    radial-gradient(
+      60% 50% at 50% 20%,
+      color-mix(in srgb, var(--accent) 18%, transparent),
+      transparent 70%
+    );
   pointer-events: none;
 }
 
@@ -2890,9 +2897,11 @@ fieldset input[type="checkbox"] {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background:
-    radial-gradient(46% 40% at 8% 6%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%),
-    radial-gradient(40% 36% at 92% 94%, rgba(196, 160, 90, 0.1), transparent 72%);
+  background: radial-gradient(
+      46% 40% at 8% 6%,
+      color-mix(in srgb, var(--accent) 22%, transparent),
+      transparent 70%
+    ), radial-gradient(40% 36% at 92% 94%, rgba(196, 160, 90, 0.1), transparent 72%);
 }
 
 .auth-gate::after {
@@ -3154,9 +3163,11 @@ fieldset input[type="checkbox"] {
   flex-direction: column;
   gap: 10px;
   padding: 12px 16px 12px;
-  background:
-    radial-gradient(48% 36% at 12% 0%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%),
-    color-mix(in srgb, var(--bg) 90%, transparent);
+  background: radial-gradient(
+      48% 36% at 12% 0%,
+      color-mix(in srgb, var(--accent) 14%, transparent),
+      transparent 70%
+    ), color-mix(in srgb, var(--bg) 90%, transparent);
   backdrop-filter: blur(28px) saturate(140%);
   -webkit-backdrop-filter: blur(28px) saturate(140%);
   animation: screen-in var(--dur-3) var(--ease) both;
@@ -3274,6 +3285,7 @@ fieldset input[type="checkbox"] {
   background: #070908;
   box-shadow: var(--shadow-float);
   overflow: hidden;
+  contain: paint;
 }
 
 .agent-screen.is-controlling .agent-desktop {
@@ -3324,9 +3336,7 @@ fieldset input[type="checkbox"] {
   margin: -2px 0 0 -2px;
   border: 2px solid #f4fff8;
   border-radius: 50%;
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.55),
-    0 0 12px rgba(125, 255, 166, 0.35);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 0 12px rgba(125, 255, 166, 0.35);
   pointer-events: none;
   mix-blend-mode: difference;
 }
@@ -3476,6 +3486,43 @@ fieldset input[type="checkbox"] {
 .agent-screen-hint strong {
   color: var(--text-2);
   font-weight: 600;
+}
+
+.screen-plan {
+  margin: 0;
+  color: var(--text-2);
+  white-space: pre-wrap;
+}
+
+.screen-timeline {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 0 2px 2px;
+}
+
+.screen-timeline figure {
+  flex: none;
+  width: 112px;
+  margin: 0;
+}
+
+.screen-timeline img,
+.screen-timeline span {
+  display: block;
+  width: 112px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #111;
+}
+
+.screen-timeline figcaption {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .screen-view p {

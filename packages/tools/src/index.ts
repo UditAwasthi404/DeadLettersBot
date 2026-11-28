@@ -1,4 +1,11 @@
-export { BrowserSession, recordingAccepts } from "./browser-tools.ts";
+export { recordingAccepts } from "./recording.ts";
+export {
+  COMPUTER_DESCRIPTION,
+  COMPUTER_PARAMETERS,
+  detachImage,
+  presentToolResult,
+} from "./computer-use.ts";
+export { X11_POINTER_SCRIPT } from "./x11-pointer.ts";
 export {
   appendFile,
   deleteFile,

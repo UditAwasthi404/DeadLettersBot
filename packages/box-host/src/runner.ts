@@ -52,7 +52,8 @@ import {
   subagents,
   turns,
 } from "@agentos/shared";
-import { BrowserSession } from "@agentos/tools";
+import { X11_POINTER_SCRIPT, presentToolResult } from "@agentos/tools";
+import type { BrowserSession } from "@agentos/tools/browser";
 import type { VMManager } from "@agentos/vm-manager";
 import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import { and, desc, eq, notInArray } from "drizzle-orm";
@@ -68,6 +69,7 @@ import { deliverWebhookEvent } from "./webhooks.ts";
 const BOT_STEP_BUDGET = Number(process.env.BOT_STEP_BUDGET ?? 50);
 
 const BROWSER_TOOLS = new Set([
+  "Computer",
   "BrowserNavigate",
   "BrowserClick",
   "BrowserType",
@@ -250,9 +252,57 @@ const COMPACTION_TRIGGER_RATIO = 0.8;
 const COMPACTION_RETAIN_RATIO = 0.3;
 
 function estimateTokens(messages: ModelMessage[]): number {
-  // Conservative language-agnostic approximation. Provider usage is not
-  // available before the call, and tool schemas are accounted for separately.
-  return Math.ceil(JSON.stringify(messages).length / 3.5);
+  // Screenshot bytes are vision tokens, not text. Counting the base64 string
+  // made every computer step look like a context overflow.
+  const images = messages.reduce((count, message) => count + (message.images?.length ?? 0), 0);
+  const lean = images ? messages.map((message) => withoutImagesMessage(message)) : messages;
+  return Math.ceil(JSON.stringify(lean).length / 3.5 + images * 1_600);
+}
+
+async function waitIfPaused(ctx: RunContext): Promise<"run" | "cancelled"> {
+  const started = Date.now();
+  while ((await ctx.redis.get(`run:${ctx.runId}:paused`)) === "1") {
+    if (await isCancelled(ctx.redis, ctx.runId)) return "cancelled";
+    if (Date.now() - started > 15 * 60 * 1000) return "cancelled";
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return (await isCancelled(ctx.redis, ctx.runId)) ? "cancelled" : "run";
+}
+
+function activityLabelFor(name: string, args: Record<string, unknown>): string {
+  const action = typeof args.action === "string" ? args.action : name;
+  const query = typeof args.query === "string" ? args.query.slice(0, 40) : "";
+  const mark = typeof args.mark === "number" ? ` #${args.mark}` : "";
+  if (action === "plan") return "Updating the plan";
+  if (action === "click" || action === "double_click")
+    return `Clicking${mark || (query ? ` ${query}` : "")}`;
+  if (action === "type") return "Typing";
+  if (action === "screenshot" || action === "zoom") return "Looking at the screen";
+  return action;
+}
+
+function toolImages(result: object): ModelMessage["images"] {
+  if (!("images" in result) || !Array.isArray(result.images)) return undefined;
+  return result.images as NonNullable<ModelMessage["images"]>;
+}
+
+function withoutImagesMessage(message: ModelMessage): ModelMessage {
+  return message.images?.length ? { ...message, images: undefined } : message;
+}
+
+function withoutImages(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map(withoutImagesMessage);
+}
+
+/** Keep the newest screenshot so the next step can see it, and drop the rest. */
+function retainRecentImages(messages: ModelMessage[], keep: number): void {
+  let seen = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message?.images?.length) continue;
+    seen += 1;
+    if (seen > keep) messages[index] = withoutImagesMessage(message);
+  }
 }
 
 function recentHistoryStart(messages: ModelMessage[], keepChars: number): number {
@@ -435,7 +485,34 @@ async function ensureBrowser(ctx: RunContext): Promise<void> {
   const info = await ctx.vm.getVMStatus(vmId);
   if (info.status !== "running") await ctx.vm.wakeVM(vmId);
   const vmInfo = await ctx.vm.getVMStatus(vmId);
-  ctx.browser = new BrowserSession();
+  const { BrowserSession: Session } = await import("@agentos/tools/browser");
+  ctx.browser = new Session({
+    osPointer: async (point) => {
+      const vmId = ctx.vmId;
+      if (!vmId) return;
+      const x = String(Math.round(point.x));
+      const y = String(Math.round(point.y));
+      const installed = await ctx.vm.execInContainer(vmId, [
+        "bash",
+        "/usr/local/bin/agentos-pointer",
+        ctx.botId,
+        "mousemove",
+        x,
+        y,
+      ]);
+      if (installed.exitCode === 0) return;
+      const builtin = await ctx.vm.execInContainer(vmId, [
+        "node",
+        "-e",
+        X11_POINTER_SCRIPT,
+        ctx.botId,
+        x,
+        y,
+      ]);
+      if (builtin.exitCode !== 0)
+        throw new Error(builtin.stderr || installed.stderr || "pointer helper failed");
+    },
+  });
   const endpoint = ctx.vm.getBotBrowserEndpoint?.(vmId, ctx.botId);
   if (endpoint) {
     await ctx.browser.connectTo(endpoint.url, endpoint.headers);
@@ -615,13 +692,34 @@ async function runTurnBody(ctx: RunContext, span?: Span): Promise<void> {
   };
 
   const [turnRow] = await ctx.db.select().from(turns).where(eq(turns.id, ctx.turnId)).limit(1);
-  const previousMessages = await loadMessages(ctx, turnRow);
-
   const sections = buildDefaultSections(ctx.bot);
-  const roster = await ctx.db
-    .select({ id: bots.id, name: bots.name, role: bots.role })
-    .from(bots)
-    .where(eq(bots.accountId, ctx.accountId));
+  const requestedSkills = new Set([
+    ...ctx.bot.skills,
+    ...(turnRow?.input.skillId ? [turnRow.input.skillId] : []),
+  ]);
+  const recallMemory =
+    ctx.bot.memorySettings.agentScope ||
+    ctx.bot.memorySettings.userScope ||
+    ctx.bot.memorySettings.projectScope;
+  const [previousMessages, roster, mcpRows, connectorRows, skillRows, memoryRows] =
+    await Promise.all([
+      loadMessages(ctx, turnRow),
+      ctx.db
+        .select({ id: bots.id, name: bots.name, role: bots.role })
+        .from(bots)
+        .where(eq(bots.accountId, ctx.accountId)),
+      ctx.db.select().from(mcpServers).where(eq(mcpServers.accountId, ctx.accountId)),
+      ctx.db
+        .select({ service: connectorAccounts.service })
+        .from(connectorAccounts)
+        .where(eq(connectorAccounts.accountId, ctx.accountId)),
+      requestedSkills.size
+        ? ctx.db.select().from(skills).where(eq(skills.accountId, ctx.accountId))
+        : Promise.resolve([]),
+      recallMemory
+        ? ctx.db.select().from(memories).where(eq(memories.accountId, ctx.accountId))
+        : Promise.resolve([]),
+    ]);
   const visibleRoster = roster.filter((entry) => entry.role !== "subagent");
   sections.agentDirectory =
     ctx.bot.role === "subagent"
@@ -629,10 +727,7 @@ async function runTurnBody(ctx: RunContext, span?: Span): Promise<void> {
       : visibleRoster.length
         ? `Available bots on this account:\n${visibleRoster.map((entry) => `- ${entry.name} (${entry.role}, id: ${entry.id})`).join("\n")}`
         : "";
-  const mcpConnections =
-    ctx.bot.role === "subagent"
-      ? []
-      : await ctx.db.select().from(mcpServers).where(eq(mcpServers.accountId, ctx.accountId));
+  const mcpConnections = ctx.bot.role === "subagent" ? [] : mcpRows;
   const dynamicToolOffloading = process.env.DYNAMIC_TOOL_OFFLOADING !== "0";
   if (mcpConnections.length > 1) {
     sections.mcpMultiAccount = [
@@ -670,14 +765,10 @@ ${server.cachedTools
   )
   .join("\n")}`;
   }
-  const connectorRows =
+  const connectorServices =
     ctx.bot.role === "subagent" && !ctx.bot.tools.includes("ConnectorCall")
       ? []
-      : await ctx.db
-          .select({ service: connectorAccounts.service })
-          .from(connectorAccounts)
-          .where(eq(connectorAccounts.accountId, ctx.accountId));
-  const connectorServices = connectorRows.map((row) => row.service);
+      : connectorRows.map((row) => row.service);
   const connectorDescription =
     ctx.bot.role === "subagent"
       ? ctx.bot.tools.includes("ConnectorCall")
@@ -685,13 +776,8 @@ ${server.cachedTools
         : ""
       : describeConnectedConnectors(connectorServices);
   if (connectorDescription) sections.computer += `\n\n${connectorDescription}`;
-  const requestedSkills = new Set([
-    ...ctx.bot.skills,
-    ...(turnRow?.input.skillId ? [turnRow.input.skillId] : []),
-  ]);
-  let activeSkill: typeof skills.$inferSelect | undefined;
+  let activeSkill: (typeof skillRows)[number] | undefined;
   if (requestedSkills.size) {
-    const skillRows = await ctx.db.select().from(skills).where(eq(skills.accountId, ctx.accountId));
     activeSkill = turnRow?.input.skillId
       ? skillRows.find((skill) => skill.id === turnRow.input.skillId)
       : undefined;
@@ -709,16 +795,8 @@ ${server.cachedTools
       .update(routineRuns)
       .set({ status: "running" })
       .where(eq(routineRuns.id, routineRunId));
-  if (
-    ctx.bot.memorySettings.agentScope ||
-    ctx.bot.memorySettings.userScope ||
-    ctx.bot.memorySettings.projectScope
-  ) {
-    const visible = await ctx.db
-      .select()
-      .from(memories)
-      .where(eq(memories.accountId, ctx.accountId));
-    const selected = visible.filter(
+  if (recallMemory) {
+    const selected = memoryRows.filter(
       (m) =>
         (!m.staleAfter || m.staleAfter > new Date()) &&
         ((m.scope === "user" && ctx.bot.memorySettings.userScope) ||
@@ -791,6 +869,8 @@ ${server.cachedTools
   const skillStepFailures = new Map<number, number>();
   const stepBudget = Math.max(1, Math.min(ctx.stepBudget ?? BOT_STEP_BUDGET, BOT_STEP_BUDGET));
   let endTurnFlag = false;
+  let stoppedOnTools = false;
+  let livePlan = "";
   let skillFailureNotice: string | null = null;
   let skillFailureNoticePersisted = false;
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -820,7 +900,7 @@ ${server.cachedTools
       .finally(() => {
         cancelCheckInFlight = false;
       });
-  }, 100);
+  }, 400);
 
   try {
     if (turnRow?.input.skillId && !activeSkill)
@@ -888,6 +968,26 @@ ${server.cachedTools
 
     while (stepIndex < stepBudget) {
       const stepStartedAt = performance.now();
+      if ((await waitIfPaused(ctx)) === "cancelled") {
+        await ctx.db.update(turns).set({ state: "cancelled" }).where(eq(turns.id, ctx.turnId));
+        ctx.send({
+          type: "error",
+          agentId: ctx.agentId,
+          runId: ctx.runId,
+          code: "cancelled",
+          message: "run cancelled",
+        });
+        return;
+      }
+      ctx.send({
+        type: "activity",
+        agentId: ctx.agentId,
+        runId: ctx.runId,
+        step: stepIndex + 1,
+        stepBudget,
+        label: livePlan ? "Following the plan" : "Working",
+        ...(livePlan ? { plan: livePlan } : {}),
+      });
       if (activeSkill && skillProgressIndex >= activeSkill.steps.length) break;
       if (await isCancelled(ctx.redis, ctx.runId)) {
         await ctx.db.update(turns).set({ state: "cancelled" }).where(eq(turns.id, ctx.turnId));
@@ -984,6 +1084,7 @@ ${server.cachedTools
       let assistantContent = "";
 
       const inferenceStartedAt = performance.now();
+      retainRecentImages(exchangeMessages, 1);
       const requestMessages = modelHistory(systemPrompt, userInfoMessage, exchangeMessages);
       let providerUsage: TokenUsage | null = null;
       let completionEstimate = 0;
@@ -1033,6 +1134,7 @@ ${server.cachedTools
       exchangeMessages.push(assistantMessage);
 
       if (toolCalls.length === 0) {
+        stoppedOnTools = false;
         if (activeSkill && skillProgressIndex < activeSkill.steps.length)
           throw new Error(
             `skill stopped before completing step ${skillProgressIndex + 1} of ${activeSkill.steps.length}`,
@@ -1040,6 +1142,7 @@ ${server.cachedTools
         break;
       }
 
+      stoppedOnTools = true;
       const toolResults: ToolResult[] = [];
       let stopAfterCheckpoint: string | null = null;
       for (const tc of toolCalls) {
@@ -1408,6 +1511,39 @@ ${server.cachedTools
           },
         );
         observeMillis("tool_duration_ms", performance.now() - toolStartedAt, { tool: tc.name });
+        if (typeof tc.args.plan === "string" && tc.args.plan.trim())
+          livePlan = tc.args.plan.trim().slice(0, 400);
+        const shots = toolImages(tr);
+        if (
+          tc.name === "Computer" ||
+          tc.name === "BrowserClick" ||
+          tc.name === "BrowserScreenshot"
+        ) {
+          const thumb = shots?.[0]?.data;
+          ctx.send({
+            type: "activity",
+            agentId: ctx.agentId,
+            runId: ctx.runId,
+            step: stepIndex + 1,
+            stepBudget,
+            label: activityLabelFor(tc.name, tc.args),
+            ...(livePlan ? { plan: livePlan } : {}),
+            ...(thumb && thumb.length <= 48_000 ? { thumbnail: thumb } : {}),
+          });
+        }
+        if (tc.name === "Computer" || tc.name === "BrowserClick" || tc.name === "BrowserType") {
+          logger.info(
+            {
+              tool: tc.name,
+              action: tc.name === "Computer" ? String(tc.args.action ?? "") : tc.name,
+              ref: typeof tc.args.ref === "string" ? tc.args.ref.slice(0, 40) : undefined,
+              query: typeof tc.args.query === "string" ? tc.args.query.slice(0, 80) : undefined,
+              ok: !tr.isError,
+              durationMs: Math.round(performance.now() - toolStartedAt),
+            },
+            "computer action",
+          );
+        }
         await ctx.db.insert(auditLog).values({
           accountId: ctx.accountId,
           botId: ctx.botId,
@@ -1425,7 +1561,7 @@ ${server.cachedTools
           tool: tc.name,
           outcome: approvalDenied ? "denied" : tr.isError ? "error" : "success",
         });
-        toolResults.push(tr);
+        toolResults.push(shots?.length ? { ...tr, images: undefined } : tr);
 
         // Keep failed skill actions in the checkpoint before applying the
         // instruction's policy, so a resumed routine has an accurate history.
@@ -1485,13 +1621,14 @@ ${server.cachedTools
           content: JSON.stringify(tr.result),
           toolCallId: tc.id,
           name: tc.name,
+          ...(shots?.length ? { images: shots.slice(0, 1) } : {}),
         });
         ctx.send({
           type: "toolEnd",
           agentId: ctx.agentId,
           runId: ctx.runId,
           toolName: tc.name,
-          result: tr.result,
+          result: presentToolResult(tr.result),
         });
       }
 
@@ -1505,7 +1642,7 @@ ${server.cachedTools
         nextStepIndex: stepIndex + 1,
         skillProgressIndex,
         skillStepFailures: Object.fromEntries(skillStepFailures),
-        messages: exchangeMessages.slice(),
+        messages: withoutImages(exchangeMessages),
         toolCalls,
         toolResults,
         usage: { ...usage },
@@ -1551,7 +1688,7 @@ ${server.cachedTools
 
       takenSteps.push({
         index: stepIndex,
-        modelMessages: exchangeMessages.slice(),
+        modelMessages: withoutImages(exchangeMessages),
         toolCalls,
         toolResults,
         checkpointBlobId,
@@ -1580,6 +1717,22 @@ ${server.cachedTools
       throw new Error(
         `skill step budget exhausted at ${skillProgressIndex + 1} of ${activeSkill.steps.length}`,
       );
+    if (stepIndex >= stepBudget && stoppedOnTools && !endTurnFlag && !activeSkill) {
+      const note = `Stopped after ${stepBudget} steps with the task unfinished. Ask me to continue and I will resume from the current screen.`;
+      exchangeMessages.push({ role: "assistant", content: note });
+      if (ctx.bot.role === "subagent") {
+        ctx.subagentResult = note;
+        await ctx.reportSubagentResult?.(note);
+      } else {
+        ctx.send({
+          type: "message",
+          agentId: ctx.agentId,
+          runId: ctx.runId,
+          content: note,
+          endTurn: true,
+        });
+      }
+    }
 
     await settleTurn(
       ctx,
@@ -1616,7 +1769,7 @@ ${server.cachedTools
         await ctx.blob.put(
           BUCKETS.conversationBlobs,
           conversationBlobKey(ctx),
-          JSON.stringify(exchangeMessages),
+          JSON.stringify(withoutImages(exchangeMessages)),
           "application/json",
         );
         const noticeSnapshotExists = takenSteps.some((step) =>
@@ -1636,7 +1789,7 @@ ${server.cachedTools
           historySteps.push({
             turnId: ctx.turnId,
             index: stepIndex,
-            modelMessages: exchangeMessages.slice(),
+            modelMessages: withoutImages(exchangeMessages),
             toolCalls: [],
             toolResults: [],
             checkpointBlobId: null,
@@ -1745,7 +1898,7 @@ async function settleTurn(
   await ctx.blob.put(
     BUCKETS.conversationBlobs,
     rootKey,
-    JSON.stringify(messages),
+    JSON.stringify(withoutImages(messages)),
     "application/json",
   );
 
@@ -1766,7 +1919,7 @@ async function settleTurn(
           takenSteps.map((step) => ({
             turnId: ctx.turnId,
             index: step.index,
-            modelMessages: step.modelMessages,
+            modelMessages: withoutImages(step.modelMessages),
             toolCalls: step.toolCalls,
             toolResults: step.toolResults,
             checkpointBlobId: step.checkpointBlobId,

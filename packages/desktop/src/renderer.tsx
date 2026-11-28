@@ -515,6 +515,11 @@ interface Frame {
   permissionLevel?: number;
   code?: string;
   message?: string;
+  step?: number;
+  stepBudget?: number;
+  label?: string;
+  plan?: string;
+  thumbnail?: string;
 }
 
 function App({ clerk }: { clerk?: ClerkBridge } = {}) {
@@ -676,6 +681,17 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
   const [allowLocalSession, setAllowLocalSession] = useState(false);
   const [screenMode, setScreenMode] = useState<null | "view" | "control" | "handoff">(null);
+  const [agentActivity, setAgentActivity] = useState("");
+  const [livePlan, setLivePlan] = useState("");
+  const [stepProgress, setStepProgress] = useState<{ step: number; stepBudget: number } | null>(
+    null,
+  );
+  const [pausedRun, setPausedRun] = useState(false);
+  const [timeline, setTimeline] = useState<
+    Array<{ id: string; label: string; thumbnail?: string }>
+  >([]);
+  const tokenHold = useRef<{ runId: string; agentId?: string; text: string } | null>(null);
+  const tokenPaint = useRef(0);
   const [handoff, setHandoff] = useState<{
     agentId: string;
     runId: string;
@@ -688,30 +704,43 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   screenModeRef.current = screenMode;
 
   useEffect(() => {
+    const flushTokens = (reason: "paint" | "boundary") => {
+      const pending = tokenHold.current;
+      tokenHold.current = null;
+      if (tokenPaint.current) {
+        cancelAnimationFrame(tokenPaint.current);
+        tokenPaint.current = 0;
+      }
+      if (!pending?.text) return;
+      setItems((old) => appendAssistantDelta(old, pending));
+      if (reason === "paint")
+        setAgentActivity((current) => (current === "Replying" ? current : "Replying"));
+    };
     const stopFrame = window.agentOS.onFrame((unknownFrame) => {
       const frame = unknownFrame as Frame;
       if (frame.runId) setActiveRun(frame.runId);
       if (frame.type === "token" && frame.runId && frame.delta) {
-        setItems((old) => {
-          const idx = old.findIndex((x) => x.role === "assistant" && x.runId === frame.runId);
-          if (idx < 0)
-            return [
-              ...old,
-              {
-                id: crypto.randomUUID(),
-                role: "assistant",
-                content: frame.delta ?? "",
-                runId: frame.runId,
-                agentId: frame.agentId,
-              },
-            ];
-          const next = old.slice();
-          const current = next[idx];
-          if (!current) return old;
-          next[idx] = { ...current, content: current.content + frame.delta };
-          return next;
-        });
-      } else if (frame.type === "message") {
+        const pending = tokenHold.current;
+        if (pending && pending.runId === frame.runId) pending.text += frame.delta;
+        else {
+          flushTokens("boundary");
+          tokenHold.current = {
+            runId: frame.runId,
+            agentId: frame.agentId,
+            text: frame.delta,
+          };
+          setAgentActivity((current) => (current === "Replying" ? current : "Replying"));
+        }
+        if (!tokenPaint.current) {
+          tokenPaint.current = requestAnimationFrame(() => {
+            tokenPaint.current = 0;
+            flushTokens("paint");
+          });
+        }
+        return;
+      }
+      flushTokens("boundary");
+      if (frame.type === "message") {
         setItems((old) => [
           ...old,
           {
@@ -722,26 +751,49 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             agentId: frame.agentId,
           },
         ]);
+      } else if (frame.type === "activity") {
+        if (typeof frame.step === "number" && typeof frame.stepBudget === "number")
+          setStepProgress({ step: frame.step, stepBudget: frame.stepBudget });
+        if (typeof frame.plan === "string") setLivePlan(frame.plan);
+        if (frame.label) setAgentActivity(frame.label);
+        if (frame.label && frame.label !== "Working" && frame.label !== "Following the plan") {
+          setTimeline((old) =>
+            [
+              {
+                id: crypto.randomUUID(),
+                label: frame.label ?? "Working",
+                ...(typeof frame.thumbnail === "string" ? { thumbnail: frame.thumbnail } : {}),
+              },
+              ...old,
+            ].slice(0, 12),
+          );
+        }
       } else if (frame.type === "toolStart") {
+        setAgentActivity(activityLabel(frame.toolName, frame.params));
         setItems((old) => [
           ...old,
           {
             id: crypto.randomUUID(),
             role: "tool",
             toolName: frame.toolName,
-            content: JSON.stringify(frame.params ?? {}, null, 2),
+            content: previewPayload(frame.params),
             runId: frame.runId,
             agentId: frame.agentId,
           },
         ]);
       } else if (frame.type === "toolEnd") {
+        setAgentActivity((current) =>
+          frame.toolName === "Computer" || frame.toolName === "BrowserScreenshot"
+            ? "Checking the screen"
+            : current,
+        );
         setItems((old) => [
           ...old,
           {
             id: crypto.randomUUID(),
             role: "tool",
             toolName: `${frame.toolName ?? "Tool"} result`,
-            content: JSON.stringify(frame.result ?? {}, null, 2),
+            content: previewPayload(frame.result),
             runId: frame.runId,
             agentId: frame.agentId,
           },
@@ -771,17 +823,25 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         setScreenMode("handoff");
       } else if (frame.type === "settled") {
         setActiveRun("");
+        setAgentActivity("");
+        setPausedRun(false);
       } else if (frame.type === "error") {
         setError(`${frame.code ?? "error"}: ${frame.message ?? "request failed"}`);
         setActiveRun("");
+        setAgentActivity("");
       }
     });
     const stopStatus = window.agentOS.onStatus(setStatus);
+    const stopPaint = () => {
+      if (tokenPaint.current) cancelAnimationFrame(tokenPaint.current);
+      tokenPaint.current = 0;
+    };
     let active = true;
     if (clerk?.enabled) {
       setSessionReady(true);
       return () => {
         active = false;
+        stopPaint();
         stopFrame();
         stopStatus();
         void window.agentOS.disconnect();
@@ -812,6 +872,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     });
     return () => {
       active = false;
+      stopPaint();
       stopFrame();
       stopStatus();
       void window.agentOS.disconnect();
@@ -1016,6 +1077,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       if (dead) return;
       dead = true;
       window.clearTimeout(timeout);
+      screenSessionRef.current?.dispose();
       screenSessionRef.current = null;
       setScreenPhase("error");
       setScreenError(screenErrorMessage(raw));
@@ -1059,6 +1121,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       window.clearTimeout(timeout);
       stopData();
       stopStatus();
+      session.dispose();
       screenSessionRef.current = null;
       void window.agentOS.closeVnc();
       setScreenStatus("");
@@ -1068,12 +1131,30 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   useEffect(() => {
     if (!screenInteractive || !screenCanvas) return;
     const canvas = screenCanvas;
+    let pointerFrame = 0;
+    let pendingPointer: { x: number; y: number; buttons: number } | null = null;
     const point = (event: PointerEvent) => {
       const active = screenSessionRef.current;
       if (!active) return;
       const mapped = active.mapClientPoint(event.clientX, event.clientY);
       if (!mapped) return;
-      active.pointer(mapped.x, mapped.y, event.buttons);
+      pendingPointer = { x: mapped.x, y: mapped.y, buttons: event.buttons };
+      const send = () => {
+        const next = pendingPointer;
+        pendingPointer = null;
+        if (next) active.pointer(next.x, next.y, next.buttons);
+      };
+      if (event.type !== "pointermove") {
+        if (pointerFrame) cancelAnimationFrame(pointerFrame);
+        pointerFrame = 0;
+        send();
+        return;
+      }
+      if (pointerFrame) return;
+      pointerFrame = requestAnimationFrame(() => {
+        pointerFrame = 0;
+        send();
+      });
     };
     const pointerDown = (event: PointerEvent) => {
       event.preventDefault();
@@ -1101,6 +1182,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         if (screenMode === "control") {
           event.preventDefault();
           setScreenMode("view");
+          setPausedRun(false);
+          if (activeRun && screenBotId) {
+            void window.agentOS.send({
+              type: "resume",
+              agentId: screenBotId,
+              runId: activeRun,
+            });
+          }
         }
         return;
       }
@@ -1125,6 +1214,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     canvas.addEventListener("keyup", upKey);
     canvas.addEventListener("contextmenu", blockContext);
     return () => {
+      if (pointerFrame) cancelAnimationFrame(pointerFrame);
       canvas.removeEventListener("pointerdown", pointerDown);
       canvas.removeEventListener("pointermove", pointerMove);
       canvas.removeEventListener("pointerup", pointerUp);
@@ -1133,7 +1223,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
       canvas.removeEventListener("keyup", upKey);
       canvas.removeEventListener("contextmenu", blockContext);
     };
-  }, [screenInteractive, screenMode, screenCanvas]);
+  }, [screenInteractive, screenMode, screenCanvas, activeRun, screenBotId]);
 
   useEffect(() => {
     if (screenMode === "control") screenCanvas?.focus();
@@ -2620,7 +2710,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   const headerTitle = selectedBot?.name ?? workspaceTitle;
   const headerSubtitle = selectedBot
     ? workspace === "chat" && activeRun
-      ? "Working"
+      ? agentActivity || "Working"
       : selectedBot.role
     : "Workspace";
 
@@ -3090,9 +3180,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                     return;
                   }
                   setError("");
-                  setScreenMode((mode) =>
-                    mode === "view" || mode === "control" ? null : "view",
-                  );
+                  setScreenMode((mode) => (mode === "view" || mode === "control" ? null : "view"));
                 }}
                 disabled={screenMode === "handoff"}
               >
@@ -3146,8 +3234,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               <PanelHeader
                 title="Security & approvals"
                 subtitle="Choose how this bot handles tool permissions and exceptions."
-              >
-              </PanelHeader>
+              ></PanelHeader>
               <article className="memory-entry security-policy-card">
                 <h3>Default permission level</h3>
                 <div className="approval-default-field">
@@ -3263,8 +3350,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               <PanelHeader
                 title="This computer"
                 subtitle="Decide what this bot may do on your machine. Commands always run locally."
-              >
-              </PanelHeader>
+              ></PanelHeader>
               <div className="policy-list">
                 {(
                   [
@@ -3351,15 +3437,42 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               mode={screenMode}
               phase={screenPhase}
               botName={bots.find((bot) => bot.id === screenBotId)?.name ?? "Agent"}
-              status={screenStatus}
+              status={
+                agentActivity
+                  ? `${agentActivity}${stepProgress ? ` · step ${stepProgress.step}/${stepProgress.stepBudget}` : ""}`
+                  : screenStatus
+              }
               error={screenError}
               reason={handoff?.reason}
               interactive={screenInteractive}
               canvasRef={setScreenCanvas}
+              plan={livePlan}
+              paused={pausedRun}
+              timeline={timeline}
               onRetry={() => setScreenAttempt((attempt) => attempt + 1)}
               onClose={() => setScreenMode(null)}
-              onSetMode={(mode) => setScreenMode(mode)}
+              onSetMode={(mode) => {
+                setScreenMode(mode);
+                if (!activeRun || !screenBotId) return;
+                const pause = mode === "control";
+                setPausedRun(pause);
+                void window.agentOS.send({
+                  type: pause ? "pause" : "resume",
+                  agentId: screenBotId,
+                  runId: activeRun,
+                });
+              }}
               onReturnControl={() => void returnControl()}
+              onTogglePause={() => {
+                if (!activeRun || !screenBotId) return;
+                const next = !pausedRun;
+                setPausedRun(next);
+                void window.agentOS.send({
+                  type: next ? "pause" : "resume",
+                  agentId: screenBotId,
+                  runId: activeRun,
+                });
+              }}
             />
           )}
           {workspace === "model" && (
@@ -3367,8 +3480,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               <PanelHeader
                 title="Model & privacy"
                 subtitle={`How ${bots.find((bot) => bot.id === botId)?.name ?? "this bot"} thinks and what it keeps.`}
-              >
-              </PanelHeader>
+              ></PanelHeader>
               <article className="memory-entry">
                 <h3>Inference</h3>
                 <div className="form-field">
@@ -5232,6 +5344,62 @@ async function fileToBase64(file: File): Promise<string> {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x2000));
   }
   return btoa(binary);
+}
+
+function appendAssistantDelta(
+  items: ChatItem[],
+  pending: { runId: string; agentId?: string; text: string },
+): ChatItem[] {
+  const idx = items.findIndex((item) => item.role === "assistant" && item.runId === pending.runId);
+  if (idx < 0) {
+    return [
+      ...items,
+      {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: pending.text,
+        runId: pending.runId,
+        agentId: pending.agentId,
+      },
+    ];
+  }
+  const next = items.slice();
+  const current = next[idx];
+  if (!current) return items;
+  next[idx] = { ...current, content: current.content + pending.text };
+  return next;
+}
+
+function activityLabel(toolName: string | undefined, params: unknown): string {
+  const args =
+    params && typeof params === "object"
+      ? (params as { action?: unknown; query?: unknown; key?: unknown })
+      : {};
+  const query = typeof args.query === "string" ? args.query.slice(0, 40) : "";
+  if (toolName === "Computer") {
+    const action = typeof args.action === "string" ? args.action : "screenshot";
+    if (action === "screenshot" || action === "find")
+      return query ? `Looking for “${query}”` : "Looking at the screen";
+    if (action === "click" || action === "double_click")
+      return query ? `Clicking “${query}”` : "Clicking";
+    if (action === "right_click") return "Right-clicking";
+    if (action === "type") return "Typing";
+    if (action === "key") return `Pressing ${typeof args.key === "string" ? args.key : "a key"}`;
+    if (action === "scroll") return "Scrolling";
+    if (action === "drag") return "Dragging";
+    if (action === "move") return "Moving the pointer";
+  }
+  if (toolName === "BrowserClick") return query ? `Clicking “${query}”` : "Clicking";
+  if (toolName === "BrowserType") return "Typing";
+  if (toolName === "BrowserNavigate") return "Opening a page";
+  if (toolName === "BrowserScreenshot") return "Looking at the screen";
+  if (toolName === "BrowserScroll") return "Scrolling";
+  return toolName ? `Using ${toolName}` : "Working";
+}
+
+function previewPayload(value: unknown): string {
+  const text = JSON.stringify(value ?? {}, null, 2);
+  return text.length > 800 ? `${text.slice(0, 800)}…` : text;
 }
 
 function asBytes(value: unknown): Uint8Array {

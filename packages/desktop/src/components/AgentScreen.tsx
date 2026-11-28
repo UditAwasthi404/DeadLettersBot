@@ -1,12 +1,5 @@
-import {
-  LoaderCircle,
-  Monitor,
-  MonitorX,
-  MousePointer2,
-  RefreshCw,
-  X,
-} from "lucide-react";
-import { useState, type PointerEvent as ReactPointerEvent } from "react";
+import { LoaderCircle, Monitor, MonitorX, MousePointer2, RefreshCw, X } from "lucide-react";
+import { type PointerEvent as ReactPointerEvent, useState } from "react";
 import deskImage from "../assets/agent-desk.jpg";
 import { AgentAvatar } from "./AgentAvatar.tsx";
 import { AppButton } from "./AppButton.tsx";
@@ -26,6 +19,8 @@ const MODE_LABEL: Record<ScreenMode, string> = {
   handoff: "Control handed to you",
 };
 
+type TimelineItem = { id: string; label: string; thumbnail?: string };
+
 type AgentScreenProps = {
   mode: ScreenMode;
   phase: ScreenPhase;
@@ -33,12 +28,16 @@ type AgentScreenProps = {
   status: string;
   error: string;
   reason?: string;
+  plan?: string;
+  paused?: boolean;
+  timeline?: TimelineItem[];
   interactive: boolean;
   canvasRef: (node: HTMLCanvasElement | null) => void;
   onRetry: () => void;
   onClose: () => void;
   onSetMode: (mode: "view" | "control") => void;
   onReturnControl: () => void;
+  onTogglePause?: () => void;
 };
 
 export function AgentScreen({
@@ -48,12 +47,16 @@ export function AgentScreen({
   status,
   error,
   reason,
+  plan,
+  paused = false,
+  timeline = [],
   interactive,
   canvasRef,
   onRetry,
   onClose,
   onSetMode,
   onReturnControl,
+  onTogglePause,
 }: AgentScreenProps) {
   const controlling = interactive && phase === "live";
   const subtitle = mode === "handoff" && reason ? reason : MODE_LABEL[mode];
@@ -122,15 +125,22 @@ export function AgentScreen({
                 Return to Bot
               </AppButton>
             ) : (
-              <AppButton
-                type="button"
-                className="primary"
-                disabled={phase !== "live"}
-                onClick={() => onSetMode("control")}
-              >
-                <MousePointer2 size={14} aria-hidden="true" />
-                Take control
-              </AppButton>
+              <>
+                {onTogglePause && (
+                  <AppButton type="button" onClick={onTogglePause}>
+                    {paused ? "Resume" : "Pause"}
+                  </AppButton>
+                )}
+                <AppButton
+                  type="button"
+                  className="primary"
+                  disabled={phase !== "live"}
+                  onClick={() => onSetMode("control")}
+                >
+                  <MousePointer2 size={14} aria-hidden="true" />
+                  Take control
+                </AppButton>
+              </>
             )}
             {phase !== "connecting" && (
               <AppButton type="button" onClick={onRetry} aria-label="Reset desktop">
@@ -205,6 +215,21 @@ export function AgentScreen({
         </div>
       </div>
 
+      {!controlling && plan ? <p className="screen-plan">{plan}</p> : null}
+      {!controlling && timeline.length > 0 && (
+        <div className="screen-timeline">
+          {timeline.map((item) => (
+            <figure key={item.id}>
+              {item.thumbnail ? (
+                <img alt="" src={`data:image/jpeg;base64,${item.thumbnail}`} />
+              ) : (
+                <span />
+              )}
+              <figcaption>{item.label}</figcaption>
+            </figure>
+          ))}
+        </div>
+      )}
       {!controlling && (
         <footer className="agent-screen-hint">
           <Monitor size={13} aria-hidden="true" />

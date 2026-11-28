@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Composer</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; }
+  #row { display: flex; gap: 8px; align-items: end; width: 640px; }
+  #composer {
+    flex: 1;
+    min-height: 48px;
+    border: 1px solid #ccc;
+    padding: 8px;
+  }
+  #send {
+    width: 36px;
+    height: 36px;
+    border: 0;
+    background: #111;
+    color: #fff;
+    border-radius: 18px;
+  }
+  #out { margin-top: 16px; }
+</style>
+<div id="row">
+  <div id="composer" contenteditable="true" role="textbox" aria-label="Message"></div>
+  <button id="send" type="button" data-testid="send-button" aria-label="">
+    <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M1 6h10" stroke="currentColor"/></svg>
+  </button>
+</div>
+<div id="out"></div>
+<script>
+  const send = () => {
+    document.getElementById("out").textContent = "sent:" + document.getElementById("composer").innerText.trim();
+  };
+  document.getElementById("send").addEventListener("click", send);
+  document.getElementById("composer").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      send();
+    }
+  });
+</script>

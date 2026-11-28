@@ -44,7 +44,8 @@ import {
   webhookDeliveries,
   webhookSubscriptions,
 } from "@agentos/shared";
-import { BrowserSession, discoverMcpTools, validateMcpEndpoint } from "@agentos/tools";
+import { discoverMcpTools, validateMcpEndpoint } from "@agentos/tools";
+import type { BrowserSession } from "@agentos/tools/browser";
 import type { VMManager } from "@agentos/vm-manager";
 import { SpanStatusCode } from "@opentelemetry/api";
 import { apiReference } from "@scalar/hono-api-reference";
@@ -1336,8 +1337,9 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
     }
     let session: BrowserSession | undefined;
     const start = (async () => {
+      const { BrowserSession: Session } = await import("@agentos/tools/browser");
       const vmInfo = await deps.vm.provisionVM(auth.accountId);
-      session = new BrowserSession();
+      session = new Session();
       const endpoint = deps.vm.getBotBrowserEndpoint?.(vmInfo.vmId, botId);
       if (endpoint) {
         await session.connectTo(endpoint.url, endpoint.headers);
@@ -2685,7 +2687,13 @@ export function createGateway(app: Hono, deps: GatewayDeps): GatewayHandle {
             socket.on("data", (chunk: Buffer) => {
               if (closed) return;
               try {
-                ws.send(Uint8Array.from(chunk));
+                ws.send(
+                  new Uint8Array(
+                    chunk.buffer,
+                    chunk.byteOffset,
+                    chunk.byteLength,
+                  ) as Uint8Array<ArrayBuffer>,
+                );
               } catch (err) {
                 logger.debug({ ...loggedError(err), botId }, "vnc websocket send failed");
                 stop();
@@ -2760,6 +2768,16 @@ async function handleClientFrame(frame: ClientFrame, ctx: FrameCtx): Promise<voi
         if (!bot || bot.accountId !== ctx.accountId) return;
       }
       await ctx.redis.set(`run:${frame.runId}:cancelled`, "1", "EX", 3600);
+      return;
+    case "pause":
+    case "resume":
+      if ((await ctx.redis.get(`run:${frame.runId}:agentId`)) !== frame.agentId) return;
+      {
+        const [bot] = await ctx.db.select().from(bots).where(eq(bots.id, frame.agentId)).limit(1);
+        if (!bot || bot.accountId !== ctx.accountId) return;
+      }
+      if (frame.type === "pause") await ctx.redis.set(`run:${frame.runId}:paused`, "1", "EX", 3600);
+      else await ctx.redis.del(`run:${frame.runId}:paused`);
       return;
     case "approve":
       if ((await ctx.redis.get(`run:${frame.runId}:agentId`)) !== frame.agentId) return;

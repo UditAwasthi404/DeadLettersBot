@@ -1,9 +1,12 @@
-/** Raw-encoding RFB 3.8 client. The pixels come from the app's gateway socket, not a remote page. */
+/** Raw and CopyRect RFB 3.8 client. Pixels come from the app's gateway socket. */
 
 const CLIENT_VERSION = new TextEncoder().encode("RFB 003.008\n");
+const FRAME_INTERVAL_MS = 33;
 
 export class RawVncSession {
-  private buf = new Uint8Array(0);
+  private chunks: Uint8Array[] = [];
+  private offset = 0;
+  private buffered = 0;
   private stage:
     | "version"
     | "secCount"
@@ -14,6 +17,7 @@ export class RawVncSession {
     | "server"
     | "rect"
     | "raw"
+    | "copy"
     | "failed" = "version";
   private secCount = 0;
   private nameLength = 0;
@@ -27,6 +31,10 @@ export class RawVncSession {
   private raw = new Uint8Array(0);
   private rawFilled = 0;
   private rawLeft = 0;
+  private requestTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastUpdateRequest = 0;
+  private updateBytes = 0;
+  private nextWait = FRAME_INTERVAL_MS;
   private readonly ctx: CanvasRenderingContext2D | null;
 
   constructor(
@@ -34,20 +42,25 @@ export class RawVncSession {
     private readonly sendBytes: (bytes: Uint8Array) => void,
     private readonly onError: (message: string) => void = () => {},
   ) {
-    this.ctx = canvas.getContext("2d");
+    this.ctx = canvas.getContext("2d", { alpha: false });
   }
 
   push(chunk: Uint8Array): void {
     if (this.stage === "failed" || chunk.byteLength === 0) return;
-    const next = new Uint8Array(this.buf.length + chunk.length);
-    next.set(this.buf);
-    next.set(chunk, this.buf.length);
-    this.buf = next;
+    this.chunks.push(chunk);
+    this.buffered += chunk.byteLength;
     try {
       this.pump();
     } catch (err) {
       this.fail(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /** Drop a pending frame request when the view closes. */
+  dispose(): void {
+    if (this.requestTimer) clearTimeout(this.requestTimer);
+    this.requestTimer = null;
+    this.stage = "failed";
   }
 
   /** Map a browser client point through object-fit:contain letterboxing into framebuffer pixels. */
@@ -139,18 +152,19 @@ export class RawVncSession {
       if (this.stage === "name") {
         if (!this.take(this.nameLength)) return;
         this.sendBytes(pixelFormatMessage());
-        this.sendBytes(rawEncodingMessage());
+        this.sendBytes(encodingMessage());
         this.requestUpdate(false);
         this.stage = "server";
         continue;
       }
       if (this.stage === "server") {
-        if (this.buf.length < 1) return;
-        const type = this.buf[0];
+        if (this.buffered < 1) return;
+        const type = this.peek(0);
         if (type === 0) {
           const head = this.take(4);
           if (!head) return;
           this.rectsLeft = readU16(head, 2);
+          this.updateBytes = 0;
           this.stage = "rect";
           continue;
         }
@@ -159,9 +173,9 @@ export class RawVncSession {
           continue;
         }
         if (type === 3) {
-          if (this.buf.length < 8) return;
-          const length = readU32(this.buf, 4);
-          if (this.buf.length < 8 + length) return;
+          if (this.buffered < 8) return;
+          const length = this.peekU32(4);
+          if (this.buffered < 8 + length) return;
           this.take(8 + length);
           continue;
         }
@@ -169,6 +183,7 @@ export class RawVncSession {
       }
       if (this.stage === "rect") {
         if (this.rectsLeft === 0) {
+          this.nextWait = this.updateBytes < 8_192 ? 200 : FRAME_INTERVAL_MS;
           this.requestUpdate(true);
           this.stage = "server";
           continue;
@@ -179,57 +194,142 @@ export class RawVncSession {
         this.rectY = readU16(head, 2);
         this.rectW = readU16(head, 4);
         this.rectH = readU16(head, 6);
-        if (readI32(head, 8) !== 0) throw new Error("unsupported VNC encoding");
+        const encoding = readI32(head, 8);
+        if (encoding === 1) {
+          this.stage = "copy";
+          continue;
+        }
+        if (encoding !== 0) throw new Error("unsupported VNC encoding");
         this.rawLeft = this.rectW * this.rectH * 4;
         this.raw = new Uint8Array(this.rawLeft);
         this.rawFilled = 0;
         this.stage = "raw";
         continue;
       }
-      const available = Math.min(this.rawLeft, this.buf.length);
-      if (available === 0) return;
-      this.raw.set(this.buf.subarray(0, available), this.rawFilled);
-      this.buf = this.buf.subarray(available);
-      this.rawFilled += available;
-      this.rawLeft -= available;
-      if (this.rawLeft === 0) {
-        this.blit();
+      if (this.stage === "copy") {
+        const src = this.take(4);
+        if (!src) return;
+        this.copyRect(readU16(src, 0), readU16(src, 2));
+        this.updateBytes += this.rectW * this.rectH * 4;
         this.rectsLeft -= 1;
         this.stage = "rect";
+        continue;
+      }
+      if (this.stage !== "raw") throw new Error("unhandled VNC stage");
+      if (!this.fillRaw()) return;
+      this.blit();
+      this.updateBytes += this.raw.byteLength;
+      this.rectsLeft -= 1;
+      this.stage = "rect";
+    }
+  }
+
+  private fillRaw(): boolean {
+    while (this.rawLeft > 0 && this.chunks.length > 0) {
+      const chunk = this.chunks[0];
+      if (!chunk) return false;
+      const available = chunk.length - this.offset;
+      const count = Math.min(available, this.rawLeft);
+      this.raw.set(chunk.subarray(this.offset, this.offset + count), this.rawFilled);
+      this.offset += count;
+      this.rawFilled += count;
+      this.rawLeft -= count;
+      this.buffered -= count;
+      if (this.offset >= chunk.length) {
+        this.chunks.shift();
+        this.offset = 0;
       }
     }
+    return this.rawLeft === 0;
   }
 
   private blit(): void {
     if (!this.ctx || this.rectW < 1 || this.rectH < 1) return;
     const image = this.ctx.createImageData(this.rectW, this.rectH);
-    for (let i = 0, pixel = 0; i < this.raw.length; i += 4, pixel += 4) {
-      image.data[pixel] = this.raw[i] ?? 0;
-      image.data[pixel + 1] = this.raw[i + 1] ?? 0;
-      image.data[pixel + 2] = this.raw[i + 2] ?? 0;
-      image.data[pixel + 3] = 255;
-    }
+    image.data.set(this.raw.subarray(0, image.data.length));
+    for (let i = 3; i < image.data.length; i += 4) image.data[i] = 255;
+    this.ctx.putImageData(image, this.rectX, this.rectY);
+  }
+
+  private copyRect(srcX: number, srcY: number): void {
+    if (!this.ctx || this.rectW < 1 || this.rectH < 1) return;
+    const image = this.ctx.getImageData(srcX, srcY, this.rectW, this.rectH);
     this.ctx.putImageData(image, this.rectX, this.rectY);
   }
 
   private requestUpdate(incremental: boolean): void {
-    const msg = new Uint8Array(10);
-    msg[0] = 3;
-    msg[1] = incremental ? 1 : 0;
-    writeU16(msg, 6, this.width);
-    writeU16(msg, 8, this.height);
-    this.sendBytes(msg);
+    const send = () => {
+      this.requestTimer = null;
+      if (this.stage === "failed") return;
+      this.lastUpdateRequest = performance.now();
+      const msg = new Uint8Array(10);
+      msg[0] = 3;
+      msg[1] = incremental ? 1 : 0;
+      writeU16(msg, 6, this.width);
+      writeU16(msg, 8, this.height);
+      this.sendBytes(msg);
+    };
+    if (!incremental) {
+      if (this.requestTimer) clearTimeout(this.requestTimer);
+      this.requestTimer = null;
+      send();
+      return;
+    }
+    const wait = Math.max(0, this.nextWait - (performance.now() - this.lastUpdateRequest));
+    if (wait === 0) {
+      send();
+      return;
+    }
+    if (this.requestTimer) return;
+    this.requestTimer = setTimeout(send, wait);
+  }
+
+  private peek(index: number): number {
+    let left = index;
+    for (let chunkIndex = 0; chunkIndex < this.chunks.length; chunkIndex += 1) {
+      const chunk = this.chunks[chunkIndex];
+      if (!chunk) return 0;
+      const start = chunkIndex === 0 ? this.offset : 0;
+      const available = chunk.length - start;
+      if (left < available) return chunk[start + left] ?? 0;
+      left -= available;
+    }
+    return 0;
+  }
+
+  private peekU32(index: number): number {
+    return (
+      (this.peek(index) * 0x1000000 +
+        (this.peek(index + 1) << 16) +
+        (this.peek(index + 2) << 8) +
+        this.peek(index + 3)) >>>
+      0
+    );
   }
 
   private take(size: number): Uint8Array | null {
-    if (this.buf.length < size) return null;
-    const out = this.buf.subarray(0, size);
-    this.buf = this.buf.subarray(size);
+    if (this.buffered < size) return null;
+    const out = new Uint8Array(size);
+    let filled = 0;
+    while (filled < size) {
+      const chunk = this.chunks[0];
+      if (!chunk) return null;
+      const available = chunk.length - this.offset;
+      const count = Math.min(available, size - filled);
+      out.set(chunk.subarray(this.offset, this.offset + count), filled);
+      filled += count;
+      this.offset += count;
+      this.buffered -= count;
+      if (this.offset >= chunk.length) {
+        this.chunks.shift();
+        this.offset = 0;
+      }
+    }
     return out;
   }
 
   private fail(message: string): void {
-    this.stage = "failed";
+    this.dispose();
     this.onError(message);
   }
 }
@@ -247,10 +347,12 @@ function pixelFormatMessage(): Uint8Array {
   return msg;
 }
 
-function rawEncodingMessage(): Uint8Array {
-  const msg = new Uint8Array(8);
+/** Prefer CopyRect, then raw. CopyRect makes scroll updates a few bytes instead of a full frame. */
+function encodingMessage(): Uint8Array {
+  const msg = new Uint8Array(12);
   msg[0] = 2;
-  msg[3] = 1;
+  msg[3] = 2;
+  msg[7] = 1;
   return msg;
 }
 

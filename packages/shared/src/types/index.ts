@@ -6,7 +6,13 @@ export type {
   PermissionLevel,
 } from "./bot.ts";
 export type { BotConfig, ToolCategory } from "./config.ts";
-export type { ModelMessage, ModelMessageRole, ToolCall, ToolResult } from "./messages.ts";
+export type {
+  ModelImage,
+  ModelMessage,
+  ModelMessageRole,
+  ToolCall,
+  ToolResult,
+} from "./messages.ts";
 export type {
   AcceptedFrame,
   ApprovalDecision,
@@ -14,7 +20,10 @@ export type {
   ApproveFrame,
   ClientFrame,
   ErrorFrame,
+  ActivityFrame,
   InterruptFrame,
+  PauseFrame,
+  ResumeFrame,
   LocalExecRequestFrame,
   LocalExecResultFrame,
   MessageFrame,

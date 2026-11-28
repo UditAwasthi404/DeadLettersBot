@@ -298,8 +298,18 @@ if ! cdp_ready "$local_port"; then
     --no-sandbox \
     --disable-dev-shm-usage \
     --disable-gpu \
+    --force-device-scale-factor=1 \
+    --ozone-platform=x11 \
+    --disable-background-networking \
+    --disable-sync \
+    --disable-default-apps \
+    --disable-extensions \
+    --disable-renderer-backgrounding \
     --disable-features=TranslateUI \
     --disable-session-crashed-bubble \
+    --mute-audio \
+    --no-first-run \
+    --no-default-browser-check \
     --window-position=0,0 \
     --window-size=1280,540 \
     --remote-debugging-port="$local_port" \
