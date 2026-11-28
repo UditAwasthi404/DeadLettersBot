@@ -23,6 +23,8 @@ To put `xdotool` in new images, rebuild `infra/docker/Dockerfile.vm`. The image 
 
 ## Desktop
 
+The VM desktop is documented in [VM desktop](VM_DESKTOP.md): 1280×800 Xvfb, Openbox, tint2 panel, Chromium with `about:blank`, and CDP plus VNC.
+
 The agent screen shows the plan, the step budget, and a short timeline. Pause holds the turn between steps. Take over pauses and gives you the pointer. Resume continues the turn. `AGENTOS_DISABLE_GPU=1` forces software rendering; `0` keeps the GPU on.
 
 ## Local check

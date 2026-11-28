@@ -2788,6 +2788,66 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     return () => window.clearInterval(timer);
   }, [workspace, signedIn, token, baseUrl]);
 
+  const agentComputerPanel = (layout: "docked" | "overlay") =>
+    screenMode && screenBotId ? (
+      <AgentScreen
+        layout={layout}
+        mode={screenMode}
+        phase={screenPhase}
+        botName={bots.find((bot) => bot.id === screenBotId)?.name ?? "Agent"}
+        status={
+          agentActivity
+            ? `${agentActivity}${stepProgress ? ` · step ${stepProgress.step}/${stepProgress.stepBudget}` : ""}`
+            : screenStatus
+        }
+        error={screenError}
+        reason={handoff?.reason}
+        interactive={screenInteractive}
+        activeApp={desktopApp}
+        canvasRef={setScreenCanvas}
+        paused={pausedRun}
+        onRetry={() => setScreenAttempt((attempt) => attempt + 1)}
+        onClose={() => setScreenMode(null)}
+        onFocusApp={(app) => {
+          setDesktopApp(app);
+          if (!token || !baseUrl || !screenBotId) return;
+          void window.agentOS
+            .apiRequest({
+              baseUrl,
+              token,
+              path: `/v1/bots/${encodeURIComponent(screenBotId)}/desktop/focus`,
+              method: "POST",
+              body: { app },
+            })
+            .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+        }}
+        onSetMode={(mode) => {
+          setScreenMode(mode);
+          if (!activeRun || !screenBotId) return;
+          const pause = mode === "control";
+          setPausedRun(pause);
+          void window.agentOS.send({
+            type: pause ? "pause" : "resume",
+            agentId: screenBotId,
+            runId: activeRun,
+          });
+        }}
+        onReturnControl={() => void returnControl()}
+        onTogglePause={() => {
+          if (!activeRun || !screenBotId) return;
+          const next = !pausedRun;
+          setPausedRun(next);
+          void window.agentOS.send({
+            type: next ? "pause" : "resume",
+            agentId: screenBotId,
+            runId: activeRun,
+          });
+        }}
+      />
+    ) : null;
+
+  const computerDocked = Boolean(screenMode && workspace === "chat");
+
   return (
     <div className="app-shell">
       {!signedIn && clerk?.enabled && (
@@ -3112,7 +3172,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </Popover.Root>
         </div>
       </aside>
-      <main className="chat-panel">
+      <main className={`chat-panel${computerDocked ? " chat-panel--split" : ""}`}>
         <ErrorBoundary key={workspace} fallbackTitle="This panel hit a display error">
           <UpdateBanner
             ready={updateReady}
@@ -3173,10 +3233,12 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 disabled={screenMode === "handoff"}
               >
                 <Monitor className="glyph" aria-hidden="true" />
-                {screenMode === "view" || screenMode === "control" ? "Hide screen" : "Agent screen"}
+                {screenMode === "view" || screenMode === "control" ? "Hide computer" : "My computer"}
               </AppButton>
             </div>
           </header>
+          <div className={`chat-panel-body${computerDocked ? " is-split" : ""}`}>
+            <div className="chat-panel-main">
           <Dialog.Root open={botDraftOpen} onOpenChange={setBotDraftOpen}>
             <Dialog.Content maxWidth="460px">
               <Dialog.Title>New bot</Dialog.Title>
@@ -3420,61 +3482,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               </Dialog.Content>
             )}
           </Dialog.Root>
-          {screenMode && screenBotId && (
-            <AgentScreen
-              mode={screenMode}
-              phase={screenPhase}
-              botName={bots.find((bot) => bot.id === screenBotId)?.name ?? "Agent"}
-              status={
-                agentActivity
-                  ? `${agentActivity}${stepProgress ? ` · step ${stepProgress.step}/${stepProgress.stepBudget}` : ""}`
-                  : screenStatus
-              }
-              error={screenError}
-              reason={handoff?.reason}
-              interactive={screenInteractive}
-              activeApp={desktopApp}
-              canvasRef={setScreenCanvas}
-              paused={pausedRun}
-              onRetry={() => setScreenAttempt((attempt) => attempt + 1)}
-              onClose={() => setScreenMode(null)}
-              onFocusApp={(app) => {
-                setDesktopApp(app);
-                if (!token || !baseUrl || !screenBotId) return;
-                void window.agentOS
-                  .apiRequest({
-                    baseUrl,
-                    token,
-                    path: `/v1/bots/${encodeURIComponent(screenBotId)}/desktop/focus`,
-                    method: "POST",
-                    body: { app },
-                  })
-                  .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-              }}
-              onSetMode={(mode) => {
-                setScreenMode(mode);
-                if (!activeRun || !screenBotId) return;
-                const pause = mode === "control";
-                setPausedRun(pause);
-                void window.agentOS.send({
-                  type: pause ? "pause" : "resume",
-                  agentId: screenBotId,
-                  runId: activeRun,
-                });
-              }}
-              onReturnControl={() => void returnControl()}
-              onTogglePause={() => {
-                if (!activeRun || !screenBotId) return;
-                const next = !pausedRun;
-                setPausedRun(next);
-                void window.agentOS.send({
-                  type: next ? "pause" : "resume",
-                  agentId: screenBotId,
-                  runId: activeRun,
-                });
-              }}
-            />
-          )}
+          {!computerDocked && agentComputerPanel("overlay")}
           {workspace === "model" && (
             <section className="messages memory-view">
               <PanelHeader
@@ -4963,9 +4971,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             onDismissError={() => setError("")}
             onDismissNotice={() => setNotice("")}
           />
-          {workspace === "chat" && !screenMode && (
+          {workspace === "chat" && (
             <form
-              className={`composer${dragOver ? " dragover" : ""}`}
+              className={`composer${dragOver ? " dragover" : ""}${computerDocked ? " composer--split" : ""}`}
               onSubmit={(e) => void sendPrompt(e)}
               onDragEnter={(event) => {
                 event.preventDefault();
@@ -5331,6 +5339,9 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               </form>
             </Dialog.Content>
           </Dialog.Root>
+            </div>
+            {computerDocked && agentComputerPanel("docked")}
+          </div>
         </ErrorBoundary>
       </main>
     </div>

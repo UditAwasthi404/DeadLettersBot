@@ -255,9 +255,21 @@ elif command -v openbox >/dev/null 2>&1; then
   sleep 0.35
 fi
 
+tint2_pid_file="$state_dir/tint2-$bot_id.pid"
+if [[ -r "$tint2_pid_file" ]] && kill -0 "$(cat "$tint2_pid_file")" 2>/dev/null; then
+  :
+elif command -v tint2 >/dev/null 2>&1; then
+  mkdir -p "$HOME/.config/tint2"
+  if [[ ! -f "$HOME/.config/tint2/tint2rc" ]] && [[ -r /etc/agentos/tint2rc ]]; then
+    cp /etc/agentos/tint2rc "$HOME/.config/tint2/tint2rc"
+  fi
+  nohup env DISPLAY=":$display" tint2 -c "$HOME/.config/tint2/tint2rc" \
+    >"$state_dir/tint2-$bot_id.log" 2>&1 9>&- &
+  echo $! >"$tint2_pid_file"
+fi
+
 if command -v xsetroot >/dev/null 2>&1; then
-  # Soft desktop backdrop; the Electron shell draws the Grok-style taskbar.
-  DISPLAY=":$display" xsetroot -solid "#1a1f24" >/dev/null 2>&1 || true
+  DISPLAY=":$display" xsetroot -solid "#161b20" >/dev/null 2>&1 || true
 fi
 
 term_pid_file="$state_dir/xterm-$bot_id.pid"
@@ -286,6 +298,10 @@ fi
 
 profile_dir="$state_dir/profile-$bot_id"
 mkdir -p "$profile_dir"
+if [[ -r /etc/agentos/chromium-initial-preferences.json ]] \
+  && [[ ! -f "$profile_dir/Initial Preferences" ]]; then
+  cp /etc/agentos/chromium-initial-preferences.json "$profile_dir/Initial Preferences"
+fi
 # Stale Singleton* files survive container recreate and block Chromium with a modal.
 rm -f "$profile_dir/SingletonLock" "$profile_dir/SingletonCookie" "$profile_dir/SingletonSocket"
 
@@ -307,7 +323,11 @@ if ! cdp_ready "$local_port"; then
     --disable-default-apps \
     --disable-extensions \
     --disable-renderer-backgrounding \
-    --disable-features=TranslateUI \
+    --disable-features=TranslateUI,MediaRouter \
+    --disable-component-update \
+    --disable-popup-blocking \
+    --disable-infobars \
+    --no-pings \
     --disable-session-crashed-bubble \
     --mute-audio \
     --no-first-run \

@@ -1,0 +1,45 @@
+# AgentOS VM — minimal bottom panel (Grok-style dock)
+# tint2 reads this from ~/.config/tint2/tint2rc
+
+# Panel
+panel_monitor = all
+panel_position = bottom center horizontal
+panel_size = 100% 32
+panel_margin = 0 0
+panel_padding = 4 2 4
+panel_dock = 0
+panel_background_id = 1
+
+# Taskbar
+taskbar_mode = single_desktop
+taskbar_padding = 2 2 4
+taskbar_background_id = 0
+taskbar_active_background_id = 2
+taskbar_font = sans 10
+
+# Launcher (spacer only — apps open from the agent)
+launcher_padding = 0 0
+launcher_icon_size = 0
+launcher_background_id = 0
+launcher_item_background_id = 0
+
+# System tray disabled
+systray_padding = 0 0
+systray_background_id = 0
+
+# Tooltip
+tooltip_show_timeout = 0
+tooltip_hide_timeout = 50
+tooltip_background_id = 3
+tooltip_font = sans 10
+
+# Background definitions
+background_color_id_0 = #000000 0
+background_color_id_1 = #14191f 90
+background_color_id_2 = #243038 70
+background_color_id_3 = #0f1418 95
+
+background_icon_asb_id_0 = 0 0 0
+background_icon_asb_id_1 = 100 16 8
+background_icon_asb_id_2 = 100 12 6
+background_icon_asb_id_3 = 100 16 8

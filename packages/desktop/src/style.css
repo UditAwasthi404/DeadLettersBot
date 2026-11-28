@@ -82,6 +82,8 @@
   /* Geometry */
   --sidebar-w: 268px;
   --sidebar-w-compact: 68px;
+  --computer-panel-w: min(42vw, 520px);
+  --computer-panel-min: 300px;
   --toolbar-h: 54px;
   --content-max: 708px;
   --page-max: 920px;
@@ -430,6 +432,7 @@ code {
   border-right: 1px solid var(--hairline);
   backdrop-filter: blur(40px) saturate(140%);
   -webkit-backdrop-filter: blur(40px) saturate(140%);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.04);
 }
 
 .sidebar::before {
@@ -1147,6 +1150,37 @@ button:disabled {
   display: flex;
   flex-direction: column;
   background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+}
+
+.chat-panel-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-panel-body.is-split {
+  flex-direction: row;
+  align-items: stretch;
+}
+
+.chat-panel-main {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-panel--split .chat-panel-main .messages {
+  max-width: none;
+}
+
+.chat-panel--split .composer.composer--split {
+  margin-inline: 16px;
+  max-width: none;
 }
 
 .chat-header {
@@ -3174,6 +3208,50 @@ fieldset input[type="checkbox"] {
   -webkit-app-region: no-drag;
 }
 
+.agent-screen--docked {
+  position: relative;
+  top: auto;
+  z-index: 2;
+  flex: 0 0 var(--computer-panel-w);
+  min-width: var(--computer-panel-min);
+  max-width: 560px;
+  height: auto;
+  border-left: 1px solid var(--hairline-strong);
+  padding: 10px 12px 12px;
+  background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
+  animation: panel-in var(--dur-2) var(--ease) both;
+}
+
+.agent-screen--docked .agent-screen-bar {
+  padding-bottom: 2px;
+}
+
+.agent-screen--docked .agent-screen-identity strong {
+  font-size: var(--fs-12);
+}
+
+.agent-screen--docked.is-controlling {
+  position: absolute;
+  z-index: 12;
+  inset: 0;
+  top: var(--toolbar-h);
+  flex: none;
+  min-width: 0;
+  max-width: none;
+  border-left: 0;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
 .agent-screen-bar {
   display: flex;
   flex-wrap: wrap;
@@ -3976,6 +4054,20 @@ fieldset input[type="checkbox"] {
 
   .auth-points {
     display: none;
+  }
+}
+
+@media (max-width: 960px) {
+  .chat-panel-body.is-split {
+    flex-direction: column;
+  }
+
+  .agent-screen--docked {
+    flex: 0 0 min(48vh, 420px);
+    min-width: 0;
+    max-width: none;
+    border-left: 0;
+    border-top: 1px solid var(--hairline-strong);
   }
 }
 
