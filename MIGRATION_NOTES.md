@@ -36,7 +36,7 @@ Re-verify this table at the end of each milestone. Mark ✕ only when intentiona
 
 ## Milestones
 
-### M1 — Design system & shell (in progress → complete when pushed)
+### M1 — Design system & shell (complete @ `4d5db9e`)
 
 **Delivered**
 
