@@ -180,7 +180,8 @@ flock 8
 
 if ! display_alive "$display"; then
   rm -f "/tmp/.X11-unix/X$display"
-  nohup Xvfb ":$display" -screen 0 1280x800x24 -nolisten tcp \
+  screen_geom="${AGENTOS_SCREEN:-1280x800}"
+  nohup Xvfb ":$display" -screen 0 "${screen_geom}x24" -nolisten tcp \
     >"$state_dir/xvfb-$bot_id.log" 2>&1 9>&- &
   for _ in $(seq 1 50); do
     display_alive "$display" && break
@@ -255,9 +256,22 @@ elif command -v openbox >/dev/null 2>&1; then
   sleep 0.35
 fi
 
+tint2_pid_file="$state_dir/tint2-$bot_id.pid"
+if [[ -r "$tint2_pid_file" ]] && kill -0 "$(cat "$tint2_pid_file")" 2>/dev/null; then
+  :
+elif command -v tint2 >/dev/null 2>&1; then
+  mkdir -p "$HOME/.config/tint2"
+  if [[ ! -f "$HOME/.config/tint2/tint2rc" ]] && [[ -r /etc/agentos/tint2rc ]]; then
+    cp /etc/agentos/tint2rc "$HOME/.config/tint2/tint2rc"
+  fi
+  nohup env DISPLAY=":$display" tint2 -c "$HOME/.config/tint2/tint2rc" \
+    >"$state_dir/tint2-$bot_id.log" 2>&1 9>&- &
+  echo $! >"$tint2_pid_file"
+fi
+
 if command -v xsetroot >/dev/null 2>&1; then
-  # Soft desktop backdrop; the Electron shell draws the Grok-style taskbar.
-  DISPLAY=":$display" xsetroot -solid "#1a1f24" >/dev/null 2>&1 || true
+  # Neutral desktop (#1B1B1F) — matches AgentOS design tokens.
+  DISPLAY=":$display" xsetroot -solid "#1B1B1F" >/dev/null 2>&1 || true
 fi
 
 term_pid_file="$state_dir/xterm-$bot_id.pid"
@@ -266,9 +280,9 @@ if [[ -r "$term_pid_file" ]] && kill -0 "$(cat "$term_pid_file")" 2>/dev/null; t
 elif command -v xterm >/dev/null 2>&1; then
   # Keep Terminal available but iconified — open it from the desktop taskbar.
   nohup env DISPLAY=":$display" xterm \
-    -geometry 120x32+80+60 \
-    -fa Monospace -fs 12 \
-    -bg "#0b0f0d" -fg "#d5ebe0" -cr "#7dffa6" \
+    -geometry 100x30+80+60 \
+    -fa "JetBrains Mono" -fs 11 \
+    -bg "#0E0E10" -fg "#EDEDEF" -cr "#2BC59A" \
     -title "Terminal" \
     -iconic \
     -xrm 'XTerm*scrollBar:true' \
@@ -285,9 +299,18 @@ elif [[ -x /usr/local/bin/chromium ]]; then
 fi
 
 profile_dir="$state_dir/profile-$bot_id"
-mkdir -p "$profile_dir"
+mkdir -p "$profile_dir" "$HOME/Downloads"
+if [[ -r /etc/agentos/chromium-initial-preferences.json ]] \
+  && [[ ! -f "$profile_dir/Initial Preferences" ]]; then
+  cp /etc/agentos/chromium-initial-preferences.json "$profile_dir/Initial Preferences"
+fi
 # Stale Singleton* files survive container recreate and block Chromium with a modal.
 rm -f "$profile_dir/SingletonLock" "$profile_dir/SingletonCookie" "$profile_dir/SingletonSocket"
+
+gpu_flags=(--disable-gpu)
+if [[ "${AGENTOS_DISABLE_GPU:-1}" == "0" ]]; then
+  gpu_flags=()
+fi
 
 if ! cdp_ready "$local_port"; then
   # If an older ensure left Chromium on the public port, free it before proxying.
@@ -295,11 +318,11 @@ if ! cdp_ready "$local_port"; then
     pkill -f "--remote-debugging-port=$port" 2>/dev/null || true
     sleep 0.3
   fi
-  # Full-desktop Chromium; Terminal stays iconified until the taskbar opens it.
+  # Work area above the 36px tint2 bar: 1280×764.
   nohup env DISPLAY=":$display" "$chromium_bin" \
     --no-sandbox \
     --disable-dev-shm-usage \
-    --disable-gpu \
+    "${gpu_flags[@]}" \
     --force-device-scale-factor=1 \
     --ozone-platform=x11 \
     --disable-background-networking \
@@ -307,18 +330,26 @@ if ! cdp_ready "$local_port"; then
     --disable-default-apps \
     --disable-extensions \
     --disable-renderer-backgrounding \
-    --disable-features=TranslateUI \
+    --disable-features=TranslateUI,MediaRouter,OptimizationHints,AutofillServerCommunication \
+    --disable-component-update \
+    --disable-popup-blocking \
+    --disable-infobars \
+    --no-pings \
+    --password-store=basic \
+    --hide-crash-restore-bubble \
     --disable-session-crashed-bubble \
     --mute-audio \
     --no-first-run \
     --no-default-browser-check \
     --start-maximized \
     --window-position=0,0 \
-    --window-size=1280,800 \
+    --window-size=1280,764 \
+    --remote-debugging-address=127.0.0.1 \
     --remote-debugging-port="$local_port" \
     --remote-allow-origins='*' \
     --user-data-dir="$profile_dir" \
     about:blank >"$state_dir/chromium-$bot_id.log" 2>&1 9>&- &
+  echo $! >"$state_dir/chromium-$bot_id.pid"
 fi
 
 for _ in $(seq 1 100); do

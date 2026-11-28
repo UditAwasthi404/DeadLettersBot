@@ -1,0 +1,79 @@
+# AgentOS VM taskbar — bottom dock matching the design tokens
+# Loaded from ~/.config/tint2/tint2rc (copied from /etc/agentos/tint2rc)
+
+# Panel
+panel_monitor = all
+panel_position = bottom center horizontal
+panel_size = 100% 36
+panel_margin = 0 0
+panel_padding = 6 4 6
+panel_dock = 0
+panel_background_id = 1
+panel_items = LTSC
+
+# Launcher
+launcher_padding = 4 2 4
+launcher_icon_size = 20
+launcher_background_id = 0
+launcher_item_background_id = 0
+launcher_apps_dir = /etc/agentos/tint2-launchers
+
+# Taskbar
+taskbar_mode = single_desktop
+taskbar_padding = 4 2 4
+taskbar_background_id = 0
+taskbar_active_background_id = 2
+taskbar_name = 1
+taskbar_name_padding = 4 2
+taskbar_name_font = Inter 10
+taskbar_name_font_color = #A0A0AB 100
+taskbar_name_active_font_color = #EDEDEF 100
+taskbar_icon_size = 18
+taskbar_font = Inter 10
+
+# System tray off
+systray_padding = 0 0
+systray_background_id = 0
+
+# Clock
+time1_format = %H:%M
+time1_font = Inter 10
+time1_font_color = #EDEDEF 100
+time2_format =
+clock_font_color = #EDEDEF 100
+clock_padding = 8 2
+clock_background_id = 0
+clock_tooltip = %A %d %B
+
+# Tooltip
+tooltip_show_timeout = 0
+tooltip_hide_timeout = 50
+tooltip_background_id = 3
+tooltip_font = Inter 10
+tooltip_font_color = #EDEDEF 100
+
+# Backgrounds — #141416 @ 95%, accent active chip
+background_color_id_0 = #000000 0
+background_color_id_1 = #141416 95
+background_color_id_2 = #0F9D7A 35
+background_color_id_3 = #1F1F23 95
+
+background_border_id_0 = #000000 0
+background_border_id_1 = #FFFFFF 8
+background_border_id_2 = #2BC59A 60
+background_border_id_3 = #FFFFFF 10
+
+rounded_id_0 = 0
+rounded_id_1 = 0
+rounded_id_2 = 6
+rounded_id_3 = 6
+
+border_width_id_0 = 0
+border_width_id_1 = 0
+border_width_id_2 = 0
+border_width_id_3 = 0
+
+background_icon_asb_id_0 = 0 0 0
+background_icon_asb_id_1 = 100 0 0
+background_icon_asb_id_2 = 100 0 0
+background_icon_asb_id_3 = 100 0 0

@@ -19,7 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && sed -i 's|http://|https://|g' /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true \
  && apt-get update && apt-get install -y --no-install-recommends \
       bash coreutils findutils util-linux curl gpg inotify-tools iptables \
-      x11vnc xdotool xvfb x11-utils x11-xserver-utils openbox xterm \
+      x11vnc xdotool xvfb x11-utils x11-xserver-utils openbox tint2 xterm \
+      fonts-dejavu-core fonts-liberation fonts-noto-core fonts-noto-color-emoji \
+      fonts-jetbrains-mono dbus-x11 \
+    && (apt-get install -y --no-install-recommends fonts-inter || true) \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
@@ -33,7 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && mkdir -p /usr/local/lib/agentos/node_modules \
     && ln -s "$(npm root --global)/ipaddr.js" /usr/local/lib/agentos/node_modules/ipaddr.js \
     && useradd --create-home --uid 1000 --shell /bin/bash agent \
-    && mkdir -p /tmp/.X11-unix \
+    && mkdir -p /home/agent/Downloads /tmp/.X11-unix \
+    && chown -R agent:agent /home/agent \
     && chmod 1777 /tmp/.X11-unix \
     && browser="$(find /ms-playwright -type f -name chrome -print -quit)" \
     && test -n "$browser" \
@@ -41,6 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && chmod -R a+rX /ms-playwright \
     && rm -rf /var/lib/apt/lists/* /root/.npm/_logs
 
+COPY agentos-tint2rc /etc/agentos/tint2rc
+COPY chromium-initial-preferences.json /etc/agentos/chromium-initial-preferences.json
 COPY ensure-bot-browser.sh /usr/local/bin/agentos-ensure-browser
 COPY ensure-bot-vnc.sh /usr/local/bin/agentos-ensure-vnc
 COPY agentos-pointer.sh /usr/local/bin/agentos-pointer

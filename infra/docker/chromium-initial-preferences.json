@@ -1,0 +1,46 @@
+{
+  "distribution": {
+    "import_bookmarks": false,
+    "import_history": false,
+    "import_home_page": false,
+    "import_search_engine": false,
+    "make_chrome_default_for_user": false,
+    "skip_first_run_ui": true,
+    "suppress_first_run_bubble": true,
+    "suppress_first_run_default_browser_prompt": true
+  },
+  "browser": {
+    "check_default_browser": false,
+    "show_home_button": false,
+    "custom_chrome_frame": false
+  },
+  "bookmark_bar": {
+    "show_on_all_tabs": false
+  },
+  "session": {
+    "restore_on_startup": 5,
+    "startup_urls": ["about:blank"]
+  },
+  "homepage": "about:blank",
+  "homepage_is_newtabpage": false,
+  "download": {
+    "prompt_for_download": false,
+    "default_directory": "/home/agent/Downloads"
+  },
+  "profile": {
+    "default_content_setting_values": {
+      "notifications": 2
+    },
+    "password_manager_enabled": false
+  },
+  "signin": {
+    "allowed": false
+  },
+  "sync_promo": {
+    "show_on_first_run_allowed": false
+  },
+  "autofill": {
+    "profile_enabled": false,
+    "credit_card_enabled": false
+  }
+}
