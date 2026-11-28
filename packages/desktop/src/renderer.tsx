@@ -44,9 +44,13 @@ import { UpdateBanner } from "./UpdateBanner.tsx";
 import { AgentAvatar } from "./components/AgentAvatar.tsx";
 import {
   AgentScreen,
+  type AgentPointer,
   type DesktopApp,
   type ScreenPhase,
+  type ScreenPresentation,
 } from "./components/AgentScreen.tsx";
+import type { PlanStep } from "./components/PlanChecklist.tsx";
+import type { TimelineEvent } from "./components/Timeline.tsx";
 import { AppButton } from "./components/AppButton.tsx";
 import { AuthShell } from "./components/AuthShell.tsx";
 import { BotRow } from "./components/BotRow.tsx";
@@ -66,6 +70,7 @@ import "@radix-ui/themes/styles.css";
 import "./style.css";
 import "./design/tokens.css";
 import "./shell.css";
+import "./components.css";
 
 const ClerkBoundary = React.lazy(() =>
   import("./ClerkBoundary.tsx").then((module) => ({ default: module.ClerkBoundary })),
@@ -699,6 +704,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
   const [allowLocalSession, setAllowLocalSession] = useState(false);
   const [screenMode, setScreenMode] = useState<null | "view" | "control" | "handoff">(null);
+  const [screenPresentation, setScreenPresentation] = useState<ScreenPresentation>("docked");
+  const [stripCollapsed, setStripCollapsed] = useState(false);
+  const [livePlan, setLivePlan] = useState<PlanStep[]>([]);
+  const [actionTimeline, setActionTimeline] = useState<TimelineEvent[]>([]);
+  const [agentPointer, setAgentPointer] = useState<AgentPointer | null>(null);
   const [agentActivity, setAgentActivity] = useState("");
   const [stepProgress, setStepProgress] = useState<{ step: number; stepBudget: number } | null>(
     null,
@@ -770,8 +780,28 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         if (typeof frame.step === "number" && typeof frame.stepBudget === "number")
           setStepProgress({ step: frame.step, stepBudget: frame.stepBudget });
         if (frame.label) setAgentActivity(frame.label);
+        if (typeof frame.plan === "string" && frame.plan.trim()) {
+          setLivePlan(planStringToSteps(frame.plan, frame.step));
+        }
+        if (frame.label) {
+          const stamp = new Date();
+          setActionTimeline((rows) =>
+            [
+              {
+                id: crypto.randomUUID(),
+                title: frame.label ?? "Action",
+                time: stamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+                dateTime: stamp.toISOString(),
+                tone: "accent" as const,
+              },
+              ...rows,
+            ].slice(0, 20),
+          );
+        }
       } else if (frame.type === "toolStart") {
         setAgentActivity(activityLabel(frame.toolName, frame.params));
+        const pointer = pointerFromToolParams(frame.params);
+        if (pointer) setAgentPointer(pointer);
         setItems((old) => [
           ...old,
           {
@@ -789,6 +819,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             ? "Checking the screen"
             : current,
         );
+        setAgentPointer((current) => (current?.click ? { ...current, click: false } : current));
         setItems((old) => [
           ...old,
           {
@@ -827,10 +858,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         setActiveRun("");
         setAgentActivity("");
         setPausedRun(false);
+        setLivePlan([]);
+        setActionTimeline([]);
+        setAgentPointer(null);
       } else if (frame.type === "error") {
         setError(`${frame.code ?? "error"}: ${frame.message ?? "request failed"}`);
         setActiveRun("");
         setAgentActivity("");
+        setAgentPointer(null);
       }
     });
     const stopStatus = window.agentOS.onStatus(setStatus);
@@ -3156,7 +3191,25 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </Popover.Root>
         </div>
       </aside>
-      <main className="chat-panel">
+      <main
+        className={[
+          "chat-panel",
+          screenMode &&
+          screenMode !== "handoff" &&
+          screenMode !== "control" &&
+          screenPresentation !== "fullscreen"
+            ? "has-computer-dock"
+            : "",
+          screenMode &&
+          screenMode !== "handoff" &&
+          screenMode !== "control" &&
+          screenPresentation === "expanded"
+            ? "is-computer-expanded"
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <ErrorBoundary key={workspace} fallbackTitle="This panel hit a display error">
           <UpdateBanner
             ready={updateReady}
@@ -3467,6 +3520,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </Dialog.Root>
           {screenMode && screenBotId && (
             <AgentScreen
+              presentation={
+                screenMode === "handoff" || screenMode === "control"
+                  ? "fullscreen"
+                  : screenPresentation
+              }
               mode={screenMode}
               phase={screenPhase}
               botName={bots.find((bot) => bot.id === screenBotId)?.name ?? "Agent"}
@@ -3479,10 +3537,20 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               reason={handoff?.reason}
               interactive={screenInteractive}
               activeApp={desktopApp}
+              planSteps={livePlan}
+              stepProgress={stepProgress}
+              timeline={actionTimeline}
+              agentPointer={agentPointer}
+              stripCollapsed={stripCollapsed}
               canvasRef={setScreenCanvas}
               paused={pausedRun}
               onRetry={() => setScreenAttempt((attempt) => attempt + 1)}
-              onClose={() => setScreenMode(null)}
+              onClose={() => {
+                setScreenMode(null);
+                setScreenPresentation("docked");
+              }}
+              onPresentationChange={setScreenPresentation}
+              onToggleStrip={() => setStripCollapsed((value) => !value)}
               onFocusApp={(app) => {
                 setDesktopApp(app);
                 if (!token || !baseUrl || !screenBotId) return;
@@ -5008,7 +5076,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             onDismissError={() => setError("")}
             onDismissNotice={() => setNotice("")}
           />
-          {workspace === "chat" && !screenMode && (
+          {workspace === "chat" &&
+            (!screenMode ||
+              (screenPresentation !== "fullscreen" &&
+                screenMode !== "handoff" &&
+                screenMode !== "control")) && (
             <form
               className={`composer${dragOver ? " dragover" : ""}`}
               onSubmit={(e) => void sendPrompt(e)}
@@ -5413,6 +5485,52 @@ function appendAssistantDelta(
   if (!current) return items;
   next[idx] = { ...current, content: current.content + pending.text };
   return next;
+}
+
+function planStringToSteps(plan: string, currentStep?: number): PlanStep[] {
+  const lines = plan
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:\d+[.)]\s*|[-*]\s+)/, "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const active = typeof currentStep === "number" ? Math.max(0, currentStep - 1) : 0;
+  return lines.map((title, index) => ({
+    id: `plan-${index}`,
+    title,
+    state: index < active ? "completed" : index === active ? "running" : "pending",
+  }));
+}
+
+function pointerFromToolParams(params: unknown): AgentPointer | null {
+  if (!params || typeof params !== "object") return null;
+  const args = params as {
+    action?: unknown;
+    x?: unknown;
+    y?: unknown;
+    toX?: unknown;
+    toY?: unknown;
+    point?: { x?: unknown; y?: unknown };
+  };
+  const action = typeof args.action === "string" ? args.action : "";
+  const x =
+    typeof args.x === "number"
+      ? args.x
+      : typeof args.toX === "number"
+        ? args.toX
+        : typeof args.point?.x === "number"
+          ? args.point.x
+          : null;
+  const y =
+    typeof args.y === "number"
+      ? args.y
+      : typeof args.toY === "number"
+        ? args.toY
+        : typeof args.point?.y === "number"
+          ? args.point.y
+          : null;
+  if (x === null || y === null) return null;
+  const click = /click|drag|tap/i.test(action);
+  return { x, y, click };
 }
 
 function activityLabel(toolName: string | undefined, params: unknown): string {

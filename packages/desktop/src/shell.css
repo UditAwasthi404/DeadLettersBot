@@ -75,6 +75,19 @@ html[data-platform="win32"] .chat-header { padding-right: var(--space-6); }
 .command-option[aria-current="true"], .command-option:hover { background: var(--bg-selected); }
 .command-group, .command-empty { font-size: var(--type-footnote); color: var(--text-secondary); }
 :focus-visible { outline: var(--focus-outline) solid var(--accent); outline-offset: var(--focus-offset); box-shadow: var(--focus-ring); }
+@media (max-width: 1199px) {
+  .chat-panel.has-computer-dock .messages,
+  .chat-panel.has-computer-dock .composer { margin-right: 0; }
+  .agent-screen--docked,
+  .agent-screen--expanded {
+    left: 0;
+    width: auto;
+    border-left: 0;
+    border-top: var(--hairline-width) solid var(--border-subtle);
+    top: auto;
+    height: min(48vh, 420px);
+  }
+}
 @media (max-width: 1023px) {
   .sidebar { width: var(--size-sidebar-collapsed); padding-inline: var(--space-2); }
   .sidebar .brand > span:last-child, .sidebar-label, .nav-item-label, .sidebar .roster-head > span, .sidebar-search, .sidebar .bot-name, .theme-toggle-label, .theme-toggle-option > span, .account-row > span { display: none; }
