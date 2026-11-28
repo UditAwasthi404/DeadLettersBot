@@ -1,0 +1,9 @@
+[package]
+name = "agentos-shared"
+description = "AgentOS shared types (Rust port of @agentos/shared core)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true

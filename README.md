@@ -173,6 +173,9 @@ Restart Compose with the command above. In the desktop app, open **Connectors** 
 - Box Host webhook subscriptions — signed turn, routine, and approval event delivery.
 - `packages/vm-manager` — Docker and Kubernetes VM backends plus a development no-op manager.
 - `docs/` — product, architecture, technical, agent, and phase planning documents.
+- `docs/VM_DESKTOP.md` — agent VM desktop (Openbox, tint2, 1280×800 Chromium, CDP/VNC).
+- `docs/RUST_MIGRATION.md` — Rust/Tauri v2 port status and build commands.
+- `crates/` — incremental Rust workspace (`agentos-shared`, `agentos-agent-core`, …).
 
 ## Development
 

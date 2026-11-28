@@ -1,0 +1,34 @@
+{
+  "distribution": {
+    "import_bookmarks": false,
+    "import_history": false,
+    "import_home_page": false,
+    "import_search_engine": false,
+    "make_chrome_default_for_user": false,
+    "skip_first_run_ui": true
+  },
+  "browser": {
+    "check_default_browser": false,
+    "show_home_button": false
+  },
+  "bookmark_bar": {
+    "show_on_all_tabs": false
+  },
+  "session": {
+    "restore_on_startup": 5,
+    "startup_urls": ["about:blank"]
+  },
+  "homepage": "about:blank",
+  "homepage_is_newtabpage": false,
+  "profile": {
+    "default_content_setting_values": {
+      "notifications": 2
+    }
+  },
+  "signin": {
+    "allowed": false
+  },
+  "sync_promo": {
+    "show_on_first_run_allowed": false
+  }
+}

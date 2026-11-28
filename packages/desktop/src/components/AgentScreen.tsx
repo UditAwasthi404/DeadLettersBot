@@ -31,6 +31,7 @@ const MODE_LABEL: Record<ScreenMode, string> = {
 };
 
 type AgentScreenProps = {
+  layout?: "docked" | "overlay";
   mode: ScreenMode;
   phase: ScreenPhase;
   botName: string;
@@ -50,6 +51,7 @@ type AgentScreenProps = {
 };
 
 export function AgentScreen({
+  layout = "overlay",
   mode,
   phase,
   botName,
@@ -81,10 +83,12 @@ export function AgentScreen({
     });
   };
 
+  const docked = layout === "docked";
+
   return (
     <section
-      className={`agent-screen no-drag${controlling ? " is-controlling" : ""}`}
-      role="dialog"
+      className={`agent-screen no-drag${docked ? " agent-screen--docked" : ""}${controlling ? " is-controlling" : ""}`}
+      role={docked && !controlling ? "region" : "dialog"}
       aria-label={`Computer for ${botName}`}
     >
       <header className="agent-screen-bar">
