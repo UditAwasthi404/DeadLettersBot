@@ -61,6 +61,10 @@ import {
   describeConnectedConnectors,
   describeSubagentReadOnlyConnectors,
 } from "./connector-availability.ts";
+import {
+  DESKTOP_NUDGE_MESSAGE,
+  shouldNudgeDesktopUse,
+} from "./desktop-nudge.ts";
 import { TranscriptAppendAfterCheckpointError } from "./errors.ts";
 import { decodeTextAttachment, sanitizeForJsonb } from "./jsonb-safe.ts";
 import { loggedError, logger, withLogContext } from "./logger.ts";
@@ -872,6 +876,8 @@ ${server.cachedTools
   let endTurnFlag = false;
   let stoppedOnTools = false;
   let computerUseNudgeSent = false;
+  let desktopUsedThisTurn = false;
+  const userPromptText = String(turnRow?.input?.prompt ?? "");
   let livePlan = "";
   let skillFailureNotice: string | null = null;
   let skillFailureNoticePersisted = false;
@@ -1142,14 +1148,19 @@ ${server.cachedTools
             `skill stopped before completing step ${skillProgressIndex + 1} of ${activeSkill.steps.length}`,
           );
         // Models often answer like a chatbot (links, tutorials) with zero tools.
-        // One forced continuation so they open the desktop/browser and act.
-        if (!computerUseNudgeSent && !activeSkill && stepIndex + 1 < stepBudget) {
+        if (
+          shouldNudgeDesktopUse({
+            desktopUsedThisTurn,
+            nudgeAlreadySent: computerUseNudgeSent,
+            userPrompt: userPromptText,
+            sendToUserContents: assistantContent ? [assistantContent] : [],
+            endTurn: true,
+          }) &&
+          !activeSkill &&
+          stepIndex + 1 < stepBudget
+        ) {
           computerUseNudgeSent = true;
-          exchangeMessages.push({
-            role: "user",
-            content:
-              "[AgentOS runtime]\nYou replied with plain text and no tools. That is incorrect for this product.\nYou are an agent with a real Linux desktop — not a chatbot.\nImmediately call Computer with action \"plan\", then \"navigate\" or \"new_tab\" to the site/app the user named (Canva, YouTube, etc.), then screenshot and continue with click/type until the task is done.\nDo not list URLs for the user to open themselves. Do not explain how they would do it. Operate the screen.\nOnly use SendToUser after you have acted, to report progress or the final result.",
-          });
+          exchangeMessages.push({ role: "user", content: DESKTOP_NUDGE_MESSAGE });
           ctx.send({
             type: "activity",
             agentId: ctx.agentId,
@@ -1164,6 +1175,7 @@ ${server.cachedTools
       stoppedOnTools = true;
       const toolResults: ToolResult[] = [];
       let stopAfterCheckpoint: string | null = null;
+      const sendToUserContents: string[] = [];
       for (const tc of toolCalls) {
         if (await isCancelled(ctx.redis, ctx.runId)) {
           executionAbortController.abort();
@@ -1645,8 +1657,11 @@ ${server.cachedTools
           }
         }
 
+        if (!tr.isError && BROWSER_TOOLS.has(tc.name)) desktopUsedThisTurn = true;
+
         if (tc.name === "SendToUser" && !tr.isError) {
           const content = String(tc.args.content ?? "");
+          sendToUserContents.push(content);
           const endTurn = Boolean(tc.args.endTurn);
           if (ctx.bot.role === "subagent") {
             ctx.subagentResult = content;
@@ -1757,6 +1772,29 @@ ${server.cachedTools
       // For retry, the failed tool result remains in model history and the next
       // inference retries the instruction. The counter above bounds retries.
       if (activeSkill && skillProgressIndex >= activeSkill.steps.length) break;
+      if (
+        endTurnFlag &&
+        !activeSkill &&
+        shouldNudgeDesktopUse({
+          desktopUsedThisTurn,
+          nudgeAlreadySent: computerUseNudgeSent,
+          userPrompt: userPromptText,
+          sendToUserContents,
+          endTurn: true,
+        }) &&
+        stepIndex < stepBudget
+      ) {
+        computerUseNudgeSent = true;
+        endTurnFlag = false;
+        exchangeMessages.push({ role: "user", content: DESKTOP_NUDGE_MESSAGE });
+        ctx.send({
+          type: "activity",
+          agentId: ctx.agentId,
+          runId: ctx.runId,
+          label: "Nudge: use the computer, not chat",
+        });
+        continue;
+      }
       if (endTurnFlag && !activeSkill) break;
     }
 
