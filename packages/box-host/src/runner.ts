@@ -871,6 +871,7 @@ ${server.cachedTools
   const stepBudget = Math.max(1, Math.min(ctx.stepBudget ?? BOT_STEP_BUDGET, BOT_STEP_BUDGET));
   let endTurnFlag = false;
   let stoppedOnTools = false;
+  let computerUseNudgeSent = false;
   let livePlan = "";
   let skillFailureNotice: string | null = null;
   let skillFailureNoticePersisted = false;
@@ -1140,6 +1141,23 @@ ${server.cachedTools
           throw new Error(
             `skill stopped before completing step ${skillProgressIndex + 1} of ${activeSkill.steps.length}`,
           );
+        // Models often answer like a chatbot (links, tutorials) with zero tools.
+        // One forced continuation so they open the desktop/browser and act.
+        if (!computerUseNudgeSent && !activeSkill && stepIndex + 1 < stepBudget) {
+          computerUseNudgeSent = true;
+          exchangeMessages.push({
+            role: "user",
+            content:
+              "[AgentOS runtime]\nYou replied with plain text and no tools. That is incorrect for this product.\nYou are an agent with a real Linux desktop — not a chatbot.\nImmediately call Computer with action \"plan\", then \"navigate\" or \"new_tab\" to the site/app the user named (Canva, YouTube, etc.), then screenshot and continue with click/type until the task is done.\nDo not list URLs for the user to open themselves. Do not explain how they would do it. Operate the screen.\nOnly use SendToUser after you have acted, to report progress or the final result.",
+          });
+          ctx.send({
+            type: "activity",
+            agentId: ctx.agentId,
+            runId: ctx.runId,
+            label: "Nudge: use the computer, not chat",
+          });
+          continue;
+        }
         break;
       }
 
