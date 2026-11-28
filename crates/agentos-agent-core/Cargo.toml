@@ -1,0 +1,13 @@
+[package]
+name = "agentos-agent-core"
+description = "AgentOS agent loop core (Rust port of @agentos/agent-core)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-shared = { path = "../agentos-shared" }
+regex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

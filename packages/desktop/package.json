@@ -9,13 +9,16 @@
     "electron": "tsc -p tsconfig.electron.json && node ./ensure-cjs-package.mjs && electron .",
     "build": "vite build && tsc -p tsconfig.electron.json && node ./ensure-cjs-package.mjs",
     "typecheck": "tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
-    "test": "bun test",
+    "test": "bun test src/local-daemon.test.ts src/rfb.test.ts && pnpm test:ui",
+    "test:ui": "vitest run",
+    "lint": "stylelint \"src/**/*.css\" && biome check src/command-palette.tsx src/titlebar.tsx src/design/tokens.ts src/i18n/index.ts vitest.config.ts src/test-setup.ts",
     "start": "node ./ensure-cjs-package.mjs && electron .",
     "pack:dir": "pnpm build && electron-builder --dir",
     "dist": "pnpm build && electron-builder"
   },
   "dependencies": {
     "@clerk/react": "6.18.4",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@radix-ui/themes": "3.3.0",
     "electron-updater": "6.8.11",
     "lucide-react": "1.79.0",
@@ -27,6 +30,9 @@
     "ws": "8.21.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^8.0.0",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.13",
     "@types/node": "22.10.2",
     "@types/react": "19.0.3",
     "@types/react-dom": "19.0.2",
@@ -36,8 +42,13 @@
     "electron": "42.11.16",
     "electron-builder": "26.18.0",
     "electron-builder-squirrel-windows": "26.18.0",
+    "jsdom": "^26",
+    "playwright": "1.55.1",
+    "postcss": "^8",
+    "stylelint": "^16",
     "typescript": "5.7.2",
-    "vite": "6.4.6"
+    "vite": "6.4.6",
+    "vitest": "^3"
   },
   "build": {
     "appId": "dev.agentos.desktop",

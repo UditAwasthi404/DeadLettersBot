@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/agentos-shared",
+  "crates/agentos-agent-core",
+  "crates/agentos-inference",
+  "crates/agentos-tools",
+  "crates/agentos-box-host",
+  "crates/agentos-rfb",
+  # Tauri shell (apps/agentos-tauri) builds outside the default workspace until
+  # crate versions are pinned in CI — see docs/RUST_MIGRATION.md.
+]
+default-members = [
+  "crates/agentos-shared",
+  "crates/agentos-agent-core",
+  "crates/agentos-inference",
+  "crates/agentos-tools",
+  "crates/agentos-box-host",
+  "crates/agentos-rfb",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+regex = "1.11.1"
+thiserror = "2.0.12"
+# Reserved for later crates (inference streaming, gateway, logging):
+# tokio = { version = "1.44.2", features = ["rt-multi-thread", "macros"] }
+# tracing = "0.1.41"
+# anyhow = "1.0.98"

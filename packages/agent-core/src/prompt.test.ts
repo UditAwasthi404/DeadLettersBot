@@ -70,6 +70,9 @@ describe("buildDefaultSections / assembleTurnAction / hashSection", () => {
     const s = buildDefaultSections(bot({ name: "Nova" }));
     expect(s.base).toContain("You are Nova, an AI agent");
     expect(s.base).not.toContain("[BOT_NAME]");
+    expect(s.base).toContain("not a chatbot");
+    expect(s.base).toContain("Computer");
+    expect(s.computer).toContain("Default to Computer");
     expect(s.computer.length).toBeGreaterThan(0);
   });
 

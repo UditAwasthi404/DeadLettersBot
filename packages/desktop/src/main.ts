@@ -1,9 +1,11 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { BrowserWindow, app, ipcMain, nativeTheme, session, shell } from "electron";
+import { BrowserWindow, app, ipcMain, nativeTheme, screen, session, shell } from "electron";
 import WebSocket from "ws";
+import { nativeWindowTokens } from "./design/tokens";
 import { type LocalMachineAccess, runLocalCommand } from "./local-daemon";
+import { parseWindowState, type WindowState } from "./window-state";
 
 const SESSION_URL = "https://session.agentos.desktop";
 
@@ -59,27 +61,41 @@ function localResult(
 
 function createWindow(): void {
   const darwin = process.platform === "darwin";
+  const statePath = join(app.getPath("userData"), "window-state.json");
+  let saved: WindowState | null = null;
+  try {
+    saved = parseWindowState(JSON.parse(readFileSync(statePath, "utf8")), screen.getAllDisplays().map((display) => display.workArea), { width: nativeWindowTokens.size.minWidth, height: nativeWindowTokens.size.minHeight });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("[desktop] window state unavailable", error);
+  }
   windowRef = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    minWidth: 980,
-    minHeight: 680,
-    backgroundColor: "#141414",
+    width: nativeWindowTokens.size.width,
+    height: nativeWindowTokens.size.height,
+    ...saved?.bounds,
+    minWidth: nativeWindowTokens.size.minWidth,
+    minHeight: nativeWindowTokens.size.minHeight,
+    backgroundColor: nativeWindowTokens.color.dark.app,
     ...(darwin
       ? {
           titleBarStyle: "hiddenInset" as const,
           trafficLightPosition: { x: 16, y: 18 },
         }
-      : {
-          titleBarStyle: "hidden" as const,
-          titleBarOverlay: { color: "#1b1b1c", symbolColor: "#a7a6a3", height: 56 },
-        }),
+      : { frame: false }),
     webPreferences: {
       preload: join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+  if (saved?.maximized) windowRef.maximize();
+  const currentWindow = windowRef;
+  currentWindow.on("close", () => {
+    try {
+      writeFileSync(statePath, JSON.stringify({ bounds: currentWindow.getNormalBounds(), maximized: currentWindow.isMaximized() }));
+    } catch (error) {
+      console.warn("[desktop] could not save window state", error);
+    }
   });
   const devUrl =
     process.env.VITE_DEV_SERVER_URL ?? (!app.isPackaged ? "http://127.0.0.1:5173" : undefined);
@@ -117,7 +133,7 @@ function createWindow(): void {
               minHeight: 600,
               resizable: true,
               autoHideMenuBar: true,
-              backgroundColor: "#07070b",
+              backgroundColor: nativeWindowTokens.color.dark.app,
               parent: windowRef ?? undefined,
               modal: false,
               webPreferences: {
@@ -494,15 +510,17 @@ ipcMain.handle("app:restart", () => {
 ipcMain.handle("app:set-theme", (_event, theme: "light" | "dark") => {
   if (theme !== "light" && theme !== "dark") return;
   nativeTheme.themeSource = theme;
-  const light = theme === "light";
-  windowRef?.setBackgroundColor(light ? "#f2f1ee" : "#141414");
-  if (process.platform !== "darwin") {
-    windowRef?.setTitleBarOverlay({
-      color: light ? "#faf9f7" : "#1b1b1c",
-      symbolColor: light ? "#58585d" : "#a7a6a3",
-      height: 56,
-    });
-  }
+  windowRef?.setBackgroundColor(nativeWindowTokens.color[theme].app);
+});
+
+ipcMain.handle("app:window-control", (event, action: unknown) => {
+  if (event.sender !== windowRef?.webContents) throw new Error("window controls are unavailable here");
+  if (action === "minimize") windowRef.minimize();
+  else if (action === "maximize") {
+    if (windowRef.isMaximized()) windowRef.unmaximize();
+    else windowRef.maximize();
+  } else if (action === "close") windowRef.close();
+  else throw new Error("invalid window action");
 });
 
 ipcMain.handle("app:open-external", async (event, value: unknown) => {

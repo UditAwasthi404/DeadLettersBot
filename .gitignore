@@ -9,3 +9,10 @@ release/
 .DS_Store
 coverage/
 *.tsbuildinfo
+.tmp/
+.tmp-vm-config.json
+tmp/
+.qoder/
+.kiro/
+target/
+/target/

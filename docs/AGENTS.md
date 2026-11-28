@@ -614,7 +614,7 @@ These are different and must not be confused:
 When Kiro or any AI assistant is working on the AgentOS codebase itself, the same rules apply to the assistant's own context usage:
 
 - Read only the files the current task touches. Do not read the full `docs/` folder on every prompt.
-- The steering file (`.kiro/steering/ponytail.md`) is always active. Apply lazy-code rules: use what exists, add only what is needed, no speculative abstraction.
+- Apply lazy-code rules: use what exists, add only what is needed, no speculative abstraction.
 - When resuming work, read `docs/BUILD_PLAN.md` for current phase and milestone status. Do not re-read `ARCHITECTURE.md` or `TRD.md` unless the task requires a specific requirement lookup.
 - After completing a task, write a one-sentence summary of what changed to the relevant section of `BUILD_PLAN.md` (check the milestone off). This is the checkpoint for the next session.
 - If a doc needs updating, edit only the changed section — not the whole file.

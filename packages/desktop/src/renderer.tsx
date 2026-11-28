@@ -44,9 +44,13 @@ import { UpdateBanner } from "./UpdateBanner.tsx";
 import { AgentAvatar } from "./components/AgentAvatar.tsx";
 import {
   AgentScreen,
+  type AgentPointer,
   type DesktopApp,
   type ScreenPhase,
+  type ScreenPresentation,
 } from "./components/AgentScreen.tsx";
+import type { PlanStep } from "./components/PlanChecklist.tsx";
+import type { TimelineEvent } from "./components/Timeline.tsx";
 import { AppButton } from "./components/AppButton.tsx";
 import { AuthShell } from "./components/AuthShell.tsx";
 import { BotRow } from "./components/BotRow.tsx";
@@ -58,9 +62,15 @@ import { ThemeToggle } from "./components/ThemeToggle.tsx";
 import { ToastStack } from "./components/Toast.tsx";
 import { Welcome } from "./components/Welcome.tsx";
 import { RawVncSession } from "./rfb.ts";
-import { ThemeController } from "./theme.tsx";
+import { ThemeController, useThemeMode } from "./theme.tsx";
+import { CommandPalette } from "./command-palette.tsx";
+import { WindowTitlebar } from "./titlebar.tsx";
+import { t } from "./i18n/index.ts";
 import "@radix-ui/themes/styles.css";
 import "./style.css";
+import "./design/tokens.css";
+import "./shell.css";
+import "./components.css";
 
 const ClerkBoundary = React.lazy(() =>
   import("./ClerkBoundary.tsx").then((module) => ({ default: module.ClerkBoundary })),
@@ -527,6 +537,15 @@ interface Frame {
 }
 
 function App({ clerk }: { clerk?: ClerkBridge } = {}) {
+  const { cycle: cycleTheme } = useThemeMode();
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("agentos:sidebar-collapsed") === "1"; } catch { return false; }
+  });
+  const shortcutActionsRef = useRef<Record<string, () => void>>({});
+  useEffect(() => {
+    try { localStorage.setItem("agentos:sidebar-collapsed", sidebarCollapsed ? "1" : "0"); } catch { }
+  }, [sidebarCollapsed]);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8787");
   const [token, setToken] = useState("");
   const [status, setStatus] = useState("disconnected");
@@ -685,6 +704,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }
   const [allowLocalSession, setAllowLocalSession] = useState(false);
   const [screenMode, setScreenMode] = useState<null | "view" | "control" | "handoff">(null);
+  const [screenPresentation, setScreenPresentation] = useState<ScreenPresentation>("docked");
+  const [stripCollapsed, setStripCollapsed] = useState(false);
+  const [livePlan, setLivePlan] = useState<PlanStep[]>([]);
+  const [actionTimeline, setActionTimeline] = useState<TimelineEvent[]>([]);
+  const [agentPointer, setAgentPointer] = useState<AgentPointer | null>(null);
   const [agentActivity, setAgentActivity] = useState("");
   const [stepProgress, setStepProgress] = useState<{ step: number; stepBudget: number } | null>(
     null,
@@ -756,8 +780,28 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         if (typeof frame.step === "number" && typeof frame.stepBudget === "number")
           setStepProgress({ step: frame.step, stepBudget: frame.stepBudget });
         if (frame.label) setAgentActivity(frame.label);
+        if (typeof frame.plan === "string" && frame.plan.trim()) {
+          setLivePlan(planStringToSteps(frame.plan, frame.step));
+        }
+        if (frame.label) {
+          const stamp = new Date();
+          setActionTimeline((rows) =>
+            [
+              {
+                id: crypto.randomUUID(),
+                title: frame.label ?? "Action",
+                time: stamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+                dateTime: stamp.toISOString(),
+                tone: "accent" as const,
+              },
+              ...rows,
+            ].slice(0, 20),
+          );
+        }
       } else if (frame.type === "toolStart") {
         setAgentActivity(activityLabel(frame.toolName, frame.params));
+        const pointer = pointerFromToolParams(frame.params);
+        if (pointer) setAgentPointer(pointer);
         setItems((old) => [
           ...old,
           {
@@ -775,6 +819,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             ? "Checking the screen"
             : current,
         );
+        setAgentPointer((current) => (current?.click ? { ...current, click: false } : current));
         setItems((old) => [
           ...old,
           {
@@ -813,10 +858,14 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         setActiveRun("");
         setAgentActivity("");
         setPausedRun(false);
+        setLivePlan([]);
+        setActionTimeline([]);
+        setAgentPointer(null);
       } else if (frame.type === "error") {
         setError(`${frame.code ?? "error"}: ${frame.message ?? "request failed"}`);
         setActiveRun("");
         setAgentActivity("");
+        setAgentPointer(null);
       }
     });
     const stopStatus = window.agentOS.onStatus(setStatus);
@@ -1003,8 +1052,13 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
         setBotDraftOpen(true);
       } else if (key === "k") {
         event.preventDefault();
-        showWorkspace("chat");
-        window.setTimeout(() => composerRef.current?.focus(), 0);
+        setCommandOpen((open) => !open);
+      } else if (event.shiftKey && key === "s") {
+        event.preventDefault();
+        shortcutActionsRef.current.screen?.();
+      } else if (/^[1-9]$/.test(key)) {
+        event.preventDefault();
+        shortcutActionsRef.current[key]?.();
       } else if (key === ",") {
         event.preventDefault();
         setConnectOpen(true);
@@ -2695,7 +2749,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                   : workspace === "model"
                     ? "Model & privacy"
                     : (selectedBot?.name ?? "Choose a bot");
-  const headerTitle = selectedBot?.name ?? workspaceTitle;
+  const headerTitle = workspace === "chat" ? (selectedBot?.name ?? workspaceTitle) : workspaceTitle;
   const headerSubtitle = selectedBot
     ? workspace === "chat" && activeRun
       ? agentActivity || "Working"
@@ -2777,6 +2831,20 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
     },
   ];
 
+  const toggleScreen = () => {
+    if (!botId || screenMode === "handoff") return;
+    setScreenMode((mode) => (mode === "view" || mode === "control" ? null : "view"));
+  };
+  shortcutActionsRef.current = Object.fromEntries(navItems.map((item, index) => [String(index + 1), () => { if (!item.disabled) item.onClick(); }]));
+  shortcutActionsRef.current.screen = toggleScreen;
+  const commands = [
+    ...navItems.filter((item) => !item.disabled).map((item, index) => ({ id: `page:${item.id}`, label: item.label, group: "Pages", shortcut: `Ctrl+${index + 1}`, run: item.onClick })),
+    ...bots.map((bot) => ({ id: `bot:${bot.id}`, label: bot.name, group: "Bots", run: () => { setBotId(bot.id); setItems([]); showWorkspace("chat"); } })),
+    { id: "theme", label: t("toggleTheme"), group: "Actions", run: cycleTheme },
+    ...(botId ? [{ id: "screen", label: t(screenActive ? "hideScreen" : "showScreen"), group: "Actions", shortcut: "Ctrl+Shift+S", run: toggleScreen }] : []),
+    ...(token ? [{ id: "new-bot", label: t("newBot"), group: "Actions", shortcut: "Ctrl+N", run: () => { setBotDraftName(""); setBotDraftOpen(true); } }] : []),
+  ];
+
   useEffect(() => {
     if (workspace !== "subagents" || !signedIn || !token) return;
     const timer = window.setInterval(() => {
@@ -2789,7 +2857,18 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
   }, [workspace, signedIn, token, baseUrl]);
 
   return (
-    <div className="app-shell">
+    <div className={sidebarCollapsed ? "app-shell is-sidebar-collapsed" : "app-shell"}>
+      <WindowTitlebar
+        collapsed={sidebarCollapsed}
+        onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
+        onSearch={() => setCommandOpen(true)}
+        onError={(err) => setError(err instanceof Error ? err.message : String(err))}
+      />
+      <CommandPalette
+        open={commandOpen}
+        onOpenChange={setCommandOpen}
+        commands={commands}
+      />
       {!signedIn && clerk?.enabled && (
         <AuthShell>
           <div className="auth-card">
@@ -2976,7 +3055,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               key={item.id}
               icon={item.icon}
               label={item.label}
-              tooltip={item.tooltip}
+              tooltip={`${item.tooltip} · ${window.agentOS.platform === "darwin" ? "⌘" : "Ctrl+"}${navItems.indexOf(item) + 1}`}
               active={workspace === item.id}
               disabled={item.disabled}
               onClick={item.onClick}
@@ -3112,7 +3191,25 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </Popover.Root>
         </div>
       </aside>
-      <main className="chat-panel">
+      <main
+        className={[
+          "chat-panel",
+          screenMode &&
+          screenMode !== "handoff" &&
+          screenMode !== "control" &&
+          screenPresentation !== "fullscreen"
+            ? "has-computer-dock"
+            : "",
+          screenMode &&
+          screenMode !== "handoff" &&
+          screenMode !== "control" &&
+          screenPresentation === "expanded"
+            ? "is-computer-expanded"
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <ErrorBoundary key={workspace} fallbackTitle="This panel hit a display error">
           <UpdateBanner
             ready={updateReady}
@@ -3130,6 +3227,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               </div>
             </div>
             <div className="header-actions">
+              {workspace === "chat" && <span className="chat-status" role="status" aria-live="polite">{handoff ? t("waiting") : activeRun ? `${t("working")}${stepProgress ? ` · ${stepProgress.step}/${stepProgress.stepBudget}` : ""}` : t("idle")}</span>}
               {showJumpToLatest && workspace === "chat" && (
                 <AppButton
                   type="button"
@@ -3173,7 +3271,7 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
                 disabled={screenMode === "handoff"}
               >
                 <Monitor className="glyph" aria-hidden="true" />
-                {screenMode === "view" || screenMode === "control" ? "Hide screen" : "Agent screen"}
+                {t(screenMode === "view" || screenMode === "control" ? "hideScreen" : "showScreen")}
               </AppButton>
             </div>
           </header>
@@ -3422,6 +3520,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
           </Dialog.Root>
           {screenMode && screenBotId && (
             <AgentScreen
+              presentation={
+                screenMode === "handoff" || screenMode === "control"
+                  ? "fullscreen"
+                  : screenPresentation
+              }
               mode={screenMode}
               phase={screenPhase}
               botName={bots.find((bot) => bot.id === screenBotId)?.name ?? "Agent"}
@@ -3434,10 +3537,20 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
               reason={handoff?.reason}
               interactive={screenInteractive}
               activeApp={desktopApp}
+              planSteps={livePlan}
+              stepProgress={stepProgress}
+              timeline={actionTimeline}
+              agentPointer={agentPointer}
+              stripCollapsed={stripCollapsed}
               canvasRef={setScreenCanvas}
               paused={pausedRun}
               onRetry={() => setScreenAttempt((attempt) => attempt + 1)}
-              onClose={() => setScreenMode(null)}
+              onClose={() => {
+                setScreenMode(null);
+                setScreenPresentation("docked");
+              }}
+              onPresentationChange={setScreenPresentation}
+              onToggleStrip={() => setStripCollapsed((value) => !value)}
               onFocusApp={(app) => {
                 setDesktopApp(app);
                 if (!token || !baseUrl || !screenBotId) return;
@@ -4963,7 +5076,11 @@ function App({ clerk }: { clerk?: ClerkBridge } = {}) {
             onDismissError={() => setError("")}
             onDismissNotice={() => setNotice("")}
           />
-          {workspace === "chat" && !screenMode && (
+          {workspace === "chat" &&
+            (!screenMode ||
+              (screenPresentation !== "fullscreen" &&
+                screenMode !== "handoff" &&
+                screenMode !== "control")) && (
             <form
               className={`composer${dragOver ? " dragover" : ""}`}
               onSubmit={(e) => void sendPrompt(e)}
@@ -5370,6 +5487,52 @@ function appendAssistantDelta(
   return next;
 }
 
+function planStringToSteps(plan: string, currentStep?: number): PlanStep[] {
+  const lines = plan
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:\d+[.)]\s*|[-*]\s+)/, "").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const active = typeof currentStep === "number" ? Math.max(0, currentStep - 1) : 0;
+  return lines.map((title, index) => ({
+    id: `plan-${index}`,
+    title,
+    state: index < active ? "completed" : index === active ? "running" : "pending",
+  }));
+}
+
+function pointerFromToolParams(params: unknown): AgentPointer | null {
+  if (!params || typeof params !== "object") return null;
+  const args = params as {
+    action?: unknown;
+    x?: unknown;
+    y?: unknown;
+    toX?: unknown;
+    toY?: unknown;
+    point?: { x?: unknown; y?: unknown };
+  };
+  const action = typeof args.action === "string" ? args.action : "";
+  const x =
+    typeof args.x === "number"
+      ? args.x
+      : typeof args.toX === "number"
+        ? args.toX
+        : typeof args.point?.x === "number"
+          ? args.point.x
+          : null;
+  const y =
+    typeof args.y === "number"
+      ? args.y
+      : typeof args.toY === "number"
+        ? args.toY
+        : typeof args.point?.y === "number"
+          ? args.point.y
+          : null;
+  if (x === null || y === null) return null;
+  const click = /click|drag|tap/i.test(action);
+  return { x, y, click };
+}
+
 function activityLabel(toolName: string | undefined, params: unknown): string {
   const args =
     params && typeof params === "object"
@@ -5449,13 +5612,30 @@ function Root() {
   );
 }
 
+const GalleryPage = React.lazy(() => import("./gallery.tsx"));
+
+function GalleryRoot() {
+  return (
+    <React.Suspense fallback={<div className="auth-loading">Loading gallery…</div>}>
+      <GalleryPage />
+    </React.Suspense>
+  );
+}
+
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("root mount node is missing");
+const isGallery = window.location.pathname === "/__gallery" || window.location.hash === "#/__gallery";
 createRoot(rootElement).render(
   <React.StrictMode>
     <ThemeController>
       <ErrorBoundary fallbackTitle="AgentOS hit a display error">
-        {typeof window.agentOS?.onFrame === "function" ? <Root /> : <DesktopRequired />}
+        {isGallery ? (
+          <GalleryRoot />
+        ) : typeof window.agentOS?.onFrame === "function" ? (
+          <Root />
+        ) : (
+          <DesktopRequired />
+        )}
       </ErrorBoundary>
     </ThemeController>
   </React.StrictMode>,
