@@ -9,3 +9,5 @@ release/
 .DS_Store
 coverage/
 *.tsbuildinfo
+.tmp/
+target/
