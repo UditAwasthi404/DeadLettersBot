@@ -1,0 +1,13 @@
+{
+  "label": "m1-baseline",
+  "capturedAt": "2026-11-28",
+  "platform": "win32",
+  "medianInteractiveMs": 6538.9,
+  "browserWorkingSetMiB": 137.4,
+  "allProcessesWorkingSetMiB": 616.1,
+  "warmEnsureBrowserMs": 3152.5,
+  "vmImageBeforeGb": 1.53,
+  "vmImageAfterGb": 1.93,
+  "source": "node bench/desktop-launch.mjs m1-baseline + docker images / timed ensure-browser",
+  "notes": "Interactive time includes Playwright Electron launch overhead with warm Vite. Idle RAM target <150MB is for future Tauri; Electron Browser process alone is ~137MB."
+}

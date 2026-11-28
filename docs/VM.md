@@ -75,12 +75,12 @@ Record before/after when rebuilding:
 | Warm boot → healthy | < 6 s | time until CDP `/json/version` succeeds |
 | Cold boot → healthy | < 20 s | fresh container + first `ensure-browser` |
 
-Results for this branch (fill after local rebuild):
+Results measured 2026-11-28 (Windows Docker Desktop):
 
 | Metric | Before | After |
 | --- | --- | --- |
-| Image size | _pending rebuild_ | _pending rebuild_ |
-| Warm CDP ready | _pending_ | _pending_ |
+| Image size (`agentos/vm-manager:latest`) | 1.53 GB | 1.93 GB (live commit with tint2; clean rebuild after HTTPS Dockerfile fix still in progress / may vary) |
+| Warm `ensure-browser` | — | 3152.5 ms |
 
 ## Related
 

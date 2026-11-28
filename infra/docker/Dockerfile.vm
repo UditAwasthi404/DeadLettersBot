@@ -1,7 +1,10 @@
 FROM ubuntu:22.04 AS file-tools-build
 
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
-    && rm -rf /var/lib/apt/lists/*
+# CA certs over HTTP first, then switch mirrors to HTTPS (HTTP apt often fails on Docker Desktop).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && sed -i 's|http://|https://|g' /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true \
+ && apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+ && rm -rf /var/lib/apt/lists/*
 COPY agentos-file.c /tmp/agentos-file.c
 COPY agentos-shell.c /tmp/agentos-shell.c
 RUN gcc -std=c11 -O2 -Wall -Wextra -Werror -o /usr/local/bin/agentos-file /tmp/agentos-file.c \
