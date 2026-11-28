@@ -1,0 +1,9 @@
+[package]
+name = "agentos-box-host"
+description = "AgentOS gateway host (Rust port scaffold)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agentos-shared = { path = "../agentos-shared" }

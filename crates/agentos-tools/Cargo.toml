@@ -1,0 +1,6 @@
+[package]
+name = "agentos-tools"
+description = "AgentOS tool implementations (Rust port scaffold)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

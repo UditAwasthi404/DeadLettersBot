@@ -1,0 +1,9 @@
+[package]
+name = "agentos-rfb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "VNC/RFB client primitives for AgentOS agent screen streaming"
+
+[dependencies]
+thiserror = { workspace = true }

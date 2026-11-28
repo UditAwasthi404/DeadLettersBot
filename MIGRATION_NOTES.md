@@ -103,9 +103,25 @@ Re-verify this table at the end of each milestone. Mark ✕ only when intentiona
 3. No Chromium first-run / make-default prompts on a fresh profile.
 4. `AGENTOS_DISABLE_GPU=0` omits `--disable-gpu` when testing GPU paths.
 
-### M4–M6 — Rust / Tauri / cleanup
+### M4 — Rust core (partial — clean stop)
 
-Scaffold on PR #7 is reference only until M4.
+**Delivered**
+
+- Cargo workspace from PR #7: `agentos-shared`, `agentos-agent-core`, `agentos-inference`, `agentos-tools`, `agentos-box-host`, Tauri app scaffold.
+- `agentos-rfb`: Raw + CopyRect helpers with unit tests (handshake/Tight/ZRLE still open).
+- `AgentEvent` JSON round-trip tests in `agentos-shared`.
+- `docs/RUST_MIGRATION.md` updated.
+
+**Tests (local):** `cargo test --workspace` — agent-core 4, shared 2, rfb 2, tools 1 (9 Rust unit tests). Electron/UI path unchanged.
+
+**Deferred**
+
+- Port of all 32 tool tests + inference HTTP fixtures + criterion benches (≤0.5 ms reassembly target).
+- M5 Tauri UI switch and M6 Electron removal.
+
+### M5–M6 — Tauri switch / cleanup
+
+Not started. Electron + TS backend remain the supported path.
 
 ## Benchmarks
 
